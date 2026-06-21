@@ -248,12 +248,20 @@ src/radio/
         key[..4]=a0a1a2a3`; joiner `JOINED *** assigned=AA key[..4]=a0a1a2a3` — keys match, both
         commit. Lost-confirm (window discards) + two-joiner (first wins) folded into the soak (Step 18).
 
-- [ ] **15. Topologies (star + P2P) + full `Net` API.** `net/topology.rs` policy; finish
-  `net/mod.rs` to the complete §10 API (`add_peer`/`remove_peer`, `signal_quality`, role handling,
-  ≤64 star / ≤8 P2P limits).
-  - [ ] **Verify** (`net_star` + `net_p2p`): Star — multiple Nodes (re-flash the spare board with
-        different IDs across runs) each do confirmed uplink + pull downlink against the Gateway. P2P —
-        two boards as peers, one listening, confirmed exchange both directions under the per-link key.
+- [x] **15. Peer table + star/P2P topologies.** `net.rs` per-peer `Peer{id,key,last_seen}`
+  table (`MAX_PEERS=64`; star ≤64 / P2P ≤8 by policy) with `add_peer`/`remove_peer`/`peer_count`/
+  `peer_last_seen`. Each registered peer overrides the default key and gets its own replay lane
+  (per-peer last-seen persisted at `KEY_LASTSEEN_BASE+slot`); unregistered peers use the
+  `NetConfig::key` default lane (single-link case, backward compatible). `recv` peeks the clear
+  header to pick the key by `src`; `send`/`bulk`/`await_ack`/`send_ack` key by peer. Examples
+  `net_star`, `net_p2p`.
+  - [x] **Verify** (two boards): ✅ **Star** (`net_star`) — gateway holds 2 peers under distinct
+        keys; decoded node A under `KEY_A` (cnt 6149) then node B under `KEY_B` (cnt 7170, separate
+        lane), each ACKed; B only decodes because `KEY_B` is registered (default is `KEY_A`). ✅
+        **P2P** (`net_p2p`) — A `PING Delivered`+`rx PONG`, B `rx PING(ACKed)`+`PONG Delivered`,
+        bidirectional confirmed under the shared link key via the table. ✅ Regression: `net_confirmed`
+        still `Delivered` (59 ms) on the default lane. (`signal_quality` already exposed via
+        `Received::rssi_dbm`; richer LQI/SQI is in `radio.rssi/quality`.)
 
 ### Phase 5 — Polish & robustness
 

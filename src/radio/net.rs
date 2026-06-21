@@ -8,8 +8,10 @@
 //! the counter/replay rule, and auto-ACKs a confirmed frame — caching the ACK so
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
-//! This step uses a single shared per-link key and in-RAM counters; the per-peer
-//! key table and EEPROM persistence are added in later steps (§7.4).
+//! Keys are per-peer: [`Net::add_peer`] binds an `id` to its own AES key and
+//! replay lane (star ≤64 / P2P ≤8, §7.2); any unregistered peer falls back to the
+//! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
+//! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, §7.4).
 
 #![allow(dead_code)]
 
@@ -70,6 +72,22 @@ const JOIN_RESP_WINDOW: Duration = Duration::from_millis(300);
 /// How long the host waits for a JOIN_CONFIRM after a JOIN_RESP.
 const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
 
+/// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
+/// holds up to 8 peers (RADIO.md §7.2). One table size covers both — the topology
+/// is a usage policy, not a different type.
+pub const MAX_PEERS: usize = 64;
+/// Base Kv key for per-peer last-seen persistence (slot `i` → `KEY_LASTSEEN_BASE + i`).
+const KEY_LASTSEEN_BASE: u16 = 0x5300;
+
+/// A registered peer: its ID, per-peer AES key, and replay state (§7.2/§7.4).
+#[derive(Clone, Copy)]
+struct Peer {
+    id: u32,
+    key: [u8; 16],
+    last_seen: u32,
+    accepts: u32,
+}
+
 /// Outcome of a [`Net::send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendResult {
@@ -107,7 +125,10 @@ impl Received {
 pub struct NetConfig {
     /// This device's 32-bit ID (rides in the clear header).
     pub my_id: u32,
-    /// Shared per-link AES-128 key (per-peer key table is a later step).
+    /// Default AES-128 key, used for any peer not explicitly registered via
+    /// [`Net::add_peer`]. In a single-link setup this is the link key; in a star
+    /// it is the gateway's own/fallback key (each node is registered with its
+    /// per-node key).
     pub key: [u8; 16],
     pub band: Band,
     pub channel: u8,
@@ -118,15 +139,19 @@ pub struct Net {
     radio: Spirit1,
     ccm: Ccm,
     my_id: u32,
-    key: [u8; 16],
+    /// Default key for unregistered peers (see [`NetConfig::key`]).
+    default_key: [u8; 16],
+    /// Per-peer (id, key, last-seen) table; a registered peer overrides the
+    /// default key and gets its own replay lane (§7.2/§7.4).
+    peers: [Option<Peer>; MAX_PEERS],
+    /// Replay last-seen for senders not in the peer table (the single-link lane).
+    default_last_seen: u32,
+    /// Accepted-transfer count on the default lane since its last persist.
+    default_accepts: u32,
     /// Monotonic TX counter, advanced by one per transfer (§6).
     tx_counter: u32,
     /// Highest reserved (persisted) counter value; `tx_counter < reserve_limit`.
     reserve_limit: u32,
-    /// Per-peer last-seen counter (single peer for now).
-    last_seen: u32,
-    /// Accepted-transfer count since the last last-seen persist.
-    accepts: u32,
     /// EEPROM-backed counter persistence.
     kv: Kv<'static>,
     /// EU duty-cycle governor (airtime budget for all TX).
@@ -135,8 +160,9 @@ pub struct Net {
     /// byte-identical retransmit (§7.3).
     cached_ack: [u8; MAX_FRAME],
     cached_ack_len: usize,
-    /// The acked counter the cached ACK corresponds to (0 = none cached).
+    /// The (src, acked counter) the cached ACK corresponds to (0 = none cached).
     cached_ack_for: u32,
+    cached_ack_src: u32,
     /// Simple LCG state for the retransmit backoff (seeded from my_id).
     rng: u32,
 }
@@ -168,16 +194,18 @@ impl Net {
             radio,
             ccm: Ccm::new(),
             my_id: cfg.my_id,
-            key: cfg.key,
+            default_key: cfg.key,
+            peers: [None; MAX_PEERS],
+            default_last_seen: last_seen,
+            default_accepts: 0,
             tx_counter: resume,
             reserve_limit,
-            last_seen,
-            accepts: 0,
             kv,
             duty: DutyGovernor::eu(),
             cached_ack: [0; MAX_FRAME],
             cached_ack_len: 0,
             cached_ack_for: 0,
+            cached_ack_src: 0,
             rng: cfg.my_id | 1,
         })
     }
@@ -197,9 +225,92 @@ impl Net {
         self.reserve_limit
     }
 
-    /// Current per-peer last-seen counter.
+    /// Current last-seen counter on the default lane (single-link diagnostics).
     pub fn last_seen(&self) -> u32 {
-        self.last_seen
+        self.default_last_seen
+    }
+
+    /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
+    /// its own replay lane. The peer's persisted last-seen is restored. Returns
+    /// `false` only if the table is full (and the id is new). Up to
+    /// [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, §7.2).
+    pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
+        if let Some(i) = self.peer_slot(id) {
+            self.peers[i].as_mut().unwrap().key = *key; // re-key in place
+            return true;
+        }
+        for i in 0..MAX_PEERS {
+            if self.peers[i].is_none() {
+                let last_seen = read_u32(&self.kv, KEY_LASTSEEN_BASE + i as u16).unwrap_or(0);
+                self.peers[i] = Some(Peer { id, key: *key, last_seen, accepts: 0 });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove a peer. Returns whether it was present. (Its persisted last-seen is
+    /// left in EEPROM; re-adding the peer resumes the replay window.)
+    pub fn remove_peer(&mut self, id: u32) -> bool {
+        if let Some(i) = self.peer_slot(id) {
+            self.peers[i] = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of registered peers.
+    pub fn peer_count(&self) -> usize {
+        self.peers.iter().filter(|p| p.is_some()).count()
+    }
+
+    /// Last-seen counter for a registered peer (`None` if not registered).
+    pub fn peer_last_seen(&self, id: u32) -> Option<u32> {
+        self.peer_slot(id).map(|i| self.peers[i].as_ref().unwrap().last_seen)
+    }
+
+    /// Table slot holding `id`, if registered.
+    fn peer_slot(&self, id: u32) -> Option<usize> {
+        self.peers.iter().position(|p| matches!(p, Some(pe) if pe.id == id))
+    }
+
+    /// AES key for `id`: the peer's key if registered, else the default key.
+    fn key_for(&self, id: u32) -> [u8; 16] {
+        match self.peer_slot(id) {
+            Some(i) => self.peers[i].as_ref().unwrap().key,
+            None => self.default_key,
+        }
+    }
+
+    /// Last-seen for `src`'s replay lane (peer lane if registered, else default).
+    fn lane_last_seen(&self, src: u32) -> u32 {
+        match self.peer_slot(src) {
+            Some(i) => self.peers[i].as_ref().unwrap().last_seen,
+            None => self.default_last_seen,
+        }
+    }
+
+    /// Record acceptance of `counter` from `src`: advance that lane's last-seen
+    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, §7.4).
+    fn lane_accept(&mut self, src: u32, counter: u32) {
+        match self.peer_slot(src) {
+            Some(i) => {
+                let p = self.peers[i].as_mut().unwrap();
+                p.last_seen = counter;
+                p.accepts = p.accepts.wrapping_add(1);
+                if p.accepts % P == 0 {
+                    let _ = self.kv.set_bytes(KEY_LASTSEEN_BASE + i as u16, &counter.to_le_bytes());
+                }
+            }
+            None => {
+                self.default_last_seen = counter;
+                self.default_accepts = self.default_accepts.wrapping_add(1);
+                if self.default_accepts % P == 0 {
+                    let _ = self.kv.set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
+                }
+            }
+        }
     }
 
     /// Advance the TX counter, re-reserving + persisting the next block when the
@@ -234,8 +345,9 @@ impl Net {
             counter,
             bulk_index: None,
         };
+        let key = self.key_for(dest);
         let mut frame_buf = [0u8; MAX_FRAME];
-        let n = match frame::seal_frame(&mut self.ccm, &self.key, &hdr, data, &mut frame_buf) {
+        let n = match frame::seal_frame(&mut self.ccm, &key, &hdr, data, &mut frame_buf) {
             Ok(n) => n,
             Err(_) => return SendResult::Error(RadioError::TooLong),
         };
@@ -288,21 +400,21 @@ impl Net {
         let mut buf = [0u8; MAX_FRAME];
         let (len, q) = self.radio.rx(&mut buf, timeout).await.ok()?;
 
-        // CCM-verify first (authenticates the header incl. counter), then decide.
-        let (hdr, range) = frame::open_frame(&mut self.ccm, &self.key, &mut buf[..len]).ok()?;
-        if hdr.dest != self.my_id {
+        // Peek the clear header (AAD) to learn the src, then CCM-open with that
+        // peer's key — a registered peer uses its own key, others the default.
+        let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
+        if peek.dest != self.my_id {
             return None; // not for us
         }
+        let key = self.key_for(peek.src);
 
-        if hdr.counter > self.last_seen {
-            // Fresh — accept, advance last-seen, ACK if requested.
-            self.last_seen = hdr.counter;
-            // Lazy-persist last-seen every P accepts → replay window ≤ P across a
-            // reboot (§7.4).
-            self.accepts = self.accepts.wrapping_add(1);
-            if self.accepts % P == 0 {
-                let _ = self.kv.set_bytes(KEY_LASTSEEN, &self.last_seen.to_le_bytes());
-            }
+        // CCM-verify first (authenticates the header incl. counter), then decide.
+        let (hdr, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
+
+        let last_seen = self.lane_last_seen(hdr.src);
+        if hdr.counter > last_seen {
+            // Fresh — accept, advance the sender's lane, ACK if requested.
+            self.lane_accept(hdr.src, hdr.counter);
             let confirmed = hdr.flags & flags::CONFIRMED != 0;
             if confirmed {
                 self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
@@ -318,7 +430,10 @@ impl Net {
                 len: plen,
                 buf: out,
             })
-        } else if hdr.counter == self.last_seen && self.cached_ack_for == hdr.counter {
+        } else if hdr.counter == last_seen
+            && self.cached_ack_for == hdr.counter
+            && self.cached_ack_src == hdr.src
+        {
             // Benign retransmit — re-send the cached identical ACK, do not re-deliver.
             let n = self.cached_ack_len;
             if n > 0 {
@@ -344,6 +459,7 @@ impl Net {
     /// chunk is pulled or the session idles out (30 s). Returns whether the last
     /// chunk was served.
     pub async fn bulk_serve(&mut self, dest: u32, data: &[u8]) -> bool {
+        let key = self.key_for(dest);
         let n_chunks = data.len().div_ceil(BULK_CHUNK).max(1);
         let announce_counter = self.tx_counter;
         self.advance_tx_counter();
@@ -373,9 +489,9 @@ impl Net {
             }
             // Re-announce until the first request arrives (handles a missed announce).
             if !got_req {
-                self.tx_frame(&ann_hdr, &ann).await;
+                self.tx_frame(&key, &ann_hdr, &ann).await;
             }
-            let Some((hdr, plen)) = self.rx_frame(BULK_SERVE_SLICE, &mut rxbuf).await else {
+            let Some((hdr, plen)) = self.rx_frame(&key, BULK_SERVE_SLICE, &mut rxbuf).await else {
                 continue;
             };
             if hdr.frame_type != FrameType::BulkReq || hdr.src != dest || hdr.dest != self.my_id {
@@ -402,7 +518,7 @@ impl Net {
                 bulk_index: Some(k as u32),
             };
             Timer::after(ACK_TURNAROUND).await; // let the requester switch to RX
-            self.tx_frame(&dhdr, &data[start..end]).await;
+            self.tx_frame(&key, &dhdr, &data[start..end]).await;
             if last {
                 served_last = true;
             }
@@ -415,10 +531,11 @@ impl Net {
     /// then pull each chunk with BULK_REQ (retransmitting on loss). Returns the
     /// total length received, or `None` on announce/chunk failure or `out` too small.
     pub async fn bulk_fetch(&mut self, src: u32, out: &mut [u8]) -> Option<usize> {
+        let key = self.key_for(src);
         // Wait for the bulk-announce.
         let mut abuf = [0u8; 8];
         let (total_len, session) = loop {
-            let (hdr, plen) = self.rx_frame(Duration::from_secs(5), &mut abuf).await?;
+            let (hdr, plen) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await?;
             if hdr.frame_type == FrameType::Data
                 && hdr.flags & flags::BULK_ANNOUNCE != 0
                 && hdr.src == src
@@ -449,11 +566,11 @@ impl Net {
             let req_payload = session.to_le_bytes();
             let mut got = false;
             for _ in 0..BULK_REQ_REPS {
-                if !self.tx_frame(&req_hdr, &req_payload).await {
+                if !self.tx_frame(&key, &req_hdr, &req_payload).await {
                     continue;
                 }
                 let mut dbuf = [0u8; BULK_CHUNK];
-                if let Some((dhdr, dlen)) = self.rx_frame(BULK_RESP_WINDOW, &mut dbuf).await {
+                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await {
                     if dhdr.frame_type == FrameType::BulkData
                         && dhdr.src == src
                         && dhdr.dest == self.my_id
@@ -599,11 +716,11 @@ impl Net {
         Some((hdr, plen))
     }
 
-    /// Seal `hdr`+`payload` and transmit it (no ACK), metered by the duty
-    /// governor. Returns whether it was actually sent.
-    async fn tx_frame(&mut self, hdr: &Header, payload: &[u8]) -> bool {
+    /// Seal `hdr`+`payload` under `key` and transmit it (no ACK), metered by the
+    /// duty governor. Returns whether it was actually sent.
+    async fn tx_frame(&mut self, key: &[u8; 16], hdr: &Header, payload: &[u8]) -> bool {
         let mut buf = [0u8; MAX_FRAME];
-        let Ok(n) = frame::seal_frame(&mut self.ccm, &self.key, hdr, payload, &mut buf) else {
+        let Ok(n) = frame::seal_frame(&mut self.ccm, key, hdr, payload, &mut buf) else {
             return false;
         };
         if !self.duty.try_tx(duty::frame_toa_ms(n)) {
@@ -612,12 +729,13 @@ impl Net {
         self.radio.tx(&buf[..n], false, TX_TIMEOUT).await.is_ok()
     }
 
-    /// Receive one frame and CCM-open it; copy the plaintext into `out`. Returns
-    /// the header and plaintext length. (Raw — no replay/ACK logic; for bulk.)
-    async fn rx_frame(&mut self, timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
+    /// Receive one frame and CCM-open it under `key`; copy the plaintext into
+    /// `out`. Returns the header and plaintext length. (Raw — no replay/ACK
+    /// logic; for bulk.)
+    async fn rx_frame(&mut self, key: &[u8; 16], timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
         let mut buf = [0u8; MAX_FRAME];
         let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
-        let (hdr, range) = frame::open_frame(&mut self.ccm, &self.key, &mut buf[..len]).ok()?;
+        let (hdr, range) = frame::open_frame(&mut self.ccm, key, &mut buf[..len]).ok()?;
         let plen = range.end - range.start;
         if plen > out.len() {
             return None;
@@ -628,11 +746,12 @@ impl Net {
 
     /// Wait `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
+        let key = self.key_for(dest);
         let mut buf = [0u8; MAX_FRAME];
         let Ok((len, _)) = self.radio.rx(&mut buf, ACK_WINDOW).await else {
             return false;
         };
-        let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &self.key, &mut buf[..len]) else {
+        let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
             return false;
         };
         if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
@@ -661,14 +780,16 @@ impl Net {
             counter: ack_counter,
             bulk_index: None,
         };
+        let key = self.key_for(dest);
         let mut ack = [0u8; MAX_FRAME];
-        if let Ok(n) = frame::seal_frame(&mut self.ccm, &self.key, &hdr, &payload, &mut ack) {
+        if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &payload, &mut ack) {
             // ACK airtime is governed too (§2.2); skip it if over budget — the
             // sender will retransmit. Cache it regardless for retransmit dedup.
             self.advance_tx_counter(); // ACK consumes a counter (its own, §6)
             self.cached_ack[..n].copy_from_slice(&ack[..n]);
             self.cached_ack_len = n;
             self.cached_ack_for = acked;
+            self.cached_ack_src = dest;
             if self.duty.try_tx(duty::frame_toa_ms(n)) {
                 let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
             }

@@ -117,19 +117,112 @@ let (hdr, range) = frame::open_frame(&mut ccm, &key, &mut buf[..n])?;  // verify
 Verified end-to-end (build → parse → open, tamper/wrong-key rejection, bulk index
 in nonce) by `examples/crypto_frame_loopback.rs`.
 
+## Network layer (`tower::radio::net`)
+
+`Net` wraps one radio + the CCM engine + EEPROM-backed counters and serializes one
+transfer at a time. It is the layer most applications use directly:
+
+```rust
+use tower::radio::net::{Net, NetConfig, SendResult};
+use tower::radio::config::Band;
+
+let mut net = Net::new(radio, Kv::new(b.storage),
+    NetConfig { my_id: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0 }).await?;
+
+// Confirmed send: TX the DATA frame, open a 200 ms ACK window, retransmit the
+// byte-identical frame up to `reps` times on loss (random 0–100 ms backoff).
+match net.send(GW_ID, b"hello", /*confirmed=*/ true, /*reps=*/ 3).await {
+    SendResult::Delivered    => {}                   // ACKed (or unconfirmed & sent)
+    SendResult::NotDelivered => {}                   // no ACK after all reps
+    SendResult::Busy | SendResult::DutyLimited => {} // CSMA / airtime budget
+    SendResult::Error(e)     => {}
+}
+
+// Receive: authenticate, apply the counter/replay rule, auto-ACK a confirmed
+// frame (caching it so a retransmit re-sends the identical ACK, no re-deliver).
+if let Some(rx) = net.recv(Duration::from_secs(10)).await {
+    let _ = (rx.src, rx.counter, rx.rssi_dbm, rx.confirmed, rx.data());
+}
+```
+
+**Counters, replay & persistence (§6/§7.4).** Every transfer consumes one
+monotonic TX counter; the counter feeds the nonce, so it must never repeat. The
+watermark is persisted *ahead* in blocks of `RESERVE=1024`, so after a reboot the
+device resumes **at or above** the last value it could have sent — never reusing
+one (at most one block is skipped per reboot). A receiver accepts only a strictly
+higher counter than it has seen from that sender and lazy-persists the last-seen
+every `P=32` accepts (replay window ≤ P across a receiver reboot). CCM verify
+happens *before* the replay comparison, so a forged frame can't poison the state.
+
+**Peer table & topologies (§7.2).** Keys are per-peer. `add_peer(id, &key)` binds
+a sender ID to its own AES key and its own replay lane; an unregistered peer falls
+back to the `NetConfig::key` default lane (the single-link case). One table holds
+up to `MAX_PEERS = 64`:
+
+```rust
+net.add_peer(NODE_A, &KEY_A);          // star hub: each node under its own key
+net.add_peer(NODE_B, &KEY_B);
+net.peer_count();  net.remove_peer(NODE_A);  net.peer_last_seen(NODE_B);
+```
+
+- **Star** (≤64 nodes): the gateway registers every node; `recv` reads the clear
+  `src`, picks that node's key, and tracks a separate last-seen per node. Each node
+  ships with only its own key.
+- **P2P** (≤8 peers): both ends `add_peer` the other under a shared link key and
+  exchange confirmed messages in either direction.
+
+**Bulk transfer / downlink pull (§7.5).** Large blobs are *pulled*: the sender
+announces `(length, session)`, the requester pulls each ≤64 B chunk with a
+`BULK_REQ(index)` and reassembles. The session counter + 24-bit chunk index keep
+every chunk's nonce unique; the sender frees an idle session after 30 s.
+
+```rust
+net.bulk_serve(NODE_ID, &blob).await;              // sender
+let n = net.bulk_fetch(GW_ID, &mut out).await;     // requester → bytes received
+```
+
+**OTA pairing (§7.6).** A 3-way JOIN under a fixed, **publicly-known** pairing key
+(`PAIRING_KEY`): `JOIN_REQ` → `JOIN_RESP`(assigned id + per-node key) →
+`JOIN_CONFIRM`, both sides committing only on the confirm. The pairing key gives
+the JOIN frames integrity but **no confidentiality** — a sniffer in range during
+the window recovers the delivered per-node key — and **no mutual auth**. Mitigate
+with a short, user-initiated window, proximity and reduced power; enable flash RDP
+for production key storage.
+
+```rust
+let proposed = net.open_pairing(Duration::from_secs(10), assign_id, &assign_key).await; // host
+let (id, key) = net.join(my_proposed_id, Duration::from_secs(10)).await?;               // joiner
+```
+
+**EU duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,
+bulk, pairing) against the 1 % / hour EU limit; a send that would exceed the budget
+returns `DutyLimited` instead of transmitting. Time-on-air is computed per frame
+length from the 19.2 kbps rate. Verified independently by `net_duty_kat`.
+
 ## Examples
 
-| Example | Boards | What it shows |
+Two-board examples are one source file built twice with a role feature (e.g.
+`TOWER_FEATURES=role-node just flash net_confirmed`).
+
+| Example | Boards / roles | What it shows |
 |---|---|---|
 | `radio_id` | 1 | device-ID check (SPI/CS/SDN bring-up) |
 | `radio_state` | 1 | READY/STANDBY transitions + nIRQ |
 | `radio_cw` | 2 | CW carrier (TX) detected via partner RSSI (RX) |
-| `radio_beacon` | 2 | raw TX beacon / RX sniffer (TX verified; RX demod WIP) |
+| `radio_beacon` | 2 | raw TX/RX link, per-packet RSSI/LQI/SQI/AFC |
 | `radio_regdump` | 1 | read back the RF registers after config |
-| `radio_rxdiag` | 1 | poll which RX events (preamble/sync/data) fire |
+| `radio_linkdiag` | 2 | RX event/quality diagnostics over a live link |
 | `crypto_aes_kat` | 1 | AES-128 ECB FIPS-197 known-answer test |
 | `crypto_ccm_kat` | 1 | AES-128-CCM RFC 3610 vector + tamper test |
 | `crypto_frame_loopback` | 1 | frame codec + nonce + CCM round-trip |
+| `net_secure_ping` | node / gateway | one CCM-sealed DATA frame end-to-end |
+| `net_confirmed` | node / gateway | confirmed delivery + ACK + retransmit (§7.3) |
+| `net_persist` | 1 | TX-counter reserve-ahead survives reboot (§7.4) |
+| `net_duty_kat` | 1 | duty-governor token-bucket KAT (§2.2) |
+| `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA (§7.5) |
+| `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key (§7.6) |
+| `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
+| `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |
 
 ## A note on RX completion (hard-won)
 
