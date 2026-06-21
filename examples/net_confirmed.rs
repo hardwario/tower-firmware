@@ -15,6 +15,7 @@ use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
+use tower::storage::Kv;
 use tower::{app, board::Board};
 
 #[cfg(feature = "role-node")]
@@ -40,7 +41,8 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await {
+    let kv = Kv::new(b.storage);
+    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await {
         Ok(n) => n,
         Err(e) => {
             error!(target: "confirmed", "net init: {:?}", e);

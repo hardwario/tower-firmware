@@ -19,6 +19,7 @@ use super::ccm::Ccm;
 use super::config::{self, Band, RfConfig};
 use super::device::{RadioError, Spirit1};
 use super::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
+use crate::storage::Kv;
 
 /// ACK window the sender waits for an acknowledgement (§7.3). The measured ACK
 /// round-trip is ~35 ms (turnaround + ACK ToA + RX set-up), so 200 ms is ample.
@@ -34,6 +35,17 @@ const TX_TIMEOUT: Duration = Duration::from_millis(120);
 pub const DEFAULT_REPS: u8 = 3;
 /// Max inter-rep backoff (ms), randomised to de-sync collided senders.
 const MAX_BACKOFF_MS: u32 = 100;
+
+/// TX-counter reserve block: persist the watermark only once per `RESERVE`
+/// transfers, and on boot resume *at* the watermark (> any value actually sent,
+/// so a counter is never reused; ≤ one block is skipped per reboot, §7.4).
+const RESERVE: u32 = 1024;
+/// Receiver last-seen lazy-persist period: the replay window across a reboot is
+/// ≤ `P` transfers (§7.4).
+const P: u32 = 32;
+/// EEPROM key-value keys for the persisted counter state.
+const KEY_WATERMARK: u16 = 0x5201;
+const KEY_LASTSEEN: u16 = 0x5202;
 
 /// Outcome of a [`Net::send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +96,14 @@ pub struct Net {
     key: [u8; 16],
     /// Monotonic TX counter, advanced by one per transfer (§6).
     tx_counter: u32,
+    /// Highest reserved (persisted) counter value; `tx_counter < reserve_limit`.
+    reserve_limit: u32,
     /// Per-peer last-seen counter (single peer for now).
     last_seen: u32,
+    /// Accepted-transfer count since the last last-seen persist.
+    accepts: u32,
+    /// EEPROM-backed counter persistence.
+    kv: Kv<'static>,
     /// Cached ACK bytes for the most recent confirmed RX, to re-send on a
     /// byte-identical retransmit (§7.3).
     cached_ack: [u8; MAX_FRAME],
@@ -97,8 +115,10 @@ pub struct Net {
 }
 
 impl Net {
-    /// Bring the radio up, apply the RF config, and initialise counters.
-    pub async fn new(mut radio: Spirit1, cfg: NetConfig) -> Result<Self, RadioError> {
+    /// Bring the radio up, apply the RF config, and initialise counters from
+    /// EEPROM (`kv`): resume the TX counter at the persisted reserve watermark
+    /// and reserve the next block, and restore the per-peer last-seen.
+    pub async fn new(mut radio: Spirit1, mut kv: Kv<'static>, cfg: NetConfig) -> Result<Self, RadioError> {
         radio.exit_shutdown().await?;
         radio.read_device_id()?;
         config::apply(
@@ -109,13 +129,24 @@ impl Net {
             },
         )
         .await?;
+
+        // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the
+        // very first boot, since 0 = "never sent"), then reserve the next block.
+        let resume = read_u32(&kv, KEY_WATERMARK).unwrap_or(1).max(1);
+        let reserve_limit = resume.wrapping_add(RESERVE);
+        let _ = kv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes());
+        let last_seen = read_u32(&kv, KEY_LASTSEEN).unwrap_or(0);
+
         Ok(Self {
             radio,
             ccm: Ccm::new(),
             my_id: cfg.my_id,
             key: cfg.key,
-            tx_counter: 1, // 0 = "never sent" (§6)
-            last_seen: 0,
+            tx_counter: resume,
+            reserve_limit,
+            last_seen,
+            accepts: 0,
+            kv,
             cached_ack: [0; MAX_FRAME],
             cached_ack_len: 0,
             cached_ack_for: 0,
@@ -126,6 +157,31 @@ impl Net {
     /// This device's ID.
     pub fn id(&self) -> u32 {
         self.my_id
+    }
+
+    /// Current live TX counter (for diagnostics / persistence demos).
+    pub fn tx_counter(&self) -> u32 {
+        self.tx_counter
+    }
+
+    /// Current persisted reserve watermark.
+    pub fn reserve_watermark(&self) -> u32 {
+        self.reserve_limit
+    }
+
+    /// Current per-peer last-seen counter.
+    pub fn last_seen(&self) -> u32 {
+        self.last_seen
+    }
+
+    /// Advance the TX counter, re-reserving + persisting the next block when the
+    /// current reserve is exhausted (the only TX-counter persistence path).
+    fn advance_tx_counter(&mut self) {
+        self.tx_counter = self.tx_counter.wrapping_add(1);
+        if self.tx_counter >= self.reserve_limit {
+            self.reserve_limit = self.reserve_limit.wrapping_add(RESERVE);
+            let _ = self.kv.set_bytes(KEY_WATERMARK, &self.reserve_limit.to_le_bytes());
+        }
     }
 
     /// Send `data` to `dest`. Confirmed sends open an ACK window and retransmit
@@ -186,7 +242,7 @@ impl Net {
         }
         // The counter is consumed whether or not delivery succeeded (the frames
         // went out under this nonce); retransmits reused it intentionally.
-        self.tx_counter = self.tx_counter.wrapping_add(1);
+        self.advance_tx_counter();
         result
     }
 
@@ -207,6 +263,12 @@ impl Net {
         if hdr.counter > self.last_seen {
             // Fresh — accept, advance last-seen, ACK if requested.
             self.last_seen = hdr.counter;
+            // Lazy-persist last-seen every P accepts → replay window ≤ P across a
+            // reboot (§7.4).
+            self.accepts = self.accepts.wrapping_add(1);
+            if self.accepts % P == 0 {
+                let _ = self.kv.set_bytes(KEY_LASTSEEN, &self.last_seen.to_le_bytes());
+            }
             let confirmed = hdr.flags & flags::CONFIRMED != 0;
             if confirmed {
                 self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
@@ -274,7 +336,7 @@ impl Net {
         };
         let mut ack = [0u8; MAX_FRAME];
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &self.key, &hdr, &payload, &mut ack) {
-            self.tx_counter = self.tx_counter.wrapping_add(1); // ACK consumes a counter
+            self.advance_tx_counter(); // ACK consumes a counter (its own, §6)
             self.cached_ack[..n].copy_from_slice(&ack[..n]);
             self.cached_ack_len = n;
             self.cached_ack_for = acked;
@@ -290,5 +352,14 @@ impl Net {
         x ^= x << 5;
         self.rng = x;
         x % MAX_BACKOFF_MS
+    }
+}
+
+/// Read a little-endian u32 from a Kv key, if present and exactly 4 bytes.
+fn read_u32(kv: &Kv<'static>, key: u16) -> Option<u32> {
+    let mut b = [0u8; 4];
+    match kv.get_bytes(key, &mut b) {
+        Ok(Some(4)) => Some(u32::from_le_bytes(b)),
+        _ => None,
     }
 }

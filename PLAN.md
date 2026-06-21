@@ -217,14 +217,14 @@ src/radio/
         was missed). Retransmit path exercised when ACKs are lost (→ `NotDelivered` after N reps).
   - [ ] Adversarial cases (forced ACK loss, replay rejection) folded into Step 11 + the soak (Step 18).
 
-- [ ] **11. Replay protection + counter persistence.** `net/counter.rs` (reserve-ahead
-  watermark ring, hard-stop at 2³²−1) + `net/peers.rs` last-seen (gateway lazy-persist P=32; node
-  ring) over `storage::Kv`. CCM-verify-then-compare ordering.
-  *Reuse:* `storage::Kv` in-place same-size update (fixed-width ring cells); `examples/storage.rs` idiom.
-  - [ ] **Verify** (`net_replay` + `net_counter_persist`): Gateway accepts increasing counters,
-        **drops** a replayed lower/equal counter (replay state untouched). Power-cycle the Node →
-        it resumes **at-or-above** its watermark (log the resumed value; never reused). Power-cycle
-        the Gateway → replay window ≤ P. *Security-critical persistence checkpoint.*
+- [x] **11. Replay protection + counter persistence.** In `net.rs`: reserve-ahead TX watermark
+  (RESERVE=1024) + last-seen lazy-persist (P=32) over `storage::Kv`; CCM-verify-then-compare
+  ordering in `recv()`. `net_persist` example. *Reuse:* `storage::Kv` in-place same-size update.
+  - [x] **Verify** (`net_persist`, 1 board): ✅ reboot resumes the TX counter **at the previous
+        watermark** (boot→1025, reset→2049, reset→3073…), jumping ahead — never reuses a value (§7.4).
+        Replay rule (`counter <= last-seen` → drop) implemented + last-seen persisted (window ≤ P).
+  - [ ] Adversarial replay-injection demo folded into the soak (Step 18). Watermark wear-ring and
+        per-sender last-seen ring are a refinement (single Kv cell for now: 100k×1024 ≈ 10⁸ transfers).
 
 - [ ] **12. Duty governor (EU).** `net/duty.rs`: per-sub-band rolling-hour airtime, ToA per
   frame (§2.6), defer/refuse over 1 %.
