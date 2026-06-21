@@ -1,0 +1,13 @@
+# cargo build  -> builds the ELF for the Core Module's Cortex-M0+ automatically
+# cargo run     -> flashes & runs via a connected SWD probe (see runner below)
+#
+# For the USB-bootloader workflow (build raw .bin, flash, monitor) use `just`:
+#   just build | just flash | just monitor   (see the justfile)
+
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# Flash and run over SWD with a J-Link / ST-Link.
+# Requires probe-rs:  cargo install probe-rs-tools
+runner = "probe-rs run --chip STM32L083CZTx"

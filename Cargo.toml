@@ -1,0 +1,69 @@
+[package]
+name = "tower"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, WS2812 strip, console, low power) plus runnable examples."
+
+[dependencies]
+# Async executor. The Cortex-M *platform* (the `__pender` + thread-mode loop) is
+# provided by embassy-stm32's low-power executor below, NOT by embassy-executor,
+# so this dependency must NOT enable `platform-cortex-m`/`executor-thread` (doing
+# so would define a second `__pender` and conflict). We only need its `Spawner`,
+# `raw` executor and the `#[main]` macro, all available with no features.
+embassy-executor = { version = "0.10.0" }
+
+# Async timekeeping. tick-hz-32_768 matches the rate produced by the STM32L0 time driver.
+embassy-time = { version = "0.5.1", features = ["tick-hz-32_768"] }
+
+# STM32 HAL. The chip feature selects the STM32L083CZ:
+#   - memory-x        : generates the linker memory layout (192 KB Flash / 20 KB RAM)
+#   - time-driver-any : timer backing embassy-time (a general-purpose TIM while
+#                       awake; handed off to the RTC across STOP, see below)
+#   - executor-thread : STM32-specific thread executor that drops the core into
+#                       the deepest available STOP mode when idle (low_power::sleep)
+#   - low-power       : enables STOP-mode support; while stopped, timekeeping is
+#                       kept by the RTC clocked from the 32.768 kHz LSE crystal.
+#                       Pulls in the `time` + `chrono` features transitively.
+embassy-stm32 = { version = "0.6.0", features = [
+    "stm32l083cz",
+    "memory-x",
+    "time-driver-any",
+    "executor-thread",
+    "low-power",
+    # EXTI line interrupts — used to wake from STOP on the VBUS_SENSE edge (PA12).
+    "exti",
+] }
+
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+# Panic handler is provided by the SDK itself (src/console.rs prints the panic
+# to the console, then halts), so no external panic-handler crate is needed.
+
+# Critical-section API (Mutex/with) for the global serial console. The single-core
+# implementation is provided by the cortex-m feature above.
+critical-section = "1.2"
+
+# Blocking I2C trait that device drivers (e.g. the TMP112) are written against,
+# keeping them HAL-independent. embassy-stm32's blocking `I2c` implements it.
+embedded-hal = "1.0"
+
+# Async primitives for inter-task messaging: the LED dispatcher's command queue
+# (embassy-sync Channel) and select! over a timer vs. an incoming command.
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.1"
+
+# Logging facade. The console module provides the backend (level + uptime
+# timestamp over the UART); modules just use `info!`/`warn!`/`error!`/etc.
+log = "0.4"
+
+# Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
+# not end up in the flashed binary, only in the ELF) so a debugger stays useful.
+[profile.release]
+opt-level = "s"
+lto = true
+debug = 2
+codegen-units = 1
+
+[profile.dev]
+opt-level = "s"
