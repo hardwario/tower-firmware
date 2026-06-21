@@ -270,9 +270,14 @@ src/radio/
 
 ### Phase 5 — Polish & robustness
 
-- [ ] **16. Public API + docs + reference apps.** `pub mod radio;` in `lib.rs`; finalize
-  re-exports; SDK-style doc comments; write the shipped reference apps `examples/radio_gateway.rs`
-  and `examples/radio_node.rs`.
+- [x] **16. Public API + docs + reference apps.** `pub mod radio;` in `lib.rs` with module
+  re-exports (`Band`/`RfConfig`/`SignalQuality`/`Spirit1`/`RadioError`); `net` exposes
+  `Net`/`NetConfig`/`SendResult`/`Received`/`add_peer`/… SDK-style doc comments throughout.
+  Shipped reference apps `radio_node` (confirmed telemetry uplink) + `radio_gateway` (decode +
+  auto-ACK, peer table).
+  - [x] **Verify** (two boards): ✅ `radio_node` `seq=N Delivered (59 ms) vbat=… temp=…°C`;
+        `radio_gateway` `src=11111111 cnt=… seq=… vbat=…mV temp=21.8°C rssi=-43dBm (ACKed)` — full
+        happy path, clean logs. `just samples` lists all radio/net examples.
   - [ ] **Verify**: `just samples` lists the radio examples; `just run radio_gateway` /
         `radio_node` on the two boards demonstrates the full happy path with clean logs.
 

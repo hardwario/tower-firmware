@@ -206,6 +206,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 
 | Example | Boards / roles | What it shows |
 |---|---|---|
+| **`radio_gateway`** / **`radio_node`** | gateway / node | **reference apps**: confirmed, secure telemetry uplink + decode |
 | `radio_id` | 1 | device-ID check (SPI/CS/SDN bring-up) |
 | `radio_state` | 1 | READY/STANDBY transitions + nIRQ |
 | `radio_cw` | 2 | CW carrier (TX) detected via partner RSSI (RX) |
