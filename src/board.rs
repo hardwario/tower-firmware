@@ -12,7 +12,9 @@ use embassy_stm32::flash::Flash;
 use embassy_stm32::gpio::Pull;
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
-use embassy_stm32::peripherals::{DMA1_CH3, PA1, PA9, PH1, TIM2, USART1};
+use embassy_stm32::peripherals::{
+    DMA1_CH3, PA1, PA9, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2, USART1,
+};
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usart::{Config as UartConfig, UartTx};
@@ -23,7 +25,8 @@ use log::LevelFilter;
 use crate::storage::Storage;
 use crate::tmp112::{self, Tmp112};
 
-// PA8 (button) and PA12 (VBUS_SENSE) are EXTI lines 8/12 — both on EXTI4_15.
+// PA8 (button), PA12 (VBUS_SENSE) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7
+// — all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, also here).
 bind_interrupts!(struct Irqs {
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
 });
@@ -62,6 +65,27 @@ pub struct Board {
     pub accel_int: ExtiInput<'static, Async>,
     /// Non-volatile storage in the data EEPROM — see [`storage`](crate::storage).
     pub storage: Storage<'static>,
+
+    // --- SPIRIT1 sub-GHz radio (SPSGRF module) — see [`radio`](crate::radio). ---
+    /// SPIRIT1 shutdown pin (PB7). Has a 1 MΩ hardware pull-up so the part boots
+    /// into SHUTDOWN; the driver must drive it **low** to enable the radio.
+    pub radio_sdn: Peri<'static, PB7>,
+    /// SPIRIT1 SPI chip-select (PA15) — **software-controlled** (≥2 µs setup), so
+    /// the radio driver owns it as a GPIO output, not the SPI peripheral's NSS.
+    pub radio_cs: Peri<'static, PA15>,
+    /// SPI1 peripheral for the radio bus (≤10 MHz, mode 0). Blocking — see the
+    /// `"spi"` feature note in Cargo.toml.
+    pub radio_spi: Peri<'static, SPI1>,
+    /// SPI1 SCLK (PB3).
+    pub radio_sck: Peri<'static, PB3>,
+    /// SPI1 MOSI (PB5).
+    pub radio_mosi: Peri<'static, PB5>,
+    /// SPI1 MISO (PB4).
+    pub radio_miso: Peri<'static, PB4>,
+    /// SPIRIT1 GPIO0 / nIRQ (PA7, active-low), EXTI line 7 (on the bound
+    /// `EXTI4_15` group) — wakes the driver on radio events. Pulled up so the
+    /// idle (de-asserted) level is defined before the SPIRIT1 drives it.
+    pub radio_irq: ExtiInput<'static, Async>,
 }
 
 impl Board {
@@ -106,6 +130,17 @@ impl Board {
             // LIS2DH12 INT1 (PB6) — active-high push-pull, so pull-down + rising edge.
             accel_int: ExtiInput::new(p.PB6, p.EXTI6, Pull::Down, Irqs),
             storage: Storage::new(Flash::new_blocking(p.FLASH)),
+
+            // SPIRIT1 radio resources. The driver (radio::init) builds the
+            // blocking SPI and drives SDN/CS itself; here we just hand over the
+            // raw peripherals and the EXTI-bound nIRQ line.
+            radio_sdn: p.PB7,
+            radio_cs: p.PA15,
+            radio_spi: p.SPI1,
+            radio_sck: p.PB3,
+            radio_mosi: p.PB5,
+            radio_miso: p.PB4,
+            radio_irq: ExtiInput::new(p.PA7, p.EXTI7, Pull::Up, Irqs),
         }
     }
 }

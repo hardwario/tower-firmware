@@ -13,6 +13,11 @@ bin := "target/firmware.bin"
 port := env_var_or_default("TOWER_PORT", "")
 _port_flag := if port == "" { "" } else { "-p " + port }
 
+# Optional cargo features, e.g. the radio examples' role selection:
+#   TOWER_FEATURES=role-gateway just flash net_uplink
+features := env_var_or_default("TOWER_FEATURES", "")
+_feat_flag := if features == "" { "" } else { "--features " + features }
+
 # List available recipes.
 default:
     @just --list
@@ -22,8 +27,9 @@ samples:
     @ls examples/*.rs | sed 's|examples/||; s|\.rs||'
 
 # Build an example into target/firmware.bin, then print its on-chip size.
+# Set TOWER_FEATURES to pass cargo features (e.g. a radio example's role).
 build name: && (size name)
-    cargo objcopy --release --example {{name}} -- -O binary {{bin}}
+    cargo objcopy --release --example {{name}} {{_feat_flag}} -- -O binary {{bin}}
 
 # Build + flash an example over the UART bootloader.
 # Extra args pass through to `jolt flash`, e.g. `just flash blinky --no-verify`.
@@ -46,7 +52,7 @@ ports:
 
 # On-chip footprint (text/data/bss) of an example.
 size name:
-    cargo size --release --example {{name}}
+    cargo size --release --example {{name}} {{_feat_flag}}
 
 # Remove build artifacts.
 clean:

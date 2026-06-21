@@ -10,6 +10,7 @@
 //! - [`led`] — non-blocking single-LED blink dispatcher (background + instant).
 //! - [`button`] — debounced button (click/hold), EXTI-gated or polled.
 //! - [`power`] — USB-presence-gated STOP via `WakeGuard`.
+//! - [`radio`] — SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
 //! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
 //! - [`storage`] — EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
@@ -24,6 +25,7 @@ pub mod console;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;
+pub mod radio;
 pub mod storage;
 pub mod strip;
 pub mod tmp112;

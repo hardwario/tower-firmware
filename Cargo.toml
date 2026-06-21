@@ -31,9 +31,17 @@ embassy-stm32 = { version = "0.6.0", features = [
     "time-driver-any",
     "executor-thread",
     "low-power",
-    # EXTI line interrupts — used to wake from STOP on the VBUS_SENSE edge (PA12).
+    # EXTI line interrupts — used to wake from STOP on the VBUS_SENSE edge (PA12)
+    # and on the SPIRIT1 nIRQ (PA7, EXTI line 7).
     "exti",
+    # Expose `embassy_stm32::pac` so the radio's register-level L0 AES driver
+    # (src/radio/aes.rs) can drive the AES peripheral, which the HAL doesn't wrap.
+    "unstable-pac",
 ] }
+# Note: the SPI HAL (used for the SPIRIT1 radio bus, SPI1 on PB3/PB5/PB4) needs
+# no feature — embassy-stm32 always compiles `spi`. The radio uses blocking SPI
+# (Spi::new_blocking): FIFO bursts are ≤96 B at ≤10 MHz (~80 µs), and SPI1's DMA
+# channel (DMA1_CH3) is already owned by the WS2812 strip.
 
 cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = "0.7.0"
@@ -62,6 +70,22 @@ log = "0.4"
 # no_std, no-alloc (fixed-buffer (de)serialization).
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.0", default-features = false }
+
+# Build-time role/behaviour selection for the radio examples. A two-board example
+# is one source file built twice — e.g. `TOWER_FEATURES=role-gateway just flash
+# net_uplink`. `test-hooks` enables fault injectors (ACK-drop, malformed frame,
+# FIFO error, stale replay) used by the net_*/edge_* examples; `afc-sweep` adds
+# the AFC_CORR-vs-temperature logging to the sniffer. None affect the library.
+[features]
+default = []
+role-node = []
+role-gateway = []
+role-peer-a = []
+role-peer-b = []
+node-1 = []
+node-2 = []
+test-hooks = []
+afc-sweep = []
 
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.
