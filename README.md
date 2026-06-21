@@ -3,7 +3,7 @@
 An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
 Module** (STM32L083CZ). The crate is a **library** of reusable blocks (LED,
 button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip,
-serial logging, USB-gated low power); flashable programs live in
+serial logging, EEPROM storage, USB-gated low power); flashable programs live in
 [`examples/`](examples) and are built/flashed by name with
 [`just`](https://just.systems).
 
@@ -18,6 +18,7 @@ serial logging, USB-gated low power); flashable programs live in
 | Accelerometer | LIS2DH12 — INT1 → PB6 (EXTI); orientation/dice + tilt |
 | Console | USART1 TX on PA9, 115200 8N1 |
 | RGB strip | WS2812B/SK6812 on PA1 — TIM2_CH2 PWM + DMA1_CH3 |
+| EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12 — gates STOP (stay awake while plugged in) |
 
 ## Quick start
@@ -40,6 +41,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1–6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/power.rs` | `vbus_task` — gates STOP on USB presence via a `WakeGuard` |
+| `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`) — values as raw scalars or postcard structs, CRC-framed, updated in place |
 | `src/strip.rs` | LED-strip effects over `ws2812`: solid/compound/gradient + rainbow, chase, breathe, scanner, sparkle; brightness 0–100 % with gamma |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
@@ -120,6 +122,7 @@ own by dropping a `.rs` there — it's picked up automatically (`just samples`).
 | `thermometer` | `tmp112` — log the temperature every 2 s |
 | `accelerometer` | `lis2dh12` — report die face 1–6 as you turn the board; opt-in tilt alert |
 | `strip` | `ws2812` + `strip` — a scrolling rainbow on PA1 |
+| `storage` | `storage` — a key-value store in EEPROM: a raw boot counter + a postcard settings struct, surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
 
 ### Writing an app
@@ -135,7 +138,7 @@ then hands you a [`Board`](src/board.rs) of ready resources. A whole app is just
 use tower::{app, board::Board};
 
 async fn run(mut b: Board) {
-    // b.spawner, b.tmp112 (shut down), b.led, b.button, b.accel_int, b.strip_* …
+    // b.spawner, b.tmp112 (shut down), b.led, b.button, b.accel_int, b.storage, b.strip_* …
     loop {
         if let Ok(raw) = b.tmp112.oneshot().await {
             log::info!("{} raw", raw);
@@ -187,6 +190,11 @@ live in each `examples/*.rs` and are meant to be edited or copied. Common knobs:
   `b.tmp112.release()`.
 - **Strip** — `Strip::new(.., LedKind::Rgb | Rgbw, brightness)`; effects take a
   frame counter you advance.
+- **Storage** — wrap `b.storage` in `Kv::new(..)` for keyed values:
+  `kv.set_bytes(key, &x.to_le_bytes())` / `kv.get_bytes` for scalars, or
+  `kv.set(key, &value)` / `kv.get::<T>(key)` (postcard) for structs. Add a new
+  `u16` key to persist new data without disturbing existing keys. Or use
+  `b.storage.read/write(offset, ..)` for a raw byte layout.
 - **I2C speed / pull-ups** — `i2c_config.frequency`, `scl_pullup`/`sda_pullup`.
 - **Clock & low power** — all in [`board::init`](src/board.rs): sysclk, RTC
   source, `min_stop_pause`, debug-during-sleep.

@@ -57,6 +57,12 @@ embassy-futures = "0.1.1"
 # timestamp over the UART); modules just use `info!`/`warn!`/`error!`/etc.
 log = "0.4"
 
+# Typed non-volatile storage (src/storage.rs): postcard serializes any
+# `#[derive(Serialize, Deserialize)]` value into the L0 data EEPROM. Both are
+# no_std, no-alloc (fixed-buffer (de)serialization).
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+postcard = { version = "1.0", default-features = false }
+
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.
 [profile.release]

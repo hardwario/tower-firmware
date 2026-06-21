@@ -8,6 +8,7 @@
 
 use embassy_executor::Spawner;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler};
+use embassy_stm32::flash::Flash;
 use embassy_stm32::gpio::Pull;
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
@@ -19,6 +20,7 @@ use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
 use embassy_time::Duration;
 use log::LevelFilter;
 
+use crate::storage::Storage;
 use crate::tmp112::{self, Tmp112};
 
 // PA8 (button) and PA12 (VBUS_SENSE) are EXTI lines 8/12 — both on EXTI4_15.
@@ -58,6 +60,8 @@ pub struct Board {
     /// — for the tilt/movement interrupt. The accelerometer shares the I²C2 bus
     /// with the TMP112; reclaim it with [`tmp112`](Self::tmp112)`.release()`.
     pub accel_int: ExtiInput<'static, Async>,
+    /// Non-volatile storage in the data EEPROM — see [`storage`](crate::storage).
+    pub storage: Storage<'static>,
 }
 
 impl Board {
@@ -101,6 +105,7 @@ impl Board {
             strip_dma: p.DMA1_CH3,
             // LIS2DH12 INT1 (PB6) — active-high push-pull, so pull-down + rising edge.
             accel_int: ExtiInput::new(p.PB6, p.EXTI6, Pull::Down, Irqs),
+            storage: Storage::new(Flash::new_blocking(p.FLASH)),
         }
     }
 }

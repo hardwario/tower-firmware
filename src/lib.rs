@@ -12,6 +12,7 @@
 //! - [`power`] — USB-presence-gated STOP via `WakeGuard`.
 //! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
+//! - [`storage`] — EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
 //! - [`ws2812`] — WS2812B/SK6812 strip driver (timer PWM + DMA).
 //! - [`strip`] — addressable-LED effects (rainbow, chase, …) with brightness+gamma.
 
@@ -23,6 +24,7 @@ pub mod console;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;
+pub mod storage;
 pub mod strip;
 pub mod tmp112;
 pub mod ws2812;
@@ -41,7 +43,7 @@ pub use embassy_executor::Spawner;
 /// use tower::{app, board::Board};
 ///
 /// async fn run(mut b: Board) {
-///     // use b.spawner, b.tmp112, b.led, b.button, b.strip_* …
+///     // use b.spawner, b.tmp112, b.led, b.button, b.accel_int, b.storage, b.strip_* …
 /// }
 /// app!(run);
 /// ```
