@@ -184,18 +184,23 @@ let n = net.bulk_fetch(GW_ID, &mut out).await;     // requester → bytes receiv
 ```
 
 **OTA pairing (§7.6).** A 3-way JOIN under a fixed, **publicly-known** pairing key
-(`PAIRING_KEY`): `JOIN_REQ` → `JOIN_RESP`(assigned id + per-node key) →
-`JOIN_CONFIRM`, both sides committing only on the confirm. The pairing key gives
-the JOIN frames integrity but **no confidentiality** — a sniffer in range during
-the window recovers the delivered per-node key — and **no mutual auth**. Mitigate
-with a short, user-initiated window, proximity and reduced power; enable flash RDP
-for production key storage.
+(`PAIRING_KEY`): `JOIN_REQ`(node id) → `JOIN_RESP`(per-node key) →
+`JOIN_CONFIRM`(node id), both sides committing only on the confirm. The **joining
+node chooses its own ID** and keeps it; the host only hands out the key (it does
+not assign the ID) and learns the node's ID to install the peer. The default
+window is one minute (`PAIRING_WINDOW`). The pairing key gives the JOIN frames
+integrity but **no confidentiality** — a sniffer in range during the window
+recovers the delivered key — and **no mutual auth**. Mitigate with a short,
+user-initiated window, proximity and reduced power; enable flash RDP for
+production key storage.
 
 ```rust
-// host: returns Some(joiner_proposed_id) on commit
-let paired = net.open_pairing(Duration::from_secs(10), assign_id, &assign_key).await;
-// joiner: returns Some((assigned_id, per_node_key)) on commit
-if let Some((id, key)) = net.join(my_proposed_id, Duration::from_secs(10)).await { /* install */ }
+// host: returns Some(node_id) — the joiner's own id — on commit; install (id, key)
+if let Some(id) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
+    let _ = net.add_peer(id, &per_node_key);
+}
+// joiner: brings its own id, returns Some(per_node_key) on commit
+if let Some(key) = net.join(my_id, PAIRING_WINDOW).await { /* store key */ }
 ```
 
 **EU duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,

@@ -3,32 +3,32 @@
 //!   TOWER_FEATURES=role-gateway just flash net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash net_pairing   # joiner: requests to join
 //!
-//! Host opens a 10 s pairing window and, on the first JOIN_REQ, assigns an ID +
-//! per-node key (JOIN_RESP) and waits for JOIN_CONFIRM. Joiner sends JOIN_REQ,
-//! receives the assignment, confirms, and commits. Both log the key — they must
-//! match, proving the 3-way handshake delivered the per-node key. (The key is
-//! sniffable in-window by design; see §7.6.)
+//! The host opens a 1-minute pairing window ([`PAIRING_WINDOW`]) and, on the first
+//! JOIN_REQ, hands out a per-node key (JOIN_RESP) and waits for JOIN_CONFIRM. The
+//! **joiner chooses its own ID** and keeps it — the host does NOT assign it; the
+//! host only learns that ID and the key it handed out, to install the peer. Both
+//! log the key (they must match) and the joiner's ID (the same on both sides),
+//! proving the handshake. (The key is sniffable in-window by design; see §7.6.)
 
 #![no_std]
 #![no_main]
 
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, PAIRING_KEY};
+use tower::radio::net::{Net, NetConfig, PAIRING_KEY, PAIRING_WINDOW};
 use tower::storage::Kv;
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
 const HOST_ID: u32 = 0x2222_2222;
+// The joiner's OWN, self-chosen ID (kept after pairing — not assigned by the host).
 #[cfg(feature = "role-node")]
-const PROPOSED_ID: u32 = 0x0000_00BB;
-#[cfg(not(feature = "role-node"))]
-const ASSIGN_ID: u32 = 0x0000_00AA;
+const MY_ID: u32 = 0x0000_00BB;
 // The per-node key the host hands out (would be random in production).
 #[cfg(not(feature = "role-node"))]
-const ASSIGN_KEY: [u8; 16] = [
+const HANDED_KEY: [u8; 16] = [
     0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
 ];
 
@@ -40,7 +40,7 @@ async fn run(b: Board) {
     let kv = Kv::new(b.storage);
 
     #[cfg(feature = "role-node")]
-    let my_id = PROPOSED_ID;
+    let my_id = MY_ID;
     #[cfg(not(feature = "role-node"))]
     let my_id = HOST_ID;
 
@@ -55,13 +55,14 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "pair", "HOST {:08X}: opening 10 s pairing window", HOST_ID);
+        info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ID);
         loop {
-            match net.open_pairing(Duration::from_secs(10), ASSIGN_ID, &ASSIGN_KEY).await {
-                Some(proposed) => info!(
+            match net.open_pairing(PAIRING_WINDOW, &HANDED_KEY).await {
+                // The joiner brought its own id; the host installs (id, key).
+                Some(node_id) => info!(
                     target: "pair",
-                    "PAIRED *** joiner proposed={:08X} assigned={:08X} key[..4]={:02x}{:02x}{:02x}{:02x}",
-                    proposed, ASSIGN_ID, ASSIGN_KEY[0], ASSIGN_KEY[1], ASSIGN_KEY[2], ASSIGN_KEY[3]
+                    "PAIRED *** node id={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
+                    node_id, HANDED_KEY[0], HANDED_KEY[1], HANDED_KEY[2], HANDED_KEY[3]
                 ),
                 None => warn!(target: "pair", "pairing window closed (no joiner / lost confirm)"),
             }
@@ -71,13 +72,13 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "pair", "JOINER: requesting to join (proposed {:08X})", PROPOSED_ID);
+        info!(target: "pair", "JOINER: requesting to join with my own id {:08X} (1 min)", MY_ID);
         loop {
-            match net.join(PROPOSED_ID, Duration::from_secs(10)).await {
-                Some((assigned, key)) => info!(
+            match net.join(MY_ID, PAIRING_WINDOW).await {
+                Some(key) => info!(
                     target: "pair",
-                    "JOINED *** assigned={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
-                    assigned, key[0], key[1], key[2], key[3]
+                    "JOINED *** id={:08X} (mine) key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
+                    MY_ID, key[0], key[1], key[2], key[3]
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),
             }

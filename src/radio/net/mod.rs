@@ -12,9 +12,18 @@
 //! replay lane (star ≤64 / P2P ≤8, §7.2); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
 //! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, §7.4).
+//!
+//! This module holds the core (peer table + confirmed unicast). The two larger
+//! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
+//! transfer, §7.5) and [`pairing`] (OTA 3-way JOIN, §7.6).
 
+mod bulk;
+mod pairing;
 
-use embassy_time::{Duration, Instant, Timer};
+pub use bulk::BULK_CHUNK;
+pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
+
+use embassy_time::{Duration, Timer};
 
 use super::ccm::Ccm;
 use super::config::{self, Band, RfConfig};
@@ -30,9 +39,10 @@ const ACK_WINDOW: Duration = Duration::from_millis(200);
 /// finished switching TX→RX and is listening (the ACK window is 200 ms, so
 /// there's ample room). Without this the ACK preamble races the sender's RX
 /// set-up (to_ready + flush + mask + strobe, several SPI ops) and is missed.
-const ACK_TURNAROUND: Duration = Duration::from_millis(20);
+/// Shared by bulk + pairing for the same TX→RX turnaround reason.
+pub(crate) const ACK_TURNAROUND: Duration = Duration::from_millis(20);
 /// Per-TX timeout (CSMA + ToA budget); generous for a ≤96 B frame at 19.2 kbps.
-const TX_TIMEOUT: Duration = Duration::from_millis(120);
+pub(crate) const TX_TIMEOUT: Duration = Duration::from_millis(120);
 /// Default confirmed-delivery repetitions.
 pub const DEFAULT_REPS: u8 = 3;
 /// Max inter-rep backoff (ms), randomised to de-sync collided senders.
@@ -48,30 +58,6 @@ const P: u32 = 32;
 /// EEPROM key-value keys for the persisted counter state.
 const KEY_WATERMARK: u16 = 0x5201;
 const KEY_LASTSEEN: u16 = 0x5202;
-
-/// Bulk chunk size (RADIO.md §7.5).
-pub const BULK_CHUNK: usize = 64;
-/// Bulk session idle timeout: the sender frees the transfer after this with no progress.
-const BULK_IDLE: Duration = Duration::from_secs(30);
-/// How long the requester waits for a BULK_DATA after a BULK_REQ.
-const BULK_RESP_WINDOW: Duration = Duration::from_millis(250);
-/// Requester BULK_REQ repetitions per chunk before giving up.
-const BULK_REQ_REPS: u8 = 6;
-/// One serve-loop receive slice on the sender side.
-const BULK_SERVE_SLICE: Duration = Duration::from_millis(500);
-
-/// Fixed, **publicly-known** OTA-pairing key (RADIO.md §7.6). It gives the JOIN
-/// frames a uniform CCM format with integrity + in-session replay protection, but
-/// NO confidentiality (a sniffer in range during the window recovers the
-/// delivered per-node key) and NO mutual authentication. Mitigate with a short
-/// window, proximity, reduced power, user-initiated pairing.
-pub const PAIRING_KEY: [u8; 16] = *b"TOWER-PAIR-KEY!\0";
-/// How long the joiner waits for a JOIN_RESP after a JOIN_REQ.
-const JOIN_RESP_WINDOW: Duration = Duration::from_millis(300);
-/// How long the host waits for a JOIN_CONFIRM after a JOIN_RESP.
-const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
-/// One listen slice of the host's pairing window between JOIN_REQ polls.
-const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
 
 /// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
 /// holds up to 8 peers (RADIO.md §7.2). One table size covers both — the topology
@@ -117,6 +103,7 @@ pub struct Received {
 
 impl Received {
     /// The decrypted payload bytes.
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.buf[..self.len]
     }
@@ -461,307 +448,6 @@ impl Net {
             // counter < last-seen → replay; drop silently (replay state untouched).
             None
         }
-    }
-
-    // --- Bulk transfer / downlink pull (§7.5): the requester pulls, the sender
-    // serves. The session id is a counter reserved by the sender (distinct from
-    // the announce frame's counter, so chunk-0's nonce never collides with the
-    // announce). All BULK_DATA chunks share that session counter with a distinct
-    // bulk_index, keeping their nonces unique. ---
-
-    /// Serve `data` as a bulk transfer to `dest`: announce the length + session,
-    /// then answer BULK_REQ(index) with BULK_DATA(index, ≤64 B) until the last
-    /// chunk is pulled or the session idles out (30 s). Returns whether the last
-    /// chunk was served.
-    pub async fn bulk_serve(&mut self, dest: u32, data: &[u8]) -> bool {
-        let key = self.key_for(dest);
-        let n_chunks = data.len().div_ceil(BULK_CHUNK).max(1);
-        let announce_counter = self.tx_counter;
-        self.advance_tx_counter();
-        let session = self.tx_counter; // reserved for all chunks; consumed at the end
-
-        let mut ann = [0u8; 8];
-        ann[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        ann[4..8].copy_from_slice(&session.to_le_bytes());
-        let ann_hdr = Header {
-            frame_type: FrameType::Data,
-            flags: flags::BULK_ANNOUNCE,
-            src: self.my_id,
-            dest,
-            counter: announce_counter,
-            bulk_index: None,
-        };
-
-        let mut got_req = false;
-        let mut served_last = false;
-        let mut last_progress = Instant::now();
-        let mut rxbuf = [0u8; BULK_CHUNK];
-        loop {
-            if Instant::now().saturating_duration_since(last_progress)
-                >= if served_last { Duration::from_secs(2) } else { BULK_IDLE }
-            {
-                break;
-            }
-            // Re-announce until the first request arrives (handles a missed announce).
-            if !got_req {
-                self.tx_frame(&key, &ann_hdr, &ann).await;
-            }
-            let Some((hdr, plen)) = self.rx_frame(&key, BULK_SERVE_SLICE, &mut rxbuf).await else {
-                continue;
-            };
-            if hdr.frame_type != FrameType::BulkReq || hdr.src != dest || hdr.dest != self.my_id {
-                continue;
-            }
-            if plen < 4 || u32::from_le_bytes([rxbuf[0], rxbuf[1], rxbuf[2], rxbuf[3]]) != session {
-                continue;
-            }
-            let k = hdr.bulk_index.unwrap_or(0) as usize;
-            if k >= n_chunks {
-                continue;
-            }
-            got_req = true;
-            last_progress = Instant::now();
-            let start = k * BULK_CHUNK;
-            let end = (start + BULK_CHUNK).min(data.len());
-            let last = k == n_chunks - 1;
-            let dhdr = Header {
-                frame_type: FrameType::BulkData,
-                flags: if last { flags::LAST_CHUNK } else { 0 },
-                src: self.my_id,
-                dest,
-                counter: session,
-                bulk_index: Some(k as u32),
-            };
-            Timer::after(ACK_TURNAROUND).await; // let the requester switch to RX
-            self.tx_frame(&key, &dhdr, &data[start..end]).await;
-            if last {
-                served_last = true;
-            }
-        }
-        self.advance_tx_counter(); // consume the session counter
-        served_last
-    }
-
-    /// Fetch a bulk transfer from `src` into `out`: receive the announcement,
-    /// then pull each chunk with BULK_REQ (retransmitting on loss). Returns the
-    /// total length received, or `None` on announce/chunk failure or `out` too small.
-    pub async fn bulk_fetch(&mut self, src: u32, out: &mut [u8]) -> Option<usize> {
-        let key = self.key_for(src);
-        // Wait for the bulk-announce.
-        let mut abuf = [0u8; 8];
-        let (total_len, session) = loop {
-            let (hdr, plen) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await?;
-            if hdr.frame_type == FrameType::Data
-                && hdr.flags & flags::BULK_ANNOUNCE != 0
-                && hdr.src == src
-                && hdr.dest == self.my_id
-                && plen >= 8
-            {
-                let len = u32::from_le_bytes([abuf[0], abuf[1], abuf[2], abuf[3]]) as usize;
-                let s = u32::from_le_bytes([abuf[4], abuf[5], abuf[6], abuf[7]]);
-                break (len, s);
-            }
-        };
-        if total_len > out.len() {
-            return None;
-        }
-        let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
-
-        let mut received = 0usize;
-        for k in 0..n_chunks {
-            let req_counter = self.tx_counter; // one counter per chunk; retransmits reuse it
-            let req_hdr = Header {
-                frame_type: FrameType::BulkReq,
-                flags: 0,
-                src: self.my_id,
-                dest: src,
-                counter: req_counter,
-                bulk_index: Some(k as u32),
-            };
-            let req_payload = session.to_le_bytes();
-            let mut got = false;
-            for _ in 0..BULK_REQ_REPS {
-                if !self.tx_frame(&key, &req_hdr, &req_payload).await {
-                    continue;
-                }
-                let mut dbuf = [0u8; BULK_CHUNK];
-                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await
-                    && dhdr.frame_type == FrameType::BulkData
-                    && dhdr.src == src
-                    && dhdr.dest == self.my_id
-                    && dhdr.counter == session
-                    && dhdr.bulk_index == Some(k as u32)
-                {
-                    let off = k * BULK_CHUNK;
-                    // Bound the copy to the announced length: a peer-controlled
-                    // (authenticated, but possibly buggy) `dlen` must never write
-                    // past `out` — e.g. a full 64 B last chunk for a 65 B total.
-                    if off + dlen > total_len {
-                        continue; // malformed chunk; retry within reps
-                    }
-                    out[off..off + dlen].copy_from_slice(&dbuf[..dlen]);
-                    received += dlen;
-                    got = true;
-                    break;
-                }
-            }
-            self.advance_tx_counter();
-            if !got {
-                return None;
-            }
-        }
-        Some(received)
-    }
-
-    // --- OTA pairing: 3-way JOIN under the fixed public PAIRING_KEY (§7.6).
-    // Both sides commit only after the confirm; a lost confirm leaves the host's
-    // window to time out and discard the tentative entry, and the joiner retries. ---
-
-    /// Host: open a pairing window for `timeout`. On the first valid JOIN_REQ,
-    /// assign `assign_id` + `assign_key`, send JOIN_RESP, and wait for the
-    /// JOIN_CONFIRM. Returns the joiner's proposed ID on commit (caller installs
-    /// the peer), or `None` on timeout / lost confirm. Pairs the first joiner only.
-    pub async fn open_pairing(
-        &mut self,
-        timeout: Duration,
-        assign_id: u32,
-        assign_key: &[u8; 16],
-    ) -> Option<u32> {
-        let deadline = Instant::now().checked_add(timeout)?;
-        let mut buf = [0u8; 24];
-        while Instant::now() < deadline {
-            let Some((hdr, plen)) = self.rx_pair(PAIR_RX_SLICE, &mut buf).await else {
-                continue;
-            };
-            if hdr.frame_type != FrameType::JoinReq || plen < 4 {
-                continue;
-            }
-            let proposed = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-
-            // JOIN_RESP: assigned id (4) + per-node key (16).
-            let mut resp = [0u8; 20];
-            resp[..4].copy_from_slice(&assign_id.to_le_bytes());
-            resp[4..20].copy_from_slice(assign_key);
-            let resp_hdr = Header {
-                frame_type: FrameType::JoinResp,
-                flags: 0,
-                src: self.my_id,
-                dest: proposed,
-                counter: self.tx_counter,
-                bulk_index: None,
-            };
-            Timer::after(ACK_TURNAROUND).await;
-            self.tx_pair(&resp_hdr, &resp).await;
-            self.advance_tx_counter();
-
-            // Wait for the JOIN_CONFIRM — commit only on receipt.
-            let mut cbuf = [0u8; 8];
-            if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
-                && chdr.frame_type == FrameType::JoinConfirm
-                && cplen >= 4
-                && u32::from_le_bytes([cbuf[0], cbuf[1], cbuf[2], cbuf[3]]) == assign_id
-            {
-                return Some(proposed);
-            }
-            // Lost confirm: discard this tentative entry, keep the window open.
-        }
-        None
-    }
-
-    /// Joiner: request pairing with `proposed_id` for up to `timeout`. Sends
-    /// JOIN_REQ, waits for JOIN_RESP, sends JOIN_CONFIRM, and returns the assigned
-    /// ID + per-node key on commit (or `None` on timeout).
-    pub async fn join(&mut self, proposed_id: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
-        let deadline = Instant::now().checked_add(timeout)?;
-        while Instant::now() < deadline {
-            let req_hdr = Header {
-                frame_type: FrameType::JoinReq,
-                flags: 0,
-                src: proposed_id,
-                dest: 0, // host ID not yet known (unassigned)
-                counter: self.tx_counter,
-                bulk_index: None,
-            };
-            self.tx_pair(&req_hdr, &proposed_id.to_le_bytes()).await;
-            self.advance_tx_counter();
-
-            let mut buf = [0u8; 24];
-            if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await
-                && hdr.frame_type == FrameType::JoinResp
-                && plen >= 20
-            {
-                let assigned = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                let mut key = [0u8; 16];
-                key.copy_from_slice(&buf[4..20]);
-                // Confirm, then commit.
-                let conf_hdr = Header {
-                    frame_type: FrameType::JoinConfirm,
-                    flags: 0,
-                    src: assigned,
-                    dest: hdr.src,
-                    counter: self.tx_counter,
-                    bulk_index: None,
-                };
-                Timer::after(ACK_TURNAROUND).await;
-                self.tx_pair(&conf_hdr, &assigned.to_le_bytes()).await;
-                self.advance_tx_counter();
-                return Some((assigned, key));
-            }
-        }
-        None
-    }
-
-    /// Seal `hdr`+`payload` under the pairing key and transmit (duty-metered).
-    async fn tx_pair(&mut self, hdr: &Header, payload: &[u8]) -> bool {
-        let mut buf = [0u8; MAX_FRAME];
-        let Ok(n) = frame::seal_frame(&mut self.ccm, &PAIRING_KEY, hdr, payload, &mut buf) else {
-            return false;
-        };
-        if !self.duty.try_tx(duty::frame_toa_ms(n)) {
-            return false;
-        }
-        self.radio.tx(&buf[..n], false, TX_TIMEOUT).await.is_ok()
-    }
-
-    /// Receive + CCM-open a frame under the pairing key; copy plaintext to `out`.
-    async fn rx_pair(&mut self, timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
-        let mut buf = [0u8; MAX_FRAME];
-        let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
-        let (hdr, range) = frame::open_frame(&mut self.ccm, &PAIRING_KEY, &mut buf[..len]).ok()?;
-        let plen = range.end - range.start;
-        if plen > out.len() {
-            return None;
-        }
-        out[..plen].copy_from_slice(&buf[range]);
-        Some((hdr, plen))
-    }
-
-    /// Seal `hdr`+`payload` under `key` and transmit it (no ACK), metered by the
-    /// duty governor. Returns whether it was actually sent.
-    async fn tx_frame(&mut self, key: &[u8; 16], hdr: &Header, payload: &[u8]) -> bool {
-        let mut buf = [0u8; MAX_FRAME];
-        let Ok(n) = frame::seal_frame(&mut self.ccm, key, hdr, payload, &mut buf) else {
-            return false;
-        };
-        if !self.duty.try_tx(duty::frame_toa_ms(n)) {
-            return false;
-        }
-        self.radio.tx(&buf[..n], false, TX_TIMEOUT).await.is_ok()
-    }
-
-    /// Receive one frame and CCM-open it under `key`; copy the plaintext into
-    /// `out`. Returns the header and plaintext length. (Raw — no replay/ACK
-    /// logic; for bulk.)
-    async fn rx_frame(&mut self, key: &[u8; 16], timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
-        let mut buf = [0u8; MAX_FRAME];
-        let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
-        let (hdr, range) = frame::open_frame(&mut self.ccm, key, &mut buf[..len]).ok()?;
-        let plen = range.end - range.start;
-        if plen > out.len() {
-            return None;
-        }
-        out[..plen].copy_from_slice(&buf[range]);
-        Some((hdr, plen))
     }
 
     /// Wait `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.

@@ -246,12 +246,15 @@ src/radio/
         reassembles, byte pattern **verify OK**. Sender re-announces until the first request.
   - [ ] Requester-reboot-mid-pull (sender idle-frees) + streaming source/sink folded into the soak (Step 18).
 
-- [x] **14. OTA pairing (3-way join).** `net.rs` `open_pairing`/`join` + `PAIRING_KEY` (fixed
-  public key, honest weak-security note). JOIN_REQ → JOIN_RESP(assigned id + per-node key) →
-  JOIN_CONFIRM; commit-on-confirm. `tx_pair`/`rx_pair` use the pairing key. `net_pairing` example.
-  - [x] **Verify** (`net_pairing`, two boards): ✅ host `PAIRED *** proposed=BB assigned=AA
-        key[..4]=a0a1a2a3`; joiner `JOINED *** assigned=AA key[..4]=a0a1a2a3` — keys match, both
-        commit. Lost-confirm (window discards) + two-joiner (first wins) folded into the soak (Step 18).
+- [x] **14. OTA pairing (3-way join).** `net/pairing.rs` `open_pairing`/`join` + `PAIRING_KEY`
+  (fixed public key, honest weak-security note) + `PAIRING_WINDOW` (1 min default). The **joiner
+  brings its own ID** and keeps it; the host hands out only the per-node key (does not assign the
+  ID): JOIN_REQ(node id) → JOIN_RESP(key) → JOIN_CONFIRM(node id); commit-on-confirm. `tx_pair`/
+  `rx_pair` use the pairing key. `net_pairing` example.
+  - [x] **Verify** (`net_pairing`, two boards): ✅ host `PAIRED *** node id=000000BB (joiner-chosen)
+        key[..4]=a0a1a2a3`; joiner `JOINED *** id=000000BB (mine) key[..4]=a0a1a2a3` — the ID comes
+        from the joiner, keys match, both commit. Lost-confirm (window discards) + two-joiner (first
+        wins) folded into the soak (Step 18).
 
 - [x] **15. Peer table + star/P2P topologies.** `net.rs` per-peer `Peer{id,key,last_seen}`
   table (`MAX_PEERS=64`; star ≤64 / P2P ≤8 by policy) with `add_peer`/`remove_peer`/`peer_count`/
