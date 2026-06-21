@@ -212,6 +212,8 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `radio_beacon` | 2 | raw TX/RX link, per-packet RSSI/LQI/SQI/AFC |
 | `radio_regdump` | 1 | read back the RF registers after config |
 | `radio_linkdiag` | 2 | RX event/quality diagnostics over a live link |
+| `radio_csma` | 2 | CSMA/CCA defers TX while a jammer holds the channel |
+| `radio_sleep` | node / gateway | SLEEP vs SHUTDOWN wake latency + re-link |
 | `crypto_aes_kat` | 1 | AES-128 ECB FIPS-197 known-answer test |
 | `crypto_ccm_kat` | 1 | AES-128-CCM RFC 3610 vector + tamper test |
 | `crypto_frame_loopback` | 1 | frame codec + nonce + CCM round-trip |

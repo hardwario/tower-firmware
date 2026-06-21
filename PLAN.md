@@ -166,18 +166,23 @@ src/radio/
         + clear source/control filters) → "reception ends at packet reception" → RX_DATA_READY fires.
         `afc=5` confirms the crystals are close; the earlier bandwidth detour was a red herring.
 
-- [ ] **5. CSMA + full IRQ surface + stuck-state recovery.** CSMA/CCA before initiating TX
-  (−90 dBm, ≤100 ms backoff, max-backoff IRQ); wire all IRQ events into `RadioEvent`; SABORT→READY
-  watchdog (§9).
-  - [ ] **Verify** (`radio_csma`, two Nodes → one Gateway): monitor shows CCA deferrals and a
-        `busy`/max-backoff event when the channel is held (jam with a held TX). It reports, never hangs.
+- [x] **5. CSMA + stuck-state recovery.** CSMA/CCA before TX: RSSI_TH = −90 dBm (0x50) and the
+  CSMA timing programmed in `config::apply` (BU_COUNTER_SEED=0xFA21 non-zero, prescaler 32, 64·Tbit
+  CCA period, CCA length 3, MAX_NB=5, non-persistent). `device::tx(use_csma=true)` masks
+  `IRQ_MAX_BO_CCA_REACH` → `RadioError::Busy`; SABORT→READY watchdog on timeout and FIFO-error
+  flush already in `tx`/`rx` (§9). `radio_csma` example.
+  - [x] **Verify** (`radio_csma`, two boards — jammer + sender): ✅ jammer holds CW 3 s on / 3 s
+        off; sender's CSMA TX prints runs of `Busy` (CCA backed off) during the jam and `ok` when the
+        channel clears, tracking the cycle exactly (seq 1-5 Busy, 6-10 ok, 11-14 Busy, …). Never hangs.
 
-- [ ] **6. Low-power sleep/wake.** Node uses SPIRIT1 SLEEP (wake-timer) and SHUTDOWN between
-  transfers; MCU drops to STOP; nIRQ/PA7 + a timer wake it. Validate fast wake (SLEEP→READY ~125 µs)
-  vs re-init (SHUTDOWN→READY ~650 µs).
-  *Reuse:* `power.rs` `WakeGuard`/STOP, the auto-spawned `vbus_task`, `board.rs` STOP executor.
-  - [ ] **Verify** (`radio_sleep`): with USB unplugged (STOP allowed), Node wakes on cadence,
-        TXes, sleeps; Gateway keeps receiving; re-links correctly after both SLEEP and SHUTDOWN wake.
+- [x] **6. Low-power sleep/wake.** `device`: `to_sleep`/`to_ready` (SLEEP, config retained) and
+  `enter_shutdown`/`exit_shutdown`+`config::apply` (SHUTDOWN, POR + re-init); `set_wake_timer` for
+  the LDC timer. Host-driven cadence (the MCU STOPs between transfers when USB is unplugged — USB
+  inhibits STOP, see `power.rs`). `radio_sleep` example.
+  - [x] **Verify** (`radio_sleep`, two boards): ✅ node alternates SLEEP/SHUTDOWN between TXes;
+        measured wake **SLEEP→READY ≈ 1.25 ms** vs **SHUTDOWN→READY+reconfig ≈ 4.8 ms** (SLEEP much
+        faster, config retained). Gateway receives consecutive frames marked "(re-linked after sleep)"
+        — node re-links correctly after BOTH modes.
 
 ### Phase 3 — Security *(crypto correctness, no radio)*
 

@@ -180,8 +180,24 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
     // AFC on, freeze-on-sync. AFC2 = FREEZE_ON_SYNC|AFC_ENABLE|leakage(reset).
     spi.write_reg(regs::AFC2, 0xC8)?;
 
-    // RSSI threshold for CCA later (-90 dBm = 0x50 with the datasheet mapping).
+    // RSSI threshold for CCA (-90 dBm = 0x50 with the datasheet mapping). The
+    // CSMA engine compares this against the channel RSSI before TX.
     spi.write_reg(regs::RSSI_TH, 0x50)?;
+
+    // CSMA/CCA timing (the engine is gated per-TX by PROTOCOL1.CSMA_ON; the radio
+    // measures RSSI for CCA_LENGTH × CCA_PERIOD, then backs off up to MAX_NB times
+    // before raising MAX_BO_CCA_REACHED). Layout per ST's SpiritCsmaInit:
+    //   CSMA_CONFIG3:2 = BU_COUNTER_SEED (must be non-zero; reset value is 0)
+    //   CSMA_CONFIG1   = (BU_PRESCALER << 2) | CCA_PERIOD(00 = 64·Tbit ≈ 3.3 ms)
+    //   CSMA_CONFIG0   = CCA_LENGTH(7:4) | MAX_NB(2:0)
+    // Non-persistent (PROTOCOL1.CSMA_PERS_ON = 0) so a busy channel gives up after
+    // MAX_NB back-offs instead of stalling forever.
+    spi.write_reg(regs::CSMA_CONFIG3, 0xFA)?; // seed MSB
+    spi.write_reg(regs::CSMA_CONFIG2, 0x21)?; // seed LSB (0xFA21, non-zero)
+    spi.write_reg(regs::CSMA_CONFIG1, (32 << 2) | 0x00)?; // prescaler 32, 64·Tbit
+    spi.write_reg(regs::CSMA_CONFIG0, 0x30 | 0x05)?; // CCA length 3, max 5 back-offs
+    let (p1c, _) = spi.read_reg(regs::PROTOCOL1)?;
+    spi.write_reg(regs::PROTOCOL1, p1c & !0x02)?; // CSMA_PERS_ON = 0 (non-persistent)
 
     // Packet: basic format, variable length (8-bit len field), 4-byte preamble,
     // 4-byte sync, 16-bit CRC (0x1021), whitening on, no address/control/FEC.
