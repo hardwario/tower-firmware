@@ -226,11 +226,12 @@ src/radio/
   - [ ] Adversarial replay-injection demo folded into the soak (Step 18). Watermark wear-ring and
         per-sender last-seen ring are a refinement (single Kv cell for now: 100k×1024 ≈ 10⁸ transfers).
 
-- [ ] **12. Duty governor (EU).** `net/duty.rs`: per-sub-band rolling-hour airtime, ToA per
-  frame (§2.6), defer/refuse over 1 %.
-  - [ ] **Verify** (`net_duty`): drive the Node above 1 % (tight max-frame loop); monitor shows
-        accumulating airtime and `DutyLimited`/deferral once the budget is hit, then resumption as
-        the window rolls. Confirm the Gateway is governed too (ACK airtime counts).
+- [x] **12. Duty governor (EU).** `duty.rs`: token-bucket airtime accounting (cap 36 s = 1 % of an
+  hour, refill 1 % of wall-clock), `frame_toa_ms` (§2.6). Integrated into `Net::send` (every TX incl.
+  retransmits) and `send_ack` (ACKs governed too); `SendResult::DutyLimited`.
+  - [x] **Verify** (`net_duty_kat`, 1 board, deterministic): ✅ ToA(30B)=17ms, ToA(96B)=44ms;
+        bucket allows 5×17ms from 100ms then refuses; refills 10ms/1s; caps correctly. ALL PASS.
+        Regression: `net_confirmed` still `Delivered (59 ms)` with the governor active.
 
 - [ ] **13. Bulk transfer + downlink pull.** `net/bulk.rs` (announce → BULK_REQ/BULK_DATA,
   24-bit index, last-chunk, 30 s idle timeout, streaming source/sink) + `bulk_send`/`bulk_recv`/

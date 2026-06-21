@@ -19,6 +19,7 @@ pub mod aes;
 pub mod ccm;
 pub mod config;
 pub mod device;
+pub mod duty;
 pub mod frame;
 pub mod net;
 pub mod regs;

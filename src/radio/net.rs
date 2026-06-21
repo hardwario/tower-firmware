@@ -18,6 +18,7 @@ use embassy_time::{Duration, Timer};
 use super::ccm::Ccm;
 use super::config::{self, Band, RfConfig};
 use super::device::{RadioError, Spirit1};
+use super::duty::{self, DutyGovernor};
 use super::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
 use crate::storage::Kv;
 
@@ -56,6 +57,8 @@ pub enum SendResult {
     NotDelivered,
     /// CSMA reported the channel busy.
     Busy,
+    /// The duty governor refused the TX (would exceed the airtime budget).
+    DutyLimited,
     /// A local error (bad length, radio fault).
     Error(RadioError),
 }
@@ -104,6 +107,8 @@ pub struct Net {
     accepts: u32,
     /// EEPROM-backed counter persistence.
     kv: Kv<'static>,
+    /// EU duty-cycle governor (airtime budget for all TX).
+    duty: DutyGovernor,
     /// Cached ACK bytes for the most recent confirmed RX, to re-send on a
     /// byte-identical retransmit (§7.3).
     cached_ack: [u8; MAX_FRAME],
@@ -147,6 +152,7 @@ impl Net {
             last_seen,
             accepts: 0,
             kv,
+            duty: DutyGovernor::eu(),
             cached_ack: [0; MAX_FRAME],
             cached_ack_len: 0,
             cached_ack_for: 0,
@@ -212,12 +218,18 @@ impl Net {
             Err(_) => return SendResult::Error(RadioError::TooLong),
         };
 
+        let toa = duty::frame_toa_ms(n);
         let reps = if confirmed { reps.clamp(1, 10) } else { 1 };
         let mut result = SendResult::NotDelivered;
         for attempt in 0..reps {
             if attempt > 0 {
                 // Random 0–100 ms backoff before a retransmit (§7.3).
                 Timer::after(Duration::from_millis(self.backoff_ms() as u64)).await;
+            }
+            // Duty governor: every TX (incl. retransmits) counts (§2.2).
+            if !self.duty.try_tx(toa) {
+                result = SendResult::DutyLimited;
+                break;
             }
             match self.radio.tx(&frame_buf[..n], false, TX_TIMEOUT).await {
                 Ok(()) => {}
@@ -336,11 +348,15 @@ impl Net {
         };
         let mut ack = [0u8; MAX_FRAME];
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &self.key, &hdr, &payload, &mut ack) {
+            // ACK airtime is governed too (§2.2); skip it if over budget — the
+            // sender will retransmit. Cache it regardless for retransmit dedup.
             self.advance_tx_counter(); // ACK consumes a counter (its own, §6)
             self.cached_ack[..n].copy_from_slice(&ack[..n]);
             self.cached_ack_len = n;
             self.cached_ack_for = acked;
-            let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
+            if self.duty.try_tx(duty::frame_toa_ms(n)) {
+                let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
+            }
         }
     }
 

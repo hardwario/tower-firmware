@@ -74,6 +74,7 @@ async fn node(net: &mut Net) -> ! {
             SendResult::Delivered => info!(target: "confirmed", "seq={} Delivered ({} ms)", seq, ms),
             SendResult::NotDelivered => warn!(target: "confirmed", "seq={} NotDelivered ({} ms)", seq, ms),
             SendResult::Busy => warn!(target: "confirmed", "seq={} Busy", seq),
+            SendResult::DutyLimited => warn!(target: "confirmed", "seq={} DutyLimited", seq),
             SendResult::Error(e) => error!(target: "confirmed", "seq={} Error {:?}", seq, e),
         }
         seq = seq.wrapping_add(1);
