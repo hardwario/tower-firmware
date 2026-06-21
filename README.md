@@ -23,7 +23,7 @@ protection, bulk transfer, OTA pairing); flashable programs live in
 | RGB strip | WS2812B/SK6812 on PA1 — TIM2_CH2 PWM + DMA1_CH3 |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12 — gates STOP (stay awake while plugged in) |
-| Radio | SPIRIT1 (SPSGRF, 868 MHz) — SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); see [`docs/radio.md`](docs/radio.md) |
+| Radio | SPIRIT1 (SPSGRF) — SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
 
 ## Quick start
 

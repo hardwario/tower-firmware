@@ -179,6 +179,12 @@ impl Net {
         let _ = kv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes());
         let last_seen = read_u32(&kv, KEY_LASTSEEN).unwrap_or(0);
 
+        // Duty policy follows the band: EU 1 %, US 915 unrestricted (§2.2).
+        let duty = match cfg.band {
+            Band::Eu868 => DutyGovernor::eu(),
+            Band::Us915 => DutyGovernor::us915(),
+        };
+
         Ok(Self {
             radio,
             ccm: Ccm::new(),
@@ -190,7 +196,7 @@ impl Net {
             tx_counter: resume,
             reserve_limit,
             kv,
-            duty: DutyGovernor::eu(),
+            duty,
             cached_ack: [0; MAX_FRAME],
             cached_ack_len: 0,
             cached_ack_for: 0,
@@ -448,6 +454,19 @@ impl Net {
             // counter < last-seen → replay; drop silently (replay state untouched).
             None
         }
+    }
+
+    /// Retune to a different `band`/`channel` at runtime (both ends must agree).
+    /// Rewrites the synthesizer registers (VCO recalibrates on the next TX/RX) and
+    /// moves the duty policy to match the band (EU 1 % / US 915 unrestricted).
+    /// A single firmware image runs either band — the choice is made here, live.
+    pub async fn set_band(&mut self, band: Band, channel: u8) -> Result<(), RadioError> {
+        config::set_band(&mut self.radio, band, channel).await?;
+        self.duty = match band {
+            Band::Eu868 => DutyGovernor::eu(),
+            Band::Us915 => DutyGovernor::us915(),
+        };
+        Ok(())
     }
 
     /// Wait `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.

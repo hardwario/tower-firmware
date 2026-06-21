@@ -33,7 +33,7 @@ async fn run(b: Board) {
     if let Err(e) = radio.read_device_id() {
         error!(target: "csma", "device id: {:?}", e);
     }
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::Eu868, channel: CHANNEL }).await {
+    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: CHANNEL }).await {
         error!(target: "csma", "config: {:?}", e);
     }
 

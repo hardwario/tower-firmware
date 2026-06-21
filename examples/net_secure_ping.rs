@@ -35,7 +35,7 @@ async fn run(b: Board) {
     if radio.read_device_id().is_err() {
         error!(target: "secping", "device id mismatch");
     }
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::Eu868, channel: 0 }).await {
+    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: 0 }).await {
         error!(target: "secping", "config: {:?}", e);
     }
     let mut ccm = Ccm::new();

@@ -32,7 +32,7 @@ async fn run(b: Board) {
         b.radio_cs, b.radio_sdn, b.radio_irq,
     );
     let kv = Kv::new(b.storage);
-    let mut net = match Net::new(radio, kv, NetConfig { my_id: MY_ID, key: KEY, band: Band::Eu868, channel: 0 }).await {
+    let mut net = match Net::new(radio, kv, NetConfig { my_id: MY_ID, key: KEY, band: Band::DEFAULT, channel: 0 }).await {
         Ok(n) => n,
         Err(e) => {
             error!(target: "persist", "net init: {:?}", e);

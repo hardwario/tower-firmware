@@ -37,7 +37,7 @@ async fn run(b: Board) {
     if let Err(e) = radio.read_device_id() {
         error!(target: "sleep", "device id: {:?}", e);
     }
-    let cfg = RfConfig { band: config::Band::Eu868, channel: CHANNEL };
+    let cfg = RfConfig { band: config::Band::DEFAULT, channel: CHANNEL };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
         error!(target: "sleep", "config: {:?}", e);
     }

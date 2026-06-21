@@ -33,7 +33,7 @@ async fn run(b: Board) {
     let _ = radio.exit_shutdown().await;
     let _ = radio.read_device_id();
     let cfg = RfConfig {
-        band: config::Band::Eu868,
+        band: config::Band::DEFAULT,
         channel: 0,
     };
     let _ = config::apply(&mut radio, &cfg).await;

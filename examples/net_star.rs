@@ -56,7 +56,7 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let (my_id, key) = (GW_ID, KEY_A);
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key, band: Band::Eu868, channel: 0 }).await {
+    let mut net = match Net::new(radio, kv, NetConfig { my_id, key, band: Band::DEFAULT, channel: 0 }).await {
         Ok(n) => n,
         Err(e) => {
             error!(target: "star", "net init: {:?}", e);

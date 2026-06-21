@@ -50,6 +50,14 @@ impl DutyGovernor {
         Self::new(EU_CAP_MS, EU_PERMIL)
     }
 
+    /// US 915 governor: no EU-style duty limit (100 % refill). FCC 15.247 governs
+    /// US operation by channel-dwell/PSD rather than a fixed duty cycle, so the
+    /// bucket simply refills as fast as it drains. (A compliant product still owes
+    /// FHSS/wideband — this is for bench testing; see [`Band`](super::config::Band).)
+    pub fn us915() -> Self {
+        Self::new(EU_CAP_MS, 1000)
+    }
+
     /// Refill from real elapsed time, then try to consume `toa_ms` of airtime.
     /// Returns `false` (don't transmit) if the budget is insufficient.
     pub fn try_tx(&mut self, toa_ms: u32) -> bool {

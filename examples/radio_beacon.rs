@@ -42,7 +42,7 @@ async fn run(b: Board) {
         error!(target: "radio", "device id: {:?}", e);
     }
     let cfg = RfConfig {
-        band: config::Band::Eu868,
+        band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {

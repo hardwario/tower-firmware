@@ -64,7 +64,19 @@ let (len, q) = radio.rx(&mut buf, Duration::from_secs(5)).await?;
 radio.cw_test(true).await?;            // unmodulated carrier (bring-up / range)
 radio.to_standby().await?;             // low-power states: to_ready/to_standby/to_sleep
 let raw = radio.rssi_sample().await?;  // on-demand channel RSSI  (dBm = raw/2 - 130)
+
+// Retune to another band/channel at runtime (one binary runs either band):
+config::set_band(&mut radio, config::Band::Us915, 0).await?;   // raw layer
+// or, on the network layer (also moves the duty policy): net.set_band(band, ch)
 ```
+
+**Bands.** `Band::Eu868` (default) and `Band::Us915` both lie in the SPIRIT1 high
+VCO band, so they share every setting except base frequency + channel spacing; the
+band is a **runtime** choice — pass it to `Net::new`/`config::apply`, or switch a
+live radio with [`Net::set_band`]/`config::set_band` (rewrites only the synth
+registers; the VCO auto-recalibrates on the next TX/RX). **915 MHz is for bench
+testing only** — this ~216 kHz narrowband signal is not FCC 15.247-compliant
+(which needs FHSS or ≥500 kHz wideband). See `radio_band` for a live-switch demo.
 
 RF configuration (`config::apply`) programs the 50 MHz-crystal-specific setup
 (REFDIV, IF offsets, SYNT/WCP, GFSK 19.2 kbps, 20 kHz deviation, ~216 kHz RX
@@ -203,9 +215,11 @@ if let Some(id) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
 if let Some(key) = net.join(my_id, PAIRING_WINDOW).await { /* store key */ }
 ```
 
-**EU duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,
-bulk, pairing) against the 1 % / hour EU limit; a send that would exceed the budget
-returns `DutyLimited` instead of transmitting. Time-on-air is computed per frame
+**Duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,
+bulk, pairing); a send that would exceed the budget returns `DutyLimited` instead
+of transmitting. The policy follows the band and is reselected by `set_band`: EU
+868 enforces the 1 % / hour limit; US 915 is unrestricted (FCC 15.247 governs by
+channel-dwell/PSD, not a fixed duty cycle). Time-on-air is computed per frame
 length from the 19.2 kbps rate. Verified independently by `net_duty_kat`.
 
 ## Examples
@@ -236,6 +250,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |
 | `net_channel` | node / gateway | secured link on a non-default channel (VCO recal, §8) |
+| `radio_band` | node / gateway | runtime 868↔915 switching via `set_band` (live retune) |
 | `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT (§3/§6/§9) |
 | `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery (§9) |
 | `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters (§4/§6) |
@@ -257,8 +272,10 @@ sets this; it is unrelated to the RF/demod registers.
   sniffer in range during the (short, user-initiated) pairing window recovers the
   delivered per-node key, and there is no mutual authentication (§7.6). Pair at
   close range / reduced power; enable flash RDP for production key storage.
-- **EU 868 only (for now).** US 915 is provisional in the spec (§2.2); the `Band`
-  abstraction is in place but only `Eu868` is implemented and verified.
+- **US 915 is bench-test only.** Both `Eu868` and `Us915` are implemented and
+  hardware-verified (runtime-switchable via `set_band`), but the ~216 kHz
+  narrowband signal is **not** FCC 15.247-compliant — a US product needs an added
+  FHSS/wideband scheme. EU 868 is the compliant, default band.
 - **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance
   without lab instruments; narrowing it (per the §2.1 AFC-vs-temperature data) is a
   future optimization. All three EU channels are usable as-is.

@@ -26,7 +26,7 @@ async fn run(b: Board) {
         error!(target: "edge", "exit_shutdown: {:?}", e);
     }
     let id_before = radio.read_device_id();
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::Eu868, channel: 0 }).await {
+    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: 0 }).await {
         error!(target: "edge", "config: {:?}", e);
     }
 

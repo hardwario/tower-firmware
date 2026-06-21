@@ -41,7 +41,7 @@ async fn run(b: Board) {
     }
 
     let cfg = RfConfig {
-        band: config::Band::Eu868,
+        band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     match config::apply(&mut radio, &cfg).await {

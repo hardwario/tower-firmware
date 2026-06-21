@@ -16,6 +16,7 @@
 
 use super::device::{RadioError, Spirit1};
 use super::regs;
+use super::spi::Spirit1Spi;
 
 /// Crystal frequency of the SPSGRF module.
 pub const F_XO: u64 = 50_000_000;
@@ -25,37 +26,55 @@ pub const F_XO: u64 = 50_000_000;
 /// SYNT divider is scaled accordingly.
 const REFDIV: u64 = 2;
 
-/// Operating band. EU 868 is implemented and verified; US 915 is provisional
-/// (see RADIO.md §2.2) and added later behind the same abstraction.
+/// Operating band. Both lie in the SPIRIT1 *high* VCO band (779–956 MHz), so they
+/// share the synthesizer band-select (B=6, BS=1) and every digital-domain setting
+/// (modulation, deviation, RX filter, IF) — only the base frequency and channel
+/// spacing differ, derived from these accessors.
+///
+/// **Regulatory note:** EU 868 operation here respects the 1 % duty cycle (§2.2).
+/// US 915 is provided for **test/development**: this is a ~216 kHz narrowband
+/// signal, which is *not* FCC 15.247-compliant (that requires FHSS over ≥50
+/// channels or ≥500 kHz digital bandwidth). Use it on the bench, not in a product,
+/// without adding a compliant channel-hopping / wideband scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
     /// EU 868 MHz: base 868.1 MHz, 200 kHz spacing, ch0/1/2 = 868.1/868.3/868.5.
     Eu868,
+    /// US 915 MHz (902–928 ISM): base 915.0 MHz, 200 kHz spacing,
+    /// ch0/1/2 = 915.0/915.2/915.4. Test/dev only (see the type-level note).
+    Us915,
 }
 
 impl Band {
+    /// Band the examples come up on; they can retune at runtime with
+    /// [`Net::set_band`](crate::radio::net::Net::set_band) (a single binary supports
+    /// both bands — selection is a runtime decision, never a build flag).
+    pub const DEFAULT: Band = Band::Eu868;
+
     /// Base (channel-0) carrier frequency in Hz.
     pub const fn base_hz(self) -> u64 {
         match self {
             Band::Eu868 => 868_100_000,
+            Band::Us915 => 915_000_000,
         }
     }
-    /// Channel spacing in Hz.
+    /// Channel spacing in Hz. Must keep `CHSPACE = spacing·2^15/f_XO ≤ 255`
+    /// (≈389 kHz max at 50 MHz).
     pub const fn spacing_hz(self) -> u64 {
         match self {
-            Band::Eu868 => 200_000,
+            Band::Eu868 | Band::Us915 => 200_000,
         }
     }
-    /// Synthesizer band-select divider B (Eq. 5). 868 MHz is the high band → B=6.
+    /// Synthesizer band-select divider B (Eq. 5). Both bands are high band → B=6.
     const fn b_div(self) -> u64 {
         match self {
-            Band::Eu868 => 6,
+            Band::Eu868 | Band::Us915 => 6,
         }
     }
     /// BS field value for SYNT0 (1 = high band).
     const fn bs_field(self) -> u8 {
         match self {
-            Band::Eu868 => 1,
+            Band::Eu868 | Band::Us915 => 1,
         }
     }
 }
@@ -107,6 +126,36 @@ fn synt_value(fbase_hz: u64, b_div: u64) -> u32 {
     ((num + F_XO / 2) / F_XO) as u32
 }
 
+/// Write the band/channel-dependent synthesizer registers (SYNT3..0, CHSPACE,
+/// CHNUM) — all a band switch needs to rewrite, since every other RF setting is
+/// band-independent. Shared by [`apply`] and [`set_band`].
+fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), RadioError> {
+    // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
+    let synt = synt_value(band.base_hz(), band.b_div());
+    let bs = band.bs_field();
+    let synt3 = ((synt >> 21) & 0x1F) as u8; // WCP[7:5]=0
+    let synt2 = ((synt >> 13) & 0xFF) as u8;
+    let synt1 = ((synt >> 5) & 0xFF) as u8;
+    let synt0 = (((synt & 0x1F) as u8) << 3) | (bs & 0x07);
+    spi.write_regs(regs::SYNT3, &[synt3, synt2, synt1, synt0])?;
+    // Channel spacing (steps of f_XO/2^15) and channel number.
+    let chspace = ((band.spacing_hz() * (1u64 << 15) + F_XO / 2) / F_XO) as u8;
+    spi.write_reg(regs::CHSPACE, chspace)?;
+    spi.write_reg(regs::CHNUM, channel)?;
+    Ok(())
+}
+
+/// Retune the radio to a different `band`/`channel` at **runtime**: bring the part
+/// to READY, rewrite only the synthesizer registers, and let the VCO recalibrate
+/// on the next TX/RX entry (auto-cal). All other RF settings are band-independent
+/// and untouched, so this is cheap. Prefer
+/// [`Net::set_band`](crate::radio::net::Net::set_band), which also moves the duty
+/// policy to match the band.
+pub async fn set_band(radio: &mut Spirit1, band: Band, channel: u8) -> Result<(), RadioError> {
+    radio.to_ready().await?;
+    write_band_regs(radio.spi(), band, channel)
+}
+
 /// Apply a full RF configuration. Must leave the part in READY. The caller has
 /// already brought the radio out of shutdown and verified the device ID.
 pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError> {
@@ -137,19 +186,8 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
     spi.write_reg(regs::IF_OFFSET_ANA, 0x36)?;
     spi.write_reg(regs::IF_OFFSET_DIG, 0xAC)?;
 
-    // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
-    let synt = synt_value(cfg.band.base_hz(), cfg.band.b_div());
-    let bs = cfg.band.bs_field();
-    let synt3 = ((synt >> 21) & 0x1F) as u8; // WCP[7:5]=0
-    let synt2 = ((synt >> 13) & 0xFF) as u8;
-    let synt1 = ((synt >> 5) & 0xFF) as u8;
-    let synt0 = (((synt & 0x1F) as u8) << 3) | (bs & 0x07);
-    spi.write_regs(regs::SYNT3, &[synt3, synt2, synt1, synt0])?;
-
-    // Channel spacing (steps of f_XO/2^15) and channel number.
-    let chspace = ((cfg.band.spacing_hz() * (1u64 << 15) + F_XO / 2) / F_XO) as u8;
-    spi.write_reg(regs::CHSPACE, chspace)?;
-    spi.write_reg(regs::CHNUM, cfg.channel)?;
+    // Base frequency + channel (the only band-dependent registers).
+    write_band_regs(spi, cfg.band, cfg.channel)?;
 
     // Modulation / data rate / deviation / channel filter — M/E values computed
     // with the ST library's exact search algorithms for f_XO=50 MHz, divider on:
