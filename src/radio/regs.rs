@@ -12,7 +12,6 @@
 //! MC_STATE status bytes are returned on MISO during the header + address bytes
 //! of *every* transaction (see [`state_from_status`]).
 
-#![allow(dead_code)]
 
 // --- SPI header bytes (§10.2) ---
 /// Header: write to register/FIFO (A/C=0, W/R=0).
@@ -217,4 +216,4 @@ pub const IRQ_AES_END: u32 = 1 << 30;
 // --- GPIO0_CONF value to route nIRQ (active-low) to GPIO0 ---
 // GPIO_SELECT[4:0]=0 (digital-output signal 0 = nIRQ), GPIO_MODE[1:0]=10
 // (digital output, low power). Bit layout: [7:3]=select, [2]=reserved, [1:0]=mode.
-pub const GPIO_CONF_IRQ: u8 = 0b0000_0_010;
+pub const GPIO_CONF_IRQ: u8 = 0b0000_0010;

@@ -7,7 +7,6 @@
 //! hour = 36 000 ms) and counts **all** TX — data, ACK, bulk, retransmits, JOIN.
 //! The gateway is governed too (regulatory, independent of mains power).
 
-#![allow(dead_code)]
 
 use embassy_time::Instant;
 
@@ -19,10 +18,12 @@ pub const EU_CAP_MS: u32 = 36_000;
 pub const EU_PERMIL: u32 = 10;
 
 /// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
-/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — §2.6.
+/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — §2.6. Rounded
+/// up so the regulatory budget is never under-counted.
+#[must_use]
 pub fn frame_toa_ms(frame_len: usize) -> u32 {
     let bytes = 4 + 4 + 1 + frame_len as u32 + 2;
-    (bytes * 8 * 1000) / BITRATE
+    (bytes * 8 * 1000).div_ceil(BITRATE)
 }
 
 /// Token-bucket duty governor.

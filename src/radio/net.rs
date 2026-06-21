@@ -13,7 +13,6 @@
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
 //! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, §7.4).
 
-#![allow(dead_code)]
 
 use embassy_time::{Duration, Instant, Timer};
 
@@ -169,8 +168,9 @@ pub struct Net {
 
 impl Net {
     /// Bring the radio up, apply the RF config, and initialise counters from
-    /// EEPROM (`kv`): resume the TX counter at the persisted reserve watermark
-    /// and reserve the next block, and restore the per-peer last-seen.
+    /// EEPROM (`kv`): resume the TX counter at the persisted reserve watermark and
+    /// reserve the next block, and restore the default-lane last-seen (per-peer
+    /// lanes are restored when their peer is registered via [`add_peer`](Self::add_peer)).
     pub async fn new(mut radio: Spirit1, mut kv: Kv<'static>, cfg: NetConfig) -> Result<Self, RadioError> {
         radio.exit_shutdown().await?;
         radio.read_device_id()?;
@@ -211,6 +211,7 @@ impl Net {
     }
 
     /// This device's ID.
+    #[must_use]
     pub fn id(&self) -> u32 {
         self.my_id
     }
@@ -223,24 +224,27 @@ impl Net {
     }
 
     /// Current live TX counter (for diagnostics / persistence demos).
+    #[must_use]
     pub fn tx_counter(&self) -> u32 {
         self.tx_counter
     }
 
     /// Current persisted reserve watermark.
+    #[must_use]
     pub fn reserve_watermark(&self) -> u32 {
         self.reserve_limit
     }
 
     /// Current last-seen counter on the default lane (single-link diagnostics).
+    #[must_use]
     pub fn last_seen(&self) -> u32 {
         self.default_last_seen
     }
 
     /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
     /// its own replay lane. The peer's persisted last-seen is restored. Returns
-    /// `false` only if the table is full (and the id is new). Up to
-    /// [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, §7.2).
+    /// `false` only if the table is full (and the id is new) — check the return in
+    /// production code. Up to [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, §7.2).
     pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
         if let Some(i) = self.peer_slot(id) {
             self.peers[i].as_mut().unwrap().key = *key; // re-key in place
@@ -268,11 +272,13 @@ impl Net {
     }
 
     /// Number of registered peers.
+    #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.iter().filter(|p| p.is_some()).count()
     }
 
     /// Last-seen counter for a registered peer (`None` if not registered).
+    #[must_use]
     pub fn peer_last_seen(&self, id: u32) -> Option<u32> {
         self.peer_slot(id).map(|i| self.peers[i].as_ref().unwrap().last_seen)
     }
@@ -306,14 +312,14 @@ impl Net {
                 let p = self.peers[i].as_mut().unwrap();
                 p.last_seen = counter;
                 p.accepts = p.accepts.wrapping_add(1);
-                if p.accepts % P == 0 {
+                if p.accepts.is_multiple_of(P) {
                     let _ = self.kv.set_bytes(KEY_LASTSEEN_BASE + i as u16, &counter.to_le_bytes());
                 }
             }
             None => {
                 self.default_last_seen = counter;
                 self.default_accepts = self.default_accepts.wrapping_add(1);
-                if self.default_accepts % P == 0 {
+                if self.default_accepts.is_multiple_of(P) {
                     let _ = self.kv.set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
                 }
             }
@@ -577,19 +583,24 @@ impl Net {
                     continue;
                 }
                 let mut dbuf = [0u8; BULK_CHUNK];
-                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await {
-                    if dhdr.frame_type == FrameType::BulkData
-                        && dhdr.src == src
-                        && dhdr.dest == self.my_id
-                        && dhdr.counter == session
-                        && dhdr.bulk_index == Some(k as u32)
-                    {
-                        let off = k * BULK_CHUNK;
-                        out[off..off + dlen].copy_from_slice(&dbuf[..dlen]);
-                        received += dlen;
-                        got = true;
-                        break;
+                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await
+                    && dhdr.frame_type == FrameType::BulkData
+                    && dhdr.src == src
+                    && dhdr.dest == self.my_id
+                    && dhdr.counter == session
+                    && dhdr.bulk_index == Some(k as u32)
+                {
+                    let off = k * BULK_CHUNK;
+                    // Bound the copy to the announced length: a peer-controlled
+                    // (authenticated, but possibly buggy) `dlen` must never write
+                    // past `out` — e.g. a full 64 B last chunk for a 65 B total.
+                    if off + dlen > total_len {
+                        continue; // malformed chunk; retry within reps
                     }
+                    out[off..off + dlen].copy_from_slice(&dbuf[..dlen]);
+                    received += dlen;
+                    got = true;
+                    break;
                 }
             }
             self.advance_tx_counter();
@@ -643,13 +654,12 @@ impl Net {
 
             // Wait for the JOIN_CONFIRM — commit only on receipt.
             let mut cbuf = [0u8; 8];
-            if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await {
-                if chdr.frame_type == FrameType::JoinConfirm
-                    && cplen >= 4
-                    && u32::from_le_bytes([cbuf[0], cbuf[1], cbuf[2], cbuf[3]]) == assign_id
-                {
-                    return Some(proposed);
-                }
+            if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
+                && chdr.frame_type == FrameType::JoinConfirm
+                && cplen >= 4
+                && u32::from_le_bytes([cbuf[0], cbuf[1], cbuf[2], cbuf[3]]) == assign_id
+            {
+                return Some(proposed);
             }
             // Lost confirm: discard this tentative entry, keep the window open.
         }
@@ -674,25 +684,26 @@ impl Net {
             self.advance_tx_counter();
 
             let mut buf = [0u8; 24];
-            if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await {
-                if hdr.frame_type == FrameType::JoinResp && plen >= 20 {
-                    let assigned = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    let mut key = [0u8; 16];
-                    key.copy_from_slice(&buf[4..20]);
-                    // Confirm, then commit.
-                    let conf_hdr = Header {
-                        frame_type: FrameType::JoinConfirm,
-                        flags: 0,
-                        src: assigned,
-                        dest: hdr.src,
-                        counter: self.tx_counter,
-                        bulk_index: None,
-                    };
-                    Timer::after(ACK_TURNAROUND).await;
-                    self.tx_pair(&conf_hdr, &assigned.to_le_bytes()).await;
-                    self.advance_tx_counter();
-                    return Some((assigned, key));
-                }
+            if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await
+                && hdr.frame_type == FrameType::JoinResp
+                && plen >= 20
+            {
+                let assigned = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let mut key = [0u8; 16];
+                key.copy_from_slice(&buf[4..20]);
+                // Confirm, then commit.
+                let conf_hdr = Header {
+                    frame_type: FrameType::JoinConfirm,
+                    flags: 0,
+                    src: assigned,
+                    dest: hdr.src,
+                    counter: self.tx_counter,
+                    bulk_index: None,
+                };
+                Timer::after(ACK_TURNAROUND).await;
+                self.tx_pair(&conf_hdr, &assigned.to_le_bytes()).await;
+                self.advance_tx_counter();
+                return Some((assigned, key));
             }
         }
         None

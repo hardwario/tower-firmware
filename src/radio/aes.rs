@@ -10,7 +10,6 @@
 //! CBC-MAC and CTR (and thus AES-CCM) on top of it in firmware, which keeps this
 //! driver tiny and avoids the engine's chaining-mode state machine.
 
-#![allow(dead_code)]
 
 use embassy_stm32::pac;
 use embassy_stm32::pac::aes::vals::{Datatype, Mode};

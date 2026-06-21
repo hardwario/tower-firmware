@@ -113,7 +113,7 @@ src/radio/
   `aes`/`ccm` crates as a fallback. AES needs **no** embassy feature (PAC + `RCC.aesen`). No
   DMA feature for the radio. `embedded-hal` (present) reused for a HAL-independent SPI bound.
 - **`justfile`** — extend `build`/`flash` to thread `--features` through to `cargo objcopy`
-  (e.g. `just flash net_uplink role-gateway -p $GW`). Small, mechanical edit.
+  (e.g. `just flash net_confirmed role-gateway -p $GW`). Small, mechanical edit.
 - A small **shared test-identity table** (throwaway IDs/keys) `include!`d by the examples so
   the two boards address each other without a provisioning step.
 
@@ -335,7 +335,7 @@ invariant FAILED** (visible overnight without scrollback).
 | `crypto_aes_kat` | 7 | 1 | FIPS-197 ECB/CTR known-answer test (§6) |
 | `crypto_ccm_kat` | 8 | 1 | CCM vectors + tamper→AuthFail (§5, §6) |
 | `net_secure_ping` | 9 | Node + GW | one CCM-sealed frame end-to-end (§3, §6) |
-| `net_uplink` | 10 | Node + GW | confirmed/unconfirmed uplink + ACK (§7.3, §7.7-1) |
+| `net_confirmed` | 10 | Node + GW | confirmed/unconfirmed uplink + ACK (§7.3, §7.7-1) |
 | `net_ack_retransmit` | 10 | Node + GW | forced ACK loss → identical retransmit, cached ACK (§7.3, §7.7-2) |
 | `net_replay` | 11 | Node + GW | replay rejection, state untouched (§6, §7.4, §9) |
 | `net_counter_persist` | 11 | Node + GW | reserve-ahead watermark survives reboot (§6, §7.4) |

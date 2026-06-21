@@ -1,12 +1,11 @@
-//! SPIRIT1 chip handle: power/shutdown control, device-ID verification, and the
-//! MC-state machine (READY / STANDBY / SLEEP, with stuck-state recovery).
+//! SPIRIT1 chip handle: power/shutdown control, device-ID verification, the
+//! MC-state machine (READY / STANDBY / SLEEP, with stuck-state recovery), and the
+//! nIRQ-driven async [`tx`](Spirit1::tx) / [`rx`](Spirit1::rx) operations.
 //!
-//! This is the synchronous register-sequencing layer over [`Spirit1Spi`]. It
-//! drives the SDN pin (PB7) and never touches the nIRQ line — interrupt-driven
-//! TX/RX sequencing lives in [`driver`](super::driver). RF configuration is
-//! applied separately (see [`config`](super::config)).
+//! Register sequencing runs over [`Spirit1Spi`]; the SDN pin (PB7) and the nIRQ
+//! line (PA7 `ExtiInput`) are owned here. RF configuration is applied separately
+//! (see [`config`](super::config)).
 
-#![allow(dead_code)]
 
 use embassy_futures::select::{Either, select};
 use embassy_stm32::Peri;
@@ -15,7 +14,7 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::peripherals::{PA15, PB3, PB4, PB5, PB7, SPI1};
 use embassy_stm32::spi::Error as SpiError;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use super::config::SignalQuality;
 use super::regs;
@@ -457,8 +456,12 @@ impl Spirit1 {
         let _ = self.irq_status();
         self.spi.command(regs::CMD_RX)?;
 
+        // Absolute deadline: a stream of filtered/discarded frames re-arms RX
+        // (below) but must NOT keep restarting the timeout, or a busy channel
+        // would starve the caller's ACK/bulk window.
+        let deadline = Instant::now() + timeout;
         loop {
-            match select(self.irq.wait_for_low(), Timer::after(timeout)).await {
+            match select(self.irq.wait_for_low(), Timer::at(deadline)).await {
                 Either::First(_) => {
                     let s = self.irq_status()?;
                     if s & regs::IRQ_RX_DATA_READY != 0 {

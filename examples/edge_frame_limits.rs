@@ -67,7 +67,7 @@ async fn run(_b: Board) {
     {
         let mut b = buf;
         let r = frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]);
-        let ok = matches!(&r, Ok((h, range)) if h.counter == 42 && &b[range.clone()] == &payload[..]);
+        let ok = matches!(&r, Ok((h, range)) if h.counter == 42 && b[range.clone()] == payload[..]);
         check("valid frame opens + round-trips", ok);
     }
     // Bad version: flip a version bit (bits[7:5]).

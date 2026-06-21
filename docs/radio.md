@@ -192,8 +192,10 @@ with a short, user-initiated window, proximity and reduced power; enable flash R
 for production key storage.
 
 ```rust
-let proposed = net.open_pairing(Duration::from_secs(10), assign_id, &assign_key).await; // host
-let (id, key) = net.join(my_proposed_id, Duration::from_secs(10)).await?;               // joiner
+// host: returns Some(joiner_proposed_id) on commit
+let paired = net.open_pairing(Duration::from_secs(10), assign_id, &assign_key).await;
+// joiner: returns Some((assigned_id, per_node_key)) on commit
+if let Some((id, key)) = net.join(my_proposed_id, Duration::from_secs(10)).await { /* install */ }
 ```
 
 **EU duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,

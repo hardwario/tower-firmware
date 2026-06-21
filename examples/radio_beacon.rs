@@ -1,10 +1,10 @@
-//! radio_beacon / radio_sniffer — first real modulated two-board link.
+//! radio_beacon — first real modulated two-board link (one file, two roles).
 //!
 //! Build twice:
 //!   TOWER_FEATURES=role-node    just flash radio_beacon   # TX: sends a counter
 //!                                                          #     frame every 1 s
-//!   TOWER_FEATURES=role-gateway just flash radio_beacon   # RX: logs each frame
-//!                                                          #     + RSSI/LQI/SQI/AFC
+//!   TOWER_FEATURES=role-gateway just flash radio_beacon   # RX (sniffer): logs each
+//!                                                          #     frame + RSSI/LQI/SQI/AFC
 //! (no feature defaults to the RX/sniffer role).
 //!
 //! The TX sends a small `[seq:4][0xA5 pad...]` payload; the RX prints the received

@@ -28,7 +28,6 @@
 //! memory-mapped load; each write programs in a few ms.
 
 // Reusable SDK surface: both layers are fully exposed even if an app uses one.
-#![allow(dead_code)]
 
 use embassy_stm32::flash::{Blocking, EEPROM_SIZE, Flash};
 use serde::Serialize;

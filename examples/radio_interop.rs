@@ -206,12 +206,12 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
                 }
             }
             // Strict-monotonic accepted counter (no replay/reorder accepted).
-            if let Some(p) = last {
-                if rx.counter <= p {
-                    order += 1;
-                    fails += 1;
-                    error!(target: "soak", "INVARIANT: counter {} <= last {} ✗", rx.counter, p);
-                }
+            if let Some(p) = last
+                && rx.counter <= p
+            {
+                order += 1;
+                fails += 1;
+                error!(target: "soak", "INVARIANT: counter {} <= last {} ✗", rx.counter, p);
             }
             last = Some(rx.counter);
 

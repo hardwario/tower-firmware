@@ -138,7 +138,7 @@ async fn rx_poll(radio: &mut Spirit1) -> ! {
         acc_irq |= radio.irq_status().unwrap_or(0);
 
         ticks += 1;
-        if ticks % 500 == 0 {
+        if ticks.is_multiple_of(500) {
             // ~1 s (500 * 2 ms)
             let st = radio.mc_state().unwrap_or(0xFF);
             info!(

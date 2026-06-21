@@ -27,7 +27,6 @@
 
 // Reusable SDK driver surface: the full register/feature set is exposed even if
 // an app uses a subset.
-#![allow(dead_code)]
 
 use embassy_time::{Duration, Instant};
 use embedded_hal::i2c::I2c;

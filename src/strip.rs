@@ -6,11 +6,12 @@
 //! animated effects), then [`show`](Strip::show) renders it — applying the
 //! global brightness and gamma correction — over the wire.
 //!
-//! **Brightness (0–100 %)** is gamma-corrected so the knob is *perceptually*
-//! linear: 50 % looks half as bright to the eye. Uses integer gamma 2.0
-//! (`out = (ch·b/100)² / 255`), no float or lookup tables — the eye's response
-//! (≈ √light) is the inverse of the squaring, so perceived brightness ∝ the
-//! 0–100 value. The same correction smooths colour gradients.
+//! **Brightness (0–100 %)** is gamma-corrected so the knob is *approximately
+//! perceptually* linear: 50 % looks roughly half as bright to the eye. Uses
+//! integer gamma 2.0 (`out = (ch·b/100)² / 255`), no float or lookup tables — the
+//! eye's response (≈ √light) is the inverse of the squaring, so perceived
+//! brightness ∝ the 0–100 value (gamma 2.0 approximates the ~2.2 sRGB curve).
+//! The same correction smooths colour gradients.
 //!
 //! Effects are **frame-based**: each effect method fills the framebuffer for a
 //! frame counter `t` that the caller advances in its own loop, e.g.
@@ -34,7 +35,6 @@
 //! Scope: the framebuffer is RGB; on an RGBW strip the white channel is left
 //! off (use the [`ws2812`] driver directly for white-channel control).
 
-#![allow(dead_code)]
 
 use embassy_stm32::Peri;
 use embassy_stm32::peripherals::{DMA1_CH3, PA1, TIM2};
@@ -77,7 +77,7 @@ pub const WHITE: Rgb = Rgb::new(255, 255, 255);
 /// Apply brightness (0–100 %) and gamma 2.0 to one channel.
 fn correct(channel: u8, brightness: u8) -> u8 {
     let v = channel as u16 * brightness.min(100) as u16 / 100; // 0..=255 intent
-    ((v * v + 127) / 255) as u8 // gamma 2.0
+    ((v * v + 127) / 255) as u8 // gamma 2.0 (+127 = round to nearest)
 }
 
 /// Scale an intent colour by `factor`/255 (used by effects, stays in intent space).

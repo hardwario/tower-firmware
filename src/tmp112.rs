@@ -13,7 +13,6 @@
 
 // Reusable SDK driver surface: the full address set and lifecycle methods are
 // exposed even though the current app only exercises a subset.
-#![allow(dead_code)]
 
 use embedded_hal::i2c::I2c;
 

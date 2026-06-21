@@ -55,8 +55,9 @@ impl Console {
 
 static CONSOLE: Mutex<RefCell<Option<Console>>> = Mutex::new(RefCell::new(None));
 
-/// `log` backend: renders each record as `[<secs>.<ms>] <LEVEL> <message>`,
-/// where the timestamp is the monotonic uptime (survives STOP via the RTC).
+/// `log` backend: renders each record as `[<secs>.<ms>] <LEVEL> <module>: <message>`,
+/// where the timestamp is the monotonic uptime (survives STOP via the RTC) and
+/// `<module>` is the last segment of the record target (overridable per call).
 struct ConsoleLogger;
 
 impl log::Log for ConsoleLogger {
@@ -66,9 +67,7 @@ impl log::Log for ConsoleLogger {
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
+        // No `enabled()` recheck: `log`'s max-level filter already gated this call.
         let us = Instant::now().as_micros();
         let secs = us / 1_000_000;
         let ms = (us % 1_000_000) / 1_000;

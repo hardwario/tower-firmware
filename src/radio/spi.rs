@@ -11,7 +11,6 @@
 //! [`regs::state_from_status`](super::regs::state_from_status) on `status[0]` to
 //! get the current MC state for free — no extra read.
 
-#![allow(dead_code)]
 
 use embassy_stm32::Peri;
 use embassy_stm32::gpio::{Level, Output, Speed};

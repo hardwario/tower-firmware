@@ -7,7 +7,6 @@
 //! single-block AES encryption. The nonce is derived from the clear header (see
 //! [`frame`](super::frame)); the AAD is the whole cleartext header.
 
-#![allow(dead_code)]
 
 use super::aes::Aes;
 
@@ -17,6 +16,10 @@ const L: usize = 2;
 pub const NONCE_LEN: usize = 13;
 /// Authentication tag length.
 pub const TAG_LEN: usize = 8;
+/// Maximum supported associated-data length. The CBC-MAC prefixes AAD with a
+/// 2-byte length, so the encoding buffer is `2 + MAX_AAD`. The stack's only AAD
+/// is the frame header (≤ 17 B), so this is generous; callers must not exceed it.
+pub const MAX_AAD: usize = 32;
 
 /// AES-128-CCM context holding the AES engine.
 pub struct Ccm {
@@ -50,8 +53,9 @@ impl Ccm {
         tag
     }
 
-    /// Decrypt `data` in place and verify the tag. Returns `Err(())` on
-    /// authentication failure (in which case `data` must be discarded).
+    /// Decrypt `data` in place and verify the tag. Returns `true` on success;
+    /// on `false` (authentication failure) `data` must be discarded.
+    #[must_use]
     pub fn open(
         &mut self,
         key: &[u8; 16],
@@ -59,7 +63,7 @@ impl Ccm {
         aad: &[u8],
         data: &mut [u8],
         tag: &[u8; TAG_LEN],
-    ) -> Result<(), ()> {
+    ) -> bool {
         self.aes.set_key(key);
         // CTR is symmetric: decrypt first, then MAC the recovered plaintext.
         self.ctr_apply(nonce, data);
@@ -69,7 +73,7 @@ impl Ccm {
         for j in 0..TAG_LEN {
             expected[j] = mac[j] ^ s0[j];
         }
-        if ct_eq(&expected, tag) { Ok(()) } else { Err(()) }
+        ct_eq(&expected, tag)
     }
 
     /// CBC-MAC over B0 ‖ (len-prefixed AAD, padded) ‖ (payload, padded).
@@ -89,7 +93,8 @@ impl Ccm {
 
         // Associated data: 2-byte big-endian length prefix, then AAD, zero-padded.
         if adata {
-            let mut a = [0u8; 2 + 32];
+            debug_assert!(aad.len() <= MAX_AAD, "AAD exceeds MAX_AAD");
+            let mut a = [0u8; 2 + MAX_AAD];
             let alen = aad.len() as u16;
             a[0..2].copy_from_slice(&alen.to_be_bytes());
             a[2..2 + aad.len()].copy_from_slice(aad);

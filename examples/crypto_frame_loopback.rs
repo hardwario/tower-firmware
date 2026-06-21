@@ -94,7 +94,7 @@ async fn run(_b: Board) {
     info!(target: "frame", "sealed BULK frame: {} bytes (hdr17 + 64 chunk + tag8)", nb);
     match frame::open_frame(&mut ccm, &KEY, &mut buf[..nb]) {
         Ok((rh, range)) => {
-            let ok = rh == bhdr && &buf[range] == &chunk[..];
+            let ok = rh == bhdr && buf[range] == chunk[..];
             info!(target: "frame", "bulk open: {}", if ok { "MATCH (index in nonce ok)" } else { "MISMATCH" });
             pass &= ok;
         }

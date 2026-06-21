@@ -48,27 +48,26 @@ async fn run(_b: Board) {
     pass &= ct_ok && tag_ok;
 
     // 2) Open the genuine ciphertext+tag → must succeed and recover plaintext.
-    match ccm.open(&KEY, &NONCE, &AAD, &mut buf, &tag) {
-        Ok(()) if buf == PLAIN => info!(target: "ccm_kat", "open (valid):    OK (plaintext recovered)"),
-        Ok(()) => {
+    if ccm.open(&KEY, &NONCE, &AAD, &mut buf, &tag) {
+        if buf == PLAIN {
+            info!(target: "ccm_kat", "open (valid):    OK (plaintext recovered)");
+        } else {
             error!(target: "ccm_kat", "open (valid): plaintext mismatch");
             pass = false;
         }
-        Err(()) => {
-            error!(target: "ccm_kat", "open (valid): UNEXPECTED auth fail");
-            pass = false;
-        }
+    } else {
+        error!(target: "ccm_kat", "open (valid): UNEXPECTED auth fail");
+        pass = false;
     }
 
     // 3) Tamper: flip one ciphertext byte → open() must reject.
     let mut tampered = EXPECT_CT;
     tampered[0] ^= 0x01;
-    match ccm.open(&KEY, &NONCE, &AAD, &mut tampered, &EXPECT_TAG) {
-        Err(()) => info!(target: "ccm_kat", "open (tampered): correctly REJECTED"),
-        Ok(()) => {
-            error!(target: "ccm_kat", "open (tampered): WRONGLY ACCEPTED");
-            pass = false;
-        }
+    if ccm.open(&KEY, &NONCE, &AAD, &mut tampered, &EXPECT_TAG) {
+        error!(target: "ccm_kat", "open (tampered): WRONGLY ACCEPTED");
+        pass = false;
+    } else {
+        info!(target: "ccm_kat", "open (tampered): correctly REJECTED");
     }
 
     if pass {

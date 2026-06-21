@@ -3,9 +3,12 @@
 An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
 Module** (STM32L083CZ). The crate is a **library** of reusable blocks (LED,
 button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip,
-serial logging, EEPROM storage, USB-gated low power); flashable programs live in
+serial logging, EEPROM storage, USB-gated low power) plus a **SPIRIT1 sub-GHz
+radio stack** (secured AES-128-CCM network layer — confirmed delivery, replay
+protection, bulk transfer, OTA pairing); flashable programs live in
 [`examples/`](examples) and are built/flashed by name with
-[`just`](https://just.systems).
+[`just`](https://just.systems). The radio has its own guide:
+[`docs/radio.md`](docs/radio.md).
 
 | | |
 |---|---|
@@ -20,11 +23,13 @@ serial logging, EEPROM storage, USB-gated low power); flashable programs live in
 | RGB strip | WS2812B/SK6812 on PA1 — TIM2_CH2 PWM + DMA1_CH3 |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12 — gates STOP (stay awake while plugged in) |
+| Radio | SPIRIT1 (SPSGRF, 868 MHz) — SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); see [`docs/radio.md`](docs/radio.md) |
 
 ## Quick start
 
 ```sh
 # One-time: cargo install just cargo-binutils   (+ rustup component add llvm-tools)
+#           (add probe-rs-tools only for SWD `cargo run`; jolt UART flashing needs neither)
 just samples              # list the example apps
 just run thermometer      # build + flash, then watch the console from boot
 just monitor              # (re)attach to a running MCU without resetting it
@@ -45,7 +50,8 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/strip.rs` | LED-strip effects over `ws2812`: solid/compound/gradient + rainbow, chase, breathe, scanner, sparkle; brightness 0–100 % with gamma |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
-| `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
+| `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing — see [`docs/radio.md`](docs/radio.md) |
+| `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
 ### LED indication
 
@@ -124,6 +130,12 @@ own by dropping a `.rs` there — it's picked up automatically (`just samples`).
 | `strip` | `ws2812` + `strip` — a scrolling rainbow on PA1 |
 | `storage` | `storage` — a key-value store in EEPROM: a raw boot counter + a postcard settings struct, surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
+
+The radio stack adds ~20 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`) — the
+reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
+and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
+file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
+net_confirmed`.
 
 ### Writing an app
 

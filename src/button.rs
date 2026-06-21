@@ -27,7 +27,6 @@
 
 // Reusable SDK driver surface: full event/config API exposed even if the app
 // only uses a subset.
-#![allow(dead_code)]
 
 use embassy_executor::Spawner;
 use embassy_stm32::exti::ExtiInput;

@@ -5,10 +5,12 @@
 //!
 //! - **Radio layer** — [`regs`] (register map), [`spi`] ([`Spirit1Spi`]
 //!   transport, software CS), [`device`] ([`Spirit1`] chip handle: power states,
-//!   device-ID check, calibration). RF configuration and the IRQ-driven async
-//!   operation driver are added on top in later steps.
-//! - **Network layer** — addressing, confirmed delivery, AES-CCM security,
-//!   replay protection, bulk transfers and pairing (added in later steps).
+//!   device-ID check, CSMA, and the nIRQ-driven async [`tx`](device::Spirit1::tx)/
+//!   [`rx`](device::Spirit1::rx)), [`config`] (RF register derivation).
+//! - **Crypto + wire** — [`aes`] (L0 hardware AES), [`ccm`] (AES-128-CCM),
+//!   [`frame`] (frame codec + nonce), [`duty`] (EU duty governor).
+//! - **Network layer** — [`net`]: addressing + per-peer keys, confirmed delivery,
+//!   replay protection + counter persistence, bulk transfer, and OTA pairing.
 //!
 //! See `docs/radio.md` for the user-facing guide and `examples/radio_*.rs` /
 //! `examples/net_*.rs` for runnable demos. Pins and parameters come from the

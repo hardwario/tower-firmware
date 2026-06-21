@@ -13,7 +13,6 @@
 //! via the CW carrier + partner RSSI; Step 4 proves the digital-domain values
 //! (data rate / deviation / filter) via a real modulated link.
 
-#![allow(dead_code)]
 
 use super::device::{RadioError, Spirit1};
 use super::regs;
@@ -127,7 +126,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
     // Demodulator order = 0 during radio init (datasheet, DEM_CONFIG).
     spi.write_reg(regs::DEM_CONFIG, 0x35)?;
 
-    // Enable the reference divider (REFDIV=1) for the 50 MHz crystal: PLL
+    // Set the REFDIV bit (reference divider D=2) for the 50 MHz crystal: the PLL
     // reference becomes 25 MHz. SYNTH_CONFIG1 reset 0x5B (VCO_H selected) | 0x80.
     spi.write_reg(regs::SYNTH_CONFIG1, 0xDB)?;
     // Longest T-split (3.47 ns) to help the VCO calibrator (datasheet §8.5):
@@ -194,8 +193,8 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
     // MAX_NB back-offs instead of stalling forever.
     spi.write_reg(regs::CSMA_CONFIG3, 0xFA)?; // seed MSB
     spi.write_reg(regs::CSMA_CONFIG2, 0x21)?; // seed LSB (0xFA21, non-zero)
-    spi.write_reg(regs::CSMA_CONFIG1, (32 << 2) | 0x00)?; // prescaler 32, 64·Tbit
-    spi.write_reg(regs::CSMA_CONFIG0, 0x30 | 0x05)?; // CCA length 3, max 5 back-offs
+    spi.write_reg(regs::CSMA_CONFIG1, 32 << 2)?; // BU_PRESCALER=32, CCA_PERIOD=00 (64·Tbit)
+    spi.write_reg(regs::CSMA_CONFIG0, (3 << 4) | 5)?; // CCA_LENGTH=3, NBACKOFF_MAX=5
     let (p1c, _) = spi.read_reg(regs::PROTOCOL1)?;
     spi.write_reg(regs::PROTOCOL1, p1c & !0x02)?; // CSMA_PERS_ON = 0 (non-persistent)
 

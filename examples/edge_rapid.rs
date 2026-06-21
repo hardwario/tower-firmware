@@ -77,11 +77,11 @@ async fn run(b: Board) {
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(10)).await {
                 accepted += 1;
-                if let Some(p) = last {
-                    if rx.counter <= p {
-                        violations += 1;
-                        error!(target: "rapid", "ORDER VIOLATION: counter {} after {} ✗", rx.counter, p);
-                    }
+                if let Some(p) = last
+                    && rx.counter <= p
+                {
+                    violations += 1;
+                    error!(target: "rapid", "ORDER VIOLATION: counter {} after {} ✗", rx.counter, p);
                 }
                 last = Some(rx.counter);
                 if accepted % 20 == 0 {

@@ -31,7 +31,6 @@
 
 // Reusable SDK driver surface: full API exposed even if the app uses a subset
 // (e.g. `Polarity::ActiveLow` for off-board LEDs).
-#![allow(dead_code)]
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};

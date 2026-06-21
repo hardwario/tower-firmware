@@ -11,7 +11,6 @@
 //! is pure (no I/O) and ties the layout to [`ccm`](super::ccm) via
 //! [`seal_frame`]/[`open_frame`].
 
-#![allow(dead_code)]
 
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
@@ -102,7 +101,8 @@ pub enum FrameError {
 
 impl Header {
     /// Header length on the wire (depends on bulk-ness).
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
         if self.bulk_index.is_some() {
             HDR_LEN_BULK
         } else {
@@ -111,6 +111,7 @@ impl Header {
     }
 
     /// Largest payload this header type may carry.
+    #[must_use]
     pub fn max_payload(&self) -> usize {
         if self.bulk_index.is_some() {
             MAX_BULK_PAYLOAD
@@ -121,7 +122,7 @@ impl Header {
 
     /// Serialize the clear header (AAD) into `out`; returns its length.
     pub fn encode(&self, out: &mut [u8]) -> usize {
-        let n = self.len();
+        let n = self.wire_len();
         out[0] = (VERSION << 5) | (self.frame_type as u8 & 0x1F);
         out[1] = self.flags;
         out[2..6].copy_from_slice(&self.src.to_le_bytes());
@@ -197,7 +198,7 @@ pub fn seal_frame(
     if payload.len() > header.max_payload() {
         return Err(FrameError::PayloadTooLong);
     }
-    let hlen = header.len();
+    let hlen = header.wire_len();
     let plen = payload.len();
     if out.len() < hlen + plen + TAG_LEN {
         return Err(FrameError::TooShort);
@@ -231,7 +232,8 @@ pub fn open_frame(
     let mut tag = [0u8; TAG_LEN];
     tag.copy_from_slice(&buf[hlen + plen..hlen + plen + TAG_LEN]);
     let (aad, rest) = buf.split_at_mut(hlen);
-    ccm.open(key, &nonce, aad, &mut rest[..plen], &tag)
-        .map_err(|_| FrameError::AuthFail)?;
+    if !ccm.open(key, &nonce, aad, &mut rest[..plen], &tag) {
+        return Err(FrameError::AuthFail);
+    }
     Ok((header, hlen..hlen + plen))
 }

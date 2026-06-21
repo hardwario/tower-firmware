@@ -32,14 +32,17 @@ pub async fn vbus_task(mut vbus: ExtiInput<'static, Async>) {
             let _guard = WakeGuard::new(StopMode::Stop1);
             info!("USB connected - STOP inhibited (Sleep/WFI only)");
 
-            vbus.wait_for_falling_edge().await;
+            // `wait_for_low` returns immediately if the line is already low, so a
+            // disconnect in the window since `is_high()` isn't missed (unlike
+            // `wait_for_falling_edge`, which would block until the *next* unplug).
+            vbus.wait_for_low().await;
 
             info!("USB disconnected - STOP enabled");
             // `_guard` drops at the end of this block, releasing the refcount.
         } else {
-            // USB absent: STOP is allowed. Park until the next plug-in; the
-            // rising edge on EXTI line 12 wakes the MCU out of STOP.
-            vbus.wait_for_rising_edge().await;
+            // USB absent: STOP is allowed. Park until the next plug-in; EXTI line
+            // 12 wakes the MCU out of STOP (returns at once if already plugged).
+            vbus.wait_for_high().await;
         }
     }
 }

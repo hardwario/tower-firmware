@@ -14,7 +14,7 @@ port := env_var_or_default("TOWER_PORT", "")
 _port_flag := if port == "" { "" } else { "-p " + port }
 
 # Optional cargo features, e.g. the radio examples' role selection:
-#   TOWER_FEATURES=role-gateway just flash net_uplink
+#   TOWER_FEATURES=role-gateway just flash net_confirmed
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 

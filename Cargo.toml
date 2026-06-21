@@ -3,7 +3,7 @@ name = "tower"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, WS2812 strip, console, low power) plus runnable examples."
+description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
 
 [dependencies]
 # Async executor. The Cortex-M *platform* (the `__pender` + thread-mode loop) is
@@ -71,11 +71,14 @@ log = "0.4"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.0", default-features = false }
 
-# Build-time role/behaviour selection for the radio examples. A two-board example
-# is one source file built twice — e.g. `TOWER_FEATURES=role-gateway just flash
-# net_uplink`. `test-hooks` enables fault injectors (ACK-drop, malformed frame,
-# FIFO error, stale replay) used by the net_*/edge_* examples; `afc-sweep` adds
-# the AFC_CORR-vs-temperature logging to the sniffer. None affect the library.
+# Build-time role selection for the two-board radio examples: one source file is
+# built twice with different roles — e.g. `TOWER_FEATURES=role-gateway just flash
+# net_confirmed`. These affect only the examples, never the library.
+#   role-node / role-gateway : node vs gateway (gateway = absence of role-node)
+#   role-peer-a / role-peer-b : P2P peers in net_p2p (peer-a = absence of role-peer-b)
+#   node-1 / node-2          : which node identity in net_star (node-1 = absence of node-2)
+# (peer-a / node-1 are the feature-absent defaults, listed so the flash commands
+# read symmetrically; the examples branch on the presence of peer-b / node-2.)
 [features]
 default = []
 role-node = []
@@ -84,8 +87,6 @@ role-peer-a = []
 role-peer-b = []
 node-1 = []
 node-2 = []
-test-hooks = []
-afc-sweep = []
 
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.
