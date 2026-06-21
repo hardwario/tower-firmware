@@ -215,6 +215,13 @@ impl Net {
         self.my_id
     }
 
+    /// Mutable access to the EEPROM key-value store the network layer owns, for
+    /// application-level persistence (e.g. soak tallies). The network layer uses
+    /// keys `0x5201`, `0x5202` and `0x5300+slot`; pick others to avoid clashes.
+    pub fn kv(&mut self) -> &mut Kv<'static> {
+        &mut self.kv
+    }
+
     /// Current live TX counter (for diagnostics / persistence demos).
     pub fn tx_counter(&self) -> u32 {
         self.tx_counter

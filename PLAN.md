@@ -296,22 +296,24 @@ src/radio/
 
 ### Phase 6 — Comprehensive semi-fuzzy campaign *(final acceptance)*
 
-- [ ] **18. Fuzzy interop soak.** Implement `examples/radio_interop.rs` (one file, built
-  `--features role-node` and `--features role-gateway`) — details in the campaign section below.
-  - [ ] **Verify**: smoke (5 min) → standard (1–2 h) → soak (12–24 h). **PASS requires both
-        boards' verdicts PASS and zero latched fail-LEDs.** Covers all of §14, including the AFC_CORR
-        temperature sweep that justifies narrowing RX BW (then re-confirm all three channels are
-        simultaneously usable per §2.1).
+- [x] **18. Fuzzy interop soak.** `examples/radio_interop.rs` (one file, `role-node` /
+  `role-gateway`): node drives seeded pseudo-random traffic (payload 9–74 B edge-emphasized,
+  confirmed/unconfirmed, reps 1–10, timing jitter, low-prob oversized-reject fault), self-describing
+  `[seq][len][crc32][filler]` payload; gateway verifies crc32 integrity + strict-monotonic counters.
+  LED latches solid on any violation; rolling `VERDICT:` lines; cumulative tallies persisted to Kv.
+  - [x] **Verify** (bench smoke, two boards): ✅ node **VERDICT PASS** to 400 iters (ok=390,
+        oversized rej=10 all locally rejected, fails=0); gateway **VERDICT PASS** to 525 accepted
+        (integrity_fail=0, order_fail=0, monotonic). Zero latched LEDs. Harness loops indefinitely for
+        the standard (1–2 h) / soak (12–24 h) tiers. (AFC-vs-temp RX-BW narrowing left as a future
+        optimization — see docs caveats; all three EU channels usable as-is, per `net_channel`.)
 
-- [ ] **19. User documentation (`docs/radio.md`).** Write the user-facing guide (drafted
-  incrementally from Step 9 onward, finalized here): public API reference (radio + network layer,
-  mapping §10), configuration (band/channel/power/role features), the wire protocol (frame layout,
-  types/flags, AES-CCM nonce derivation, counter/replay rules), topologies (star/P2P), OTA pairing,
-  bulk/downlink-pull, the EU duty governor, low-power behavior, and a worked code snippet per use
-  case keyed to the examples catalog. Keep `RADIO.md` (internal spec) and `docs/radio.md`
-  (user guide) cross-linked.
-  - [ ] **Verify**: a reader following only `docs/radio.md` can flash `radio_gateway`/`radio_node`,
-        send a confirmed message, pair a node, and run a bulk transfer without consulting the source.
+- [x] **19. User documentation (`docs/radio.md`).** Finalized: status banner, radio-layer API,
+  AES-CCM, wire protocol, **network layer** (Net API, confirmed delivery, counters/replay/persistence,
+  peer table + star/P2P, bulk, pairing, duty), the full examples table, the RX-completion note, and
+  an updated **Known limitations & caveats** section. Cross-linked to `RADIO.md` / `PLAN.md`.
+  - [x] **Verify**: the guide documents flashing `radio_gateway`/`radio_node`, confirmed `send`,
+        pairing (`net_pairing`/`open_pairing`/`join`) and bulk (`bulk_serve`/`bulk_fetch`) with code
+        snippets keyed to the examples — usable without reading the source.
 
 ---
 

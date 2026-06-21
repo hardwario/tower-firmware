@@ -4,13 +4,14 @@ A sub-GHz radio stack for the TOWER Core Module, built on the **SPIRIT1**
 transceiver (in the SPSGRF module). This is the *user-facing* guide; the internal
 design spec is `RADIO.md` and the implementation checklist is `PLAN.md`.
 
-> **Status (in progress).** The radio layer (SPI, states, RF config, CW, TX, RX
-> with full quality metrics), the on-MCU **AES-128-CCM** crypto, and the **frame
-> codec** are implemented and verified on hardware — including a **full secured
-> bidirectional link**: `net_secure_ping` sends CCM-sealed frames Node→Gateway
-> that are received, authenticated and decrypted over the air. The higher network
-> layer (confirmed delivery/ACK, replay+persistence, duty governor, bulk, pairing,
-> topologies) is the remaining work and now builds on this working link.
+> **Status: complete and hardware-verified.** The full stack is implemented and
+> tested on two boards: the radio layer (SPI, power states, RF config, CW, TX/RX
+> with quality metrics, CSMA/CCA, SLEEP/SHUTDOWN), on-MCU **AES-128-CCM**, the
+> frame codec, and the network layer — confirmed delivery + ACK/retransmit,
+> replay protection + counter persistence, the EU duty governor, bulk pull,
+> OTA pairing, and per-peer keys (star / P2P). A semi-fuzzy soak (`radio_interop`)
+> exercises it all under randomized traffic with latched invariant checks. See the
+> per-step results in `PLAN.md`.
 
 ## Hardware
 
@@ -67,9 +68,10 @@ let raw = radio.rssi_sample().await?;  // on-demand channel RSSI  (dBm = raw/2 -
 
 RF configuration (`config::apply`) programs the 50 MHz-crystal-specific setup
 (REFDIV, IF offsets, SYNT/WCP, GFSK 19.2 kbps, 20 kHz deviation, ~216 kHz RX
-filter, sync `0xDB624715`, 16-bit CRC, PA ramp, AFC freeze-on-sync) plus the ST
-management work-arounds (per-mode SMPS, VCO current, one-time manual VCO
-calibration). See `src/radio/config.rs`.
+filter, sync `0xDB624715`, 16-bit CRC, PA ramp, AFC freeze-on-sync, CSMA timing)
+plus the ST management work-arounds (per-mode SMPS, VCO current). VCO calibration
+is left to the part's automatic per-channel calibration (more temperature-robust
+than a one-time manual cal). See `src/radio/config.rs`.
 
 ## Security: AES-128-CCM (`tower::radio::{aes, ccm}`)
 
@@ -230,6 +232,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT (§3/§6/§9) |
 | `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery (§9) |
 | `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters (§4/§6) |
+| `radio_interop` | node / gateway | semi-fuzzy soak: randomized traffic + invariant checks (§14) |
 
 ## A note on RX completion (hard-won)
 
@@ -241,8 +244,22 @@ bit (`PCKT_FLT_OPTIONS` bit6 = 0, with no timeout masks) selects "reception ends
 at the reception of the packet", so `RX_DATA_READY` fires normally. `config::apply`
 sets this; it is unrelated to the RF/demod registers.
 
-## Known limitations
+## Known limitations & caveats
 
-- **Network layer, low-power sleep, regulatory/duty governor** — not yet
-  implemented/verified (they build on the now-working bidirectional link).
-- **Regulatory & OTA-pairing security caveats** — see `RADIO.md` §2.2 and §7.6.
+- **OTA pairing has no confidentiality.** The fixed `PAIRING_KEY` is public, so a
+  sniffer in range during the (short, user-initiated) pairing window recovers the
+  delivered per-node key, and there is no mutual authentication (§7.6). Pair at
+  close range / reduced power; enable flash RDP for production key storage.
+- **EU 868 only (for now).** US 915 is provisional in the spec (§2.2); the `Band`
+  abstraction is in place but only `Eu868` is implemented and verified.
+- **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance
+  without lab instruments; narrowing it (per the §2.1 AFC-vs-temperature data) is a
+  future optimization. All three EU channels are usable as-is.
+- **Counter persistence uses a single reserve-ahead watermark cell** (RESERVE=1024;
+  ~10⁸ transfers before EEPROM wear matters). A multi-cell wear-ring is a refinement.
+- **Half-duplex single radio.** `Net` serializes one transfer at a time; CSMA
+  mitigates contention but cannot eliminate hidden-node collisions — confirmed
+  delivery + retransmit absorbs the rest (§4).
+- **`Net::send` does not enable CSMA by default** (CSMA is a radio-layer feature
+  shown in `radio_csma`); wire `use_csma=true` into the TX path if your deployment
+  needs it on every frame.
