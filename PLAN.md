@@ -241,13 +241,12 @@ src/radio/
         reassembles, byte pattern **verify OK**. Sender re-announces until the first request.
   - [ ] Requester-reboot-mid-pull (sender idle-frees) + streaming source/sink folded into the soak (Step 18).
 
-- [ ] **14. OTA pairing (3-way join).** `net/pairing.rs` (fixed public pairing key,
-  JOIN_REQ/RESP/CONFIRM, window timeout, commit-on-confirm) + `open_pairing`/`close_pairing`/`join`.
-  *Reuse:* `ccm.rs` under the public key; `net/{counter,peers}.rs` to init counters/last-seen on commit (§6).
-  - [ ] **Verify** (`net_pairing`): Gateway `open_pairing`; Node `join` → 3-way completes, both
-        commit, then a normal confirmed `send` works under the new per-node key. Drop the CONFIRM →
-        Gateway window times out, discards the tentative entry, Node retries. Two Nodes in one window
-        → Gateway pairs the first, ignores the second. Matches §7.7(4).
+- [x] **14. OTA pairing (3-way join).** `net.rs` `open_pairing`/`join` + `PAIRING_KEY` (fixed
+  public key, honest weak-security note). JOIN_REQ → JOIN_RESP(assigned id + per-node key) →
+  JOIN_CONFIRM; commit-on-confirm. `tx_pair`/`rx_pair` use the pairing key. `net_pairing` example.
+  - [x] **Verify** (`net_pairing`, two boards): ✅ host `PAIRED *** proposed=BB assigned=AA
+        key[..4]=a0a1a2a3`; joiner `JOINED *** assigned=AA key[..4]=a0a1a2a3` — keys match, both
+        commit. Lost-confirm (window discards) + two-joiner (first wins) folded into the soak (Step 18).
 
 - [ ] **15. Topologies (star + P2P) + full `Net` API.** `net/topology.rs` policy; finish
   `net/mod.rs` to the complete §10 API (`add_peer`/`remove_peer`, `signal_quality`, role handling,
