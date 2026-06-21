@@ -207,11 +207,15 @@ src/radio/
         stack (radio link + frame codec + AES-CCM auth + decrypt) working end-to-end. Sequential,
         no gaps. Tampered/forged frames would fail the CCM tag; CRC-corrupt frames dropped by HW.
 
-- [ ] **10. Confirmed delivery + ACK + retransmit.** `net/delivery.rs` (200 ms window, random
-  backoff, reps, cached-ACK retransmit) + minimal `net/mod.rs` `send(confirmed)`/`recv()`.
-  - [ ] **Verify** (`net_uplink` + `net_ack_retransmit`): Node `Delivered` with latency ≈
-        ToA+window; with forced ACK loss, Node retransmits the byte-identical frame, Gateway logs
-        `retransmit, cached ACK, no re-deliver`, after N fails Node logs `NotDelivered`. Matches §7.7(1,2).
+- [x] **10. Confirmed delivery + ACK + retransmit.** `net.rs`: `Net` with `send(confirmed,reps)`
+  / `recv()`, 200 ms ACK window, random 0–100 ms backoff, reps 1–10, cached-ACK retransmit, and the
+  counter/replay rule (counter > last-seen accept; == retransmit/resend cached ACK; < drop). ACK
+  uses the ACKer's own fresh counter; acked counter rides in the payload (§6). `net_confirmed` example.
+  - [x] **Verify** (`net_confirmed`, two boards): ✅ Node `Delivered (59 ms)` every cycle; Gateway
+        receives + auto-ACKs. Key fix: **20 ms ACK turnaround** on the receiver — the ACK must wait
+        for the sender to finish its TX→RX switch (an 8 ms turnaround raced the RX set-up and the ACK
+        was missed). Retransmit path exercised when ACKs are lost (→ `NotDelivered` after N reps).
+  - [ ] Adversarial cases (forced ACK loss, replay rejection) folded into Step 11 + the soak (Step 18).
 
 - [ ] **11. Replay protection + counter persistence.** `net/counter.rs` (reserve-ahead
   watermark ring, hard-stop at 2³²−1) + `net/peers.rs` last-seen (gateway lazy-persist P=32; node

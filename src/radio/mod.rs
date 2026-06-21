@@ -20,6 +20,7 @@ pub mod ccm;
 pub mod config;
 pub mod device;
 pub mod frame;
+pub mod net;
 pub mod regs;
 pub mod spi;
 
