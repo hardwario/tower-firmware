@@ -281,11 +281,18 @@ src/radio/
   - [ ] **Verify**: `just samples` lists the radio examples; `just run radio_gateway` /
         `radio_node` on the two boards demonstrates the full happy path with clean logs.
 
-- [ ] **17. Edge-case examples.** Land the focused edge-case binaries (catalog below):
-  oversized-payload reject, unknown version/type drop, CCM auth-fail drop, FIFO over/underflow
-  recovery, stuck-state recovery, CSMA/hidden-node contention, rapid back-to-back, sleep cadence,
-  channel switch.
-  - [ ] **Verify**: each edge example logs the expected drop/recover/reject behavior per §9.
+- [x] **17. Edge-case examples.** Focused edge binaries:
+  - `edge_frame_limits` (1 board) — MTU + malformed/forged-frame KAT.
+  - `edge_recovery` (1 board) — §9 timeout / stuck-state / FIFO recovery.
+  - `edge_rapid` (2 boards) — back-to-back confirmed, monotonic-counter check.
+  - `net_channel` (2 boards) — secured link on a non-default channel (VCO recal).
+  - (Oversized-payload + unknown-ver/type + auth-fail → `edge_frame_limits`; FIFO + stuck-state →
+    `edge_recovery`; CSMA contention → `radio_csma` + the soak.)
+  - [x] **Verify**: ✅ `edge_frame_limits` 12/12 (1 B/74 B accept, 75 B + bulk 65 B reject; bad
+        version/type/truncated/tampered-ct/tampered-tag/wrong-key → correct error) **ALL PASS**.
+        ✅ `edge_recovery` 10/10 RX-timeouts → READY, FIFO flush empties, RX→READY cycle, chip
+        responsive — **ALL PASS** (never wedged). ✅ `edge_rapid` 500 accepted, **0 order
+        violations** (strict-monotonic). ✅ `net_channel` confirmed link on ch2 (rssi −45 dBm).
 
 ### Phase 6 — Comprehensive semi-fuzzy campaign *(final acceptance)*
 

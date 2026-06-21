@@ -226,6 +226,10 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key (§7.6) |
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |
+| `net_channel` | node / gateway | secured link on a non-default channel (VCO recal, §8) |
+| `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT (§3/§6/§9) |
+| `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery (§9) |
+| `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters (§4/§6) |
 
 ## A note on RX completion (hard-won)
 
