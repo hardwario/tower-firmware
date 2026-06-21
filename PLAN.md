@@ -233,14 +233,13 @@ src/radio/
         bucket allows 5×17ms from 100ms then refuses; refills 10ms/1s; caps correctly. ALL PASS.
         Regression: `net_confirmed` still `Delivered (59 ms)` with the governor active.
 
-- [ ] **13. Bulk transfer + downlink pull.** `net/bulk.rs` (announce → BULK_REQ/BULK_DATA,
-  24-bit index, last-chunk, 30 s idle timeout, streaming source/sink) + `bulk_send`/`bulk_recv`/
-  `poll_downlink`.
-  *Reuse:* `net/delivery.rs` confirmed mechanism (BULK_REQ is confirmed); bulk header (17 B + ≤64 B).
-  - [ ] **Verify** (`net_downlink_pull` + `net_bulk`): Gateway announces a downlink (ACK
-        dl-pending+len); Node pulls chunk-by-chunk and reassembles a known blob (length+CRC OK).
-        Reboot the *requester* mid-pull → Gateway times out (30 s) and frees; requester restarts on
-        next announce. Matches §7.7(3).
+- [x] **13. Bulk transfer + downlink pull.** `net.rs` `bulk_serve`/`bulk_fetch`: announce
+  (DATA+BULK_ANNOUNCE, payload=len+session) → BULK_REQ(index)/BULK_DATA(index,≤64 B), 24-bit index,
+  last-chunk flag, 30 s idle timeout. Session counter distinct from the announce counter (so chunk-0's
+  nonce never collides); all chunks share the session counter with a distinct index.
+  - [x] **Verify** (`net_bulk`, two boards): ✅ requester pulls a 200 B blob (4 chunks),
+        reassembles, byte pattern **verify OK**. Sender re-announces until the first request.
+  - [ ] Requester-reboot-mid-pull (sender idle-frees) + streaming source/sink folded into the soak (Step 18).
 
 - [ ] **14. OTA pairing (3-way join).** `net/pairing.rs` (fixed public pairing key,
   JOIN_REQ/RESP/CONFIRM, window timeout, commit-on-confirm) + `open_pairing`/`close_pairing`/`join`.
