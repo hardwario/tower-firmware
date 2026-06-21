@@ -70,6 +70,8 @@ pub const PAIRING_KEY: [u8; 16] = *b"TOWER-PAIR-KEY!\0";
 const JOIN_RESP_WINDOW: Duration = Duration::from_millis(300);
 /// How long the host waits for a JOIN_CONFIRM after a JOIN_RESP.
 const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
+/// One listen slice of the host's pairing window between JOIN_REQ polls.
+const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
 
 /// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
 /// holds up to 8 peers (RADIO.md §7.2). One table size covers both — the topology
@@ -628,7 +630,7 @@ impl Net {
         let deadline = Instant::now().checked_add(timeout)?;
         let mut buf = [0u8; 24];
         while Instant::now() < deadline {
-            let Some((hdr, plen)) = self.rx_pair(BULK_SERVE_SLICE, &mut buf).await else {
+            let Some((hdr, plen)) = self.rx_pair(PAIR_RX_SLICE, &mut buf).await else {
                 continue;
             };
             if hdr.frame_type != FrameType::JoinReq || plen < 4 {

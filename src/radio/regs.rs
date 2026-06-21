@@ -51,7 +51,7 @@ pub const STATE_RX: u8 = 0x33;
 pub const STATE_TX: u8 = 0x5F;
 // Transient states (useful when polling/debugging).
 pub const STATE_PM_SETUP: u8 = 0x3D;
-pub const STATE_XO_SETTLING: u8 = 0x53;
+pub const STATE_XO_SETTLING: u8 = 0x23;
 pub const STATE_SYNTH_SETUP: u8 = 0x53;
 pub const STATE_PROTOCOL: u8 = 0x1F;
 pub const STATE_SYNTH_CALIBRATION: u8 = 0x4F;
