@@ -201,6 +201,34 @@ pub const fn afa_freq_hz(k: u8) -> u64 {
 // All AFA channels stay within the 865.0–868.6 MHz sub-band.
 const _: () = assert!(afa_freq_hz(AFA_N - 1) <= 868_600_000);
 
+// --- US 915 FHSS channel plan (FCC §15.247) ---------------------------------
+// Frequency hopping over the 902–928 MHz ISM band: ≥50 pseudo-random channels,
+// ≤0.4 s occupancy per channel per 20 s. We use **80** channels (well above the
+// minimum 50) so even the *strict* time-tuned occupancy reading has margin (see
+// the slot math in net/fhss.rs), and hop by SYNT rewrite ([`set_freq_hz`]) so the
+// set is edge-to-edge. (Exact §15.247 dwell numbers are FCC-KDB config to
+// **verify** before any product claim; these exercise/meet the rule on the bench.)
+
+/// Number of FHSS hop channels (> 50 for compliance margin; power-of-two not needed).
+pub const FHSS_N: u8 = 80;
+/// FHSS channel-0 carrier (Hz).
+pub const FHSS_BASE_HZ: u64 = 903_000_000;
+/// FHSS channel spacing (Hz). 300 kHz > the ~60–100 kHz occupied BW (non-overlapping).
+pub const FHSS_SPACE_HZ: u64 = 300_000;
+/// Fixed channel a scanning node parks on to rendezvous (mid-band; the gateway's
+/// per-cycle permutation visits it exactly once, so lock is bounded by one cycle).
+pub const FHSS_RENDEZVOUS_CH: u8 = 40;
+
+/// Carrier (Hz) of FHSS channel `k` (0..[`FHSS_N`)): 903.0 + k·0.3 MHz.
+pub const fn fhss_freq_hz(k: u8) -> u64 {
+    FHSS_BASE_HZ + (k as u64) * FHSS_SPACE_HZ
+}
+
+// ≥50 channels (§15.247) and the whole set fits below the 928 MHz band edge.
+const _: () = assert!(FHSS_N >= 50);
+const _: () = assert!(fhss_freq_hz(FHSS_N - 1) < 928_000_000);
+const _: () = assert!(FHSS_RENDEZVOUS_CH < FHSS_N);
+
 /// Apply a full RF configuration. Must leave the part in READY. The caller has
 /// already brought the radio out of shutdown and verified the device ID.
 pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError> {

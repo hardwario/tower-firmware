@@ -16,6 +16,13 @@ pub const BITRATE: u32 = 19_200;
 pub const EU_CAP_MS: u32 = 36_000;
 /// EU duty in parts-per-thousand (10‰ = 1 %).
 pub const EU_PERMIL: u32 = 10;
+/// FHSS per-channel airtime window (FCC §15.247 measures occupancy over 20 s).
+pub const FHSS_WINDOW_MS: u32 = 20_000;
+/// FHSS per-channel burst budget (token-bucket cap). With [`FHSS_PERMIL`], the
+/// worst-case spend in any 20 s is `cap + permil·20 s = 100 + 200 = 300 ms`.
+pub const FHSS_DWELL_BURST_MS: u32 = 100;
+/// FHSS per-channel sustained refill: 1 % (200 ms / 20 s). See [`FHSS_DWELL_BURST_MS`].
+pub const FHSS_PERMIL: u32 = 10;
 
 /// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
 /// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — §2.6. Rounded
@@ -56,6 +63,15 @@ impl DutyGovernor {
     /// FHSS/wideband — this is for bench testing; see [`Band`](super::config::Band).)
     pub fn us915() -> Self {
         Self::new(EU_CAP_MS, 1000)
+    }
+
+    /// FHSS **per-channel** dwell governor (§15.247): caps *transmitted* airtime on
+    /// one hop channel to ≤ [`FHSS_DWELL_BURST_MS`] + 1 %·20 s = **300 ms in any
+    /// 20 s** (a token bucket can spend at most `cap + permil·window`), which is 25 %
+    /// under the 0.4 s/20 s limit. One bucket per channel; the FHSS layer replaces
+    /// the band duty governor with these while hopping.
+    pub fn fhss_channel() -> Self {
+        Self::new(FHSS_DWELL_BURST_MS, FHSS_PERMIL)
     }
 
     /// Refill from real elapsed time, then try to consume `toa_ms` of airtime.

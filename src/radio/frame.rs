@@ -39,6 +39,8 @@ pub enum FrameType {
     JoinReq = 4,
     JoinResp = 5,
     JoinConfirm = 6,
+    /// FHSS hop-schedule beacon (broadcast time signal; see `net/fhss.rs`).
+    Beacon = 7,
 }
 
 impl FrameType {
@@ -51,6 +53,7 @@ impl FrameType {
             4 => Self::JoinReq,
             5 => Self::JoinResp,
             6 => Self::JoinConfirm,
+            7 => Self::Beacon,
             _ => return None,
         })
     }
