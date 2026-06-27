@@ -505,3 +505,22 @@ the shared `config::set_freq_hz` retune primitive + the existing CSMA/duty layer
   losses (≈23 s re-acquire each) → **1 lock, 0 losses, 1133 deliveries over ~6 min /
   ~15 cycles, max delivery gap 2 slots.** (A gateway *restart* still forces a
   one-cycle re-acquire — inherent to the new epoch.)
+
+### FHSS sync soak results (two boards, node `-120` / gateway `-140`)
+
+Each run: node reset for a clean window, gateway free-running; ~6 min ≈ 1200 slots
+≈ 15 hop cycles. "LOST" = node declared loss of sync (→ rendezvous re-acquire,
+~23 s outage). "max gap" = largest jump in delivered `seq` (delivery continuity).
+
+| Run | Config | Delivered | LOST | no-ack | max seq gap | Notes |
+|----|--------|----------:|----:|------:|-----------:|-------|
+| smoke | hardened RX (early-open + wide window), `MISS_LIMIT=8` | 140 (45 s) | 0 | — | — | first confirmation, short window |
+| soak 1 | `MISS_LIMIT=8` | 1079 | 1 | 14 | — | 1 fade > budget → ~23 s rendezvous re-acquire (same epoch) |
+| soak 2 | `MISS_LIMIT=16` | 1093 | 2 | 13 | — | more misses didn't help — fades exceed the budget; run-to-run RF noise |
+| **soak 3** | **fast re-acquire (`REACQUIRE_LIMIT=24`)** | **1133** | **0** | 16 | **2** | rode every fade on the predicted channel; ≤2 slots skipped, no loss |
+
+Conclusion: the residual losses were multi-second RF fades, not brief glitches, so
+raising the miss budget chased noise; *keeping the clock and predicting through the
+fade* (soak 3) eliminated sync loss entirely (0 in ~15 cycles, ≤2-slot delivery
+gaps). `no-ack` ≈ 1.3–1.5 % is uplink ACK round-trip loss (retried by the loop),
+independent of sync.
