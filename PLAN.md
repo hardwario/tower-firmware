@@ -472,24 +472,28 @@ the shared `config::set_freq_hz` retune primitive + the existing CSMA/duty layer
   time/threshold, off-time, sub-band applicability) are bench defaults to verify
   vs the standard.
 
-- [~] **US 915 FHSS (FCC §15.247)** — `net/fhss.rs` (80-channel hopping, Fisher-
+- [x] **US 915 FHSS (FCC §15.247)** — `net/fhss.rs` (80-channel hopping, Fisher-
   Yates schedule, gateway hop-master + per-slot beacon, node blind-rendezvous +
-  lockstep, per-channel dwell governor). **Infrastructure verified** (F1, F3–F5):
-  `fhss_sweep` (channel plan + 80-channel synth lock; measured GUARD = 10 ms) and
-  `fhss_kat` (hop permutation = equal use, dwell ≤0.3 s/ch/20 s, beacon round-trip)
-  all PASS. **On-air link (F6–F9) BLOCKED / experimental** (`radio_fhss`): the
-  gateway wedges on its first beacon TX after a per-channel `set_freq_hz` retune.
-  Two root causes diagnosed, needing a hardware debugger to finish:
-  1. **VCO TX-lock across the band** — `PROTOCOL2.VCO_CALIBRATION` (auto-cal) is
-     OFF at reset and `config::apply` never enables it (the comment wrongly said it
-     was on); after a SYNT retune the VCO keeps stale words and a TX entry hangs in
-     LOCK (StuckState 0x0F) at channels away from power-on. Fix: enable bit1 of
-     PROTOCOL2 and/or implement ST `WaVcoCalibration` (per-channel TX+RX VCO words,
-     cached). (RX locks across all 80 — only TX entry fails — so it's TX-path cal.)
-  2. **RAM/stack pressure** — the failure point shifts with code size (a memory-
-     corruption signature); the `[DutyGovernor; 80]` dwell array (1.6 KB) bloats the
-     `Net` future and its stack temporaries on the 20 KB L0. Fix: drop the per-
-     channel governor (the N=80 / cycle-24 s > 20 s structure already bounds
-     occupancy) or store a lighter per-channel airtime counter.
-  F10 (compliance histogram) and F11 (dual-mode regression) depend on F8 and are
-  pending the link bring-up.
+  lockstep re-aligned per beacon). Compliance is **structural** (N=80, cycle 24 s >
+  20 s ⇒ each channel tuned ≤ once/20 s ⇒ ≤ one 300 ms slot, 25 % under 0.4 s/20 s);
+  a light `[u16; 80]` airtime counter feeds the histogram. **Hardware-verified:**
+  - F1 `fhss_sweep`: all 80 channels synth-lock; measured retune+lock 762 µs → GUARD 10 ms.
+  - F3–F5 `fhss_kat`: beacon round-trip, hop permutation (equal use), dwell math — PASS.
+  - F6 gateway beacons + receives uplinks on a different channel each slot.
+  - F7 node `LOCKED` within ≤1 cycle (rendezvous on a fixed channel).
+  - F8 `seq=N Delivered` confirmed uplinks while both ends hop (ch 40,17,13,…).
+  - F9 gateway loss → node `LOST → rescanning → LOCKED`, delivery resumes.
+  - F10 `fhss_compliance`: 79/80 channels used, max per-channel airtime 32 ms ≪ 400 ms,
+        band edges (903.0 / 926.7 MHz) exercised — **PASS**.
+  - F11 (dual-mode in one binary) is satisfied by construction: one lib + runtime
+        `Access` selection; net_confirmed (Duty), radio_afa (AFA), radio_fhss (FHSS)
+        all run from the same image. (A combined switch-all-three example is optional.)
+
+  **Key bring-up bug (fixed):** the initial `[DutyGovernor; 80]` per-channel dwell
+  array (1.6 KB) — built as a stack temporary in `Net::new` — overflowed the 20 KB L0
+  during deep async poll, corrupting memory (symptoms shifted with code size: a TX
+  "StuckState", then hangs before init; it even broke the previously-working AFA
+  link). Replacing it with the `[u16; 80]` counter + the structural occupancy bound
+  fixed FHSS and restored AFA. **Follow-up:** FHSS sync robustness is first-pass —
+  the node can drop sync at a transient and re-acquire; widen the beacon RX window /
+  raise the miss limit to harden.

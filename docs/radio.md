@@ -241,17 +241,21 @@ agility channel sweep + gateway-scan rendezvous on two boards).
 > minimum channel count, and off-time here are bench defaults — confirm against the
 > current standard (and that the chosen sub-band permits LBT+AFA in lieu of duty).
 
-**US 915 — FHSS (FCC §15.247) — infrastructure verified; on-air link experimental.**
-80-channel frequency hopping (903.0–926.7 MHz, 300 ms slots, 24 s cycle), gateway =
-hop time-master + per-slot beacon, node blind-rendezvous on a fixed channel then
-hops in lockstep. **Verified (KATs):** the channel plan + 80-channel synth lock
-(`fhss_sweep`), the seeded Fisher-Yates hop permutation (equal use), the per-channel
-dwell governor (≤0.3 s/channel/20 s), and the beacon frame (`fhss_kat`). **Not yet
-brought up:** the on-air master/node link (`radio_fhss`) wedges on the first beacon
-TX after a per-channel retune — a VCO TX-lock / RAM-pressure issue across the band
-that needs a hardware debugger (see the example header and `PLAN.md`). The compliant
-high-power US path therefore exists in design + infrastructure but is not yet a
-working link.
+**US 915 — FHSS (FCC §15.247) — implemented, hardware-verified.** 80-channel
+frequency hopping (903.0–926.7 MHz, 300 ms slots, 24 s cycle), gateway = hop
+time-master + per-slot beacon, node blind-rendezvous on a fixed channel then hops
+in lockstep, re-aligning on each beacon. `net.enable_fhss(role, cfg)` →
+`fhss_master_tick` (gateway loop) / `fhss_node_tick` + `fhss_send` (node loop).
+Compliance is **structural** — N=80, cycle 24 s > 20 s ⇒ each channel is tuned at
+most once per 20 s ⇒ ≤ one 300 ms slot occupancy (25 % under the 0.4 s/20 s limit),
+no per-channel governor needed; a light `[u16; 80]` airtime counter feeds the
+compliance histogram. Examples `radio_fhss` (verified: node LOCKED then confirmed
+delivery on hopping channels; LOST→rescan→relock on gateway loss) and
+`fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
+exercised). The hop seed is key-derived (not sent on air).
+
+> **Verify before any product claim:** the exact §15.247 channel/dwell numbers
+> (FCC KDB) and that the implementation meets them under your antenna/power.
 
 ## Examples
 
@@ -284,8 +288,9 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `radio_band` | node / gateway | runtime 868↔915 switching via `set_band` (live retune) |
 | `radio_afa` | node / gateway | EU LBT+AFA: listen-before-talk + frequency agility (EN 300 220) |
 | `fhss_sweep` | 1 | FHSS channel-plan + 80-channel synth lock + GUARD measure (F1) |
-| `fhss_kat` | 1 | FHSS hop-permutation / dwell-governor / beacon-frame KATs (F3–F5) |
-| `radio_fhss` | node / gateway | US FHSS link (FCC §15.247) — **experimental, on-air WIP** |
+| `fhss_kat` | 1 | FHSS hop-permutation / dwell / beacon-frame KATs (F3–F5) |
+| `radio_fhss` | node / gateway | US FHSS link (FCC §15.247): lock + hopping confirmed delivery |
+| `fhss_compliance` | 1 | §15.247 evidence: channel count + per-channel airtime histogram |
 | `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT (§3/§6/§9) |
 | `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery (§9) |
 | `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters (§4/§6) |
@@ -307,18 +312,15 @@ sets this; it is unrelated to the RF/demod registers.
   sniffer in range during the (short, user-initiated) pairing window recovers the
   delivered per-node key, and there is no mutual authentication (§7.6). Pair at
   close range / reduced power; enable flash RDP for production key storage.
-- **US 915 narrowband is bench-test only; FHSS link is experimental.** The single-
-  channel `Us915` mode (runtime-switchable via `set_band`) is hardware-verified but
-  **not** FCC 15.247-compliant. The compliant FHSS path's infrastructure is built
-  and KAT-verified (`fhss_sweep`, `fhss_kat`), but the on-air hopping link
-  (`radio_fhss`) is **not yet brought up** (a VCO TX-lock / RAM issue across
-  903–927 — needs a hardware debugger). Likely fixes for the next pass: enable
-  `PROTOCOL2.VCO_CALIBRATION` (auto-cal is OFF at reset, so the VCO keeps stale
-  words and fails to lock on TX after a retune) and/or per-channel manual VCO
-  calibration (ST `WaVcoCalibration`); and shrink the FHSS per-channel dwell state
-  (the `[DutyGovernor; 80]` bloats the `Net` future and its stack temporaries on
-  the 20 KB L0 — the structural N=80/cycle>20 s guarantee already bounds occupancy).
-  EU 868 (duty or LBT+AFA) is the compliant, default region.
+- **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
+  `set_band`, hardware-verified, but **not** FCC 15.247-compliant — use FHSS for a
+  compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.
+- **FHSS sync robustness** is first-pass: the link locks, delivers across hops, and
+  recovers from gateway loss, but the node can occasionally drop sync at a transient
+  (e.g. right after the gateway restarts) and re-acquire. Widening the per-slot
+  beacon RX window or raising the miss limit would harden it; the recovery path
+  already handles it. (`RAM note:` the FHSS per-channel state is a `[u16; 80]`
+  counter — an earlier `[DutyGovernor; 80]` overflowed the 20 KB L0.)
 - **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance
   without lab instruments; narrowing it (per the §2.1 AFC-vs-temperature data) is a
   future optimization. All three EU channels are usable as-is.
