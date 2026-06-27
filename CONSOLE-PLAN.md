@@ -294,9 +294,10 @@ reset but isn't required.
   descriptor table above — a walkable `static` tree (`Entry::Menu/Cmd` + `CmdId`), one
   `resolve()` walk shared by dispatch and completion, and a `match CmdId` for execution.
   Identity is handled directly against the KV (key `0x5500`), **not** auto-derived from
-  a setting descriptor. Dispatch runs **inline** in the polled RX task (no separate
-  engine task / `Mutex<Kv>`); responses are single-chunk. Auto-derived settings and
-  multi-chunk responses are deferred.
+  a setting descriptor. Dispatch runs **inline** in the RX task (which async-reads
+  `BufferedUartRx`; no separate engine task / `Mutex<Kv>`). Responses **are chunked**
+  (the writer splits text into `SHELL_CHUNK`=192-byte `chunk`/`last` frames the host
+  reassembles by `cmd_id`). Auto-derived settings remain a follow-up.
 
 ## 7. Host architecture (`tower-cli`)
 
@@ -343,9 +344,13 @@ Each phase ends with an on-hardware verify, mirroring the FOTA/FHSS style.
 - Restructure `console.rs` into a `console/` module (§5): build the full-duplex
   `Uart` (PA9 TX + PA10 RX) and `split()` — the writer task owns TX, the RX half is
   parked for Phase 3 (so Phase 3 is purely additive, §5.5). TX channel + single-owner
-  **blocking** writer task (chunked writes + `yield_now`, §5.1); `log` backend enqueues
-  `Log` frames non-blocking (drop-newest + `Dropped` marker); `_print` enqueues
-  `Print`. Boot logs buffer in the channel; the panic handler emits via the PAC.
+  writer task over the interrupt-driven **`BufferedUart`** (no DMA — the WS2812 strip
+  owns the DMA group), holding a per-burst `WakeGuard` so the low-power STOP executor
+  uses WFI and the USART stays clocked while the TXE interrupt drains the burst (§5.1);
+  `log` backend enqueues `Log` frames non-blocking (drop-newest + `Dropped` marker);
+  `_print` enqueues `Print`. Boot logs buffer in the channel; the panic handler silences
+  the buffered ISR and emits one framed record via the PAC (leading `0x00` to flush any
+  in-flight partial). Over-long log/print lines are clipped (never empty).
   (`tower` gains direct deps on `heapless` + `tower-protocol`.)
 - `tower-cli`: serial reader on the shared `FrameDecoder` (COBS resync + per-frame
   version + CRC check), uses `Hello` for the firmware string when one arrives, `tower
@@ -372,14 +377,16 @@ Each phase ends with an on-hardware verify, mirroring the FOTA/FHSS style.
 - **Exit:** events stream reliably alongside logs and render without per-app schema.
 
 ### Phase 3 — RX + shell execution + `tower shell`
-- **Built:** `shell::serve` spawns a task that **polls the USART RX via the PAC**
-  (§5.5), feeds `FrameDecoder`, and dispatches `ShellCommand` **inline** against the
-  walkable tree → single-chunk `ShellResponse` with result codes. `/system identity
-  set|print` (≤32 chars, KV key `0x5500`), `/system/resource print`, `/export`,
-  `/system reboot` (flush then `SCB::sys_reset`), unknown → result 1.
-- **Test:** `tower shell` runs `/system identity set name=tower-01`, `… print`
-  (persists across reset), `/export` (multi-chunk, reassembled to one response),
-  a bad command returns a non-zero result; commands work while logs stream.
+- **Built:** `shell::serve` spawns a task that **async-reads the console's
+  `BufferedUartRx`** (interrupt-driven; §5.5), feeds `FrameDecoder`, and dispatches
+  `ShellCommand` **inline** against the walkable tree → `ShellResponse` (chunked,
+  `chunk`/`last`) with result codes. `/system identity set|print` (≤32 chars, KV key
+  `0x5500`), `/system/resource print`, `/export`, `/system reboot` (flush then
+  `SCB::sys_reset`), unknown → result 1.
+- **Test:** `tower shell` (interactive) or `tower exec "<line>"` (one-shot, for
+  scripts/CI) runs `/system identity set name=tower-01`, `… print` (persists across
+  reset), `/system/resource print` (multi-chunk, reassembled to one response on the
+  host), a bad command returns a non-zero result; commands work while logs stream.
 - **Exit:** interactive shell with persistent identity; chunked responses; result
   codes; coexists with logs/events.
 

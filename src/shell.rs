@@ -1,10 +1,11 @@
 //! RouterOS-style shell over the framed console, with **target-authoritative TAB
 //! completion**.
 //!
-//! Opt-in: an app calls [`serve`] with the board's storage. A task polls the USART
-//! RX register directly (the low-power executor fights interrupt-driven RX — see
-//! CONSOLE-PLAN.md §5.5), reassembles frames via [`FrameDecoder`], and handles two
-//! request types against **one static command tree** ([`ROOT`]):
+//! Opt-in: an app calls [`serve`] with the board's storage. A task async-reads the
+//! console's `BufferedUartRx` (interrupt-driven; while USB is present `vbus_task`
+//! holds STOP off so the RX interrupt fires — see CONSOLE-PLAN.md §5.5), reassembles
+//! frames via [`FrameDecoder`], and handles two request types against **one static
+//! command tree** ([`ROOT`]):
 //!   * `ShellCommand` → walk the tree → execute → `ShellResponse`;
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
 //!
@@ -187,12 +188,21 @@ async fn execute(kv: &mut Kv<'static>, cmd_id: u16, id: CmdId, args: &[&str]) {
         CmdId::ResourcePrint => {
             let us = Instant::now().as_micros();
             let mut s = String::<RESP_CAP>::new();
+            // Multi-line summary (spans more than one wire frame — exercises the
+            // console's shell-response chunking, which the host reassembles).
             let _ = write!(
                 s,
-                "uptime: {}.{:03} s\r\nfirmware: {}\r\ncpu: STM32L083 @ 16 MHz (HSI)\r\n",
+                "firmware:  {}\r\n\
+                 protocol:  v{}\r\n\
+                 uptime:    {}.{:03} s\r\n\
+                 cpu:       STM32L083CZ Cortex-M0+ @ 16 MHz (HSI)\r\n\
+                 clock:     LSE 32.768 kHz RTC tick\r\n\
+                 memory:    192 KiB flash / 20 KiB RAM / 6 KiB EEPROM\r\n\
+                 console:   USART1 PA9/PA10 115200 8N1, framed\r\n",
+                env!("CARGO_PKG_VERSION"),
+                tower_protocol::PROTOCOL_VERSION,
                 us / 1_000_000,
                 (us % 1_000_000) / 1000,
-                env!("CARGO_PKG_VERSION"),
             );
             console::shell_response(cmd_id, R_OK, s.as_str()).await;
         }

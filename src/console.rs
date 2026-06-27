@@ -42,18 +42,25 @@ use tower_protocol::{MAX_WIRE, MsgType, PROTOCOL_VERSION, encode_frame};
 const MAX_MSG: usize = 192;
 /// Max module-name length carried per log record.
 const MOD_LEN: usize = 24;
-/// Max shell-response text per frame (single-chunk responses for now).
+/// Max shell-response text buffered per message. Longer than one frame holds — the
+/// writer splits it into [`SHELL_CHUNK`]-sized frames (`chunk`/`last`), which the
+/// host reassembles by `cmd_id`.
 const MAX_RESP: usize = 256;
+/// Shell-response text bytes per frame. Kept well under the ~240-byte payload budget
+/// (a [`ShellResponse`] header is ~9 bytes) so a frame never fails to encode.
+const SHELL_CHUNK: usize = 192;
 /// Max firmware-version string in `Hello`.
 const FW_LEN: usize = 32;
 /// TX queue depth (frames). Sized to absorb boot-time chatter before the writer runs.
 const TX_DEPTH: usize = 8;
-/// Event caps: name length, per-field key/value length, and max fields (matches the
-/// wire `Vec<(&str,&str), 8>`).
+/// Event caps: name length, per-field key/value length, and max fields. Sized so the
+/// **worst case fits one frame**: postcard ≈ name(1+24) + count(1) + EV_FIELDS·(2 +
+/// EV_KEY + EV_VAL) = 25 + 1 + 6·34 = 230 ≤ the ~249-byte payload budget. The wire
+/// type allows up to 8 fields (`Vec<(&str,&str), 8>`); the firmware emits ≤ EV_FIELDS.
 const EV_NAME: usize = 24;
 const EV_KEY: usize = 12;
 const EV_VAL: usize = 20;
-const EV_FIELDS: usize = 8;
+const EV_FIELDS: usize = 6;
 
 /// An owned outgoing message. The writer assigns the `seq` and encodes it, so nothing
 /// borrows past the producing call and dropped frames never consume sequence numbers.
@@ -122,6 +129,28 @@ fn clip<const N: usize>(s: &str) -> String<N> {
     out
 }
 
+/// A `fmt::Write` sink over a bounded [`String`] that **truncates** rather than
+/// failing. A plain `write!` into a `heapless::String` rejects any single piece that
+/// would overflow *wholesale* — so `log::info!("{}", over_long)` would log an **empty**
+/// line. This sink instead writes what fits (at a char boundary) and silently drops
+/// the rest, so over-long messages clip gracefully.
+struct Clipper<const N: usize>(String<N>);
+
+impl<const N: usize> Write for Clipper<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let room = N - self.0.len();
+        if room == 0 {
+            return Ok(());
+        }
+        let mut end = s.len().min(room);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        let _ = self.0.push_str(&s[..end]);
+        Ok(())
+    }
+}
+
 fn map_level(l: log::Level) -> Level {
     match l {
         log::Level::Error => Level::Error,
@@ -142,8 +171,8 @@ impl log::Log for ConsoleLogger {
     }
 
     fn log(&self, record: &Record) {
-        let mut message = String::<MAX_MSG>::new();
-        let _ = write!(message, "{}", record.args()); // clipped if over MAX_MSG
+        let mut message = Clipper::<MAX_MSG>(String::new());
+        let _ = write!(message, "{}", record.args()); // truncates past MAX_MSG (never empties)
         let module = record
             .target()
             .rsplit("::")
@@ -153,7 +182,7 @@ impl log::Log for ConsoleLogger {
             level: map_level(record.level()),
             uptime_us: Instant::now().as_micros(),
             module: clip(module),
-            message,
+            message: message.0,
         });
     }
 
@@ -243,7 +272,9 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                 send(&mut tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await
             }
             Outgoing::Event { name, fields } => {
-                let mut wire: Vec<(&str, &str), EV_FIELDS> = Vec::new();
+                // Capacity matches the wire type (`Event.fields: Vec<_, 8>`); the
+                // producer already capped the owned `fields` at EV_FIELDS (≤ 8).
+                let mut wire: Vec<(&str, &str), 8> = Vec::new();
                 for (k, v) in fields {
                     let _ = wire.push((k.as_str(), v.as_str()));
                 }
@@ -251,19 +282,7 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                     .await
             }
             Outgoing::ShellResponse { cmd_id, result, text } => {
-                send(
-                    &mut tx,
-                    &mut seq,
-                    MsgType::ShellResponse,
-                    &ShellResponse {
-                        cmd_id: *cmd_id,
-                        result: *result,
-                        chunk: 0,
-                        last: true,
-                        text: text.as_str(),
-                    },
-                )
-                .await
+                send_shell_response(&mut tx, &mut seq, *cmd_id, *result, text.as_str()).await
             }
             Outgoing::Completions(c) => {
                 send(&mut tx, &mut seq, MsgType::ShellCompletions, c).await
@@ -276,7 +295,8 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
 }
 
 /// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
-/// holds a `WakeGuard` for the burst).
+/// holds a `WakeGuard` for the burst). An encode failure (payload over budget) is
+/// counted as a drop rather than silently lost.
 async fn send<T: Serialize>(
     tx: &mut BufferedUartTx<'static>,
     seq: &mut u16,
@@ -284,9 +304,47 @@ async fn send<T: Serialize>(
     payload: &T,
 ) {
     let mut buf = [0u8; MAX_WIRE];
-    if let Ok(n) = encode_frame(msg_type, *seq, payload, &mut buf) {
-        *seq = seq.wrapping_add(1);
-        let _ = tx.write_all(&buf[..n]).await;
+    match encode_frame(msg_type, *seq, payload, &mut buf) {
+        Ok(n) => {
+            *seq = seq.wrapping_add(1);
+            let _ = tx.write_all(&buf[..n]).await;
+        }
+        Err(_) => bump_dropped(),
+    }
+}
+
+/// Send a shell response as one or more `chunk`-indexed frames (`last` marks the
+/// final one), splitting `text` at char boundaries no larger than [`SHELL_CHUNK`] so
+/// each frame fits the wire budget. Empty text still sends one (empty, `last`) frame
+/// so the host always completes the response. The host reassembles by `cmd_id`.
+async fn send_shell_response(
+    tx: &mut BufferedUartTx<'static>,
+    seq: &mut u16,
+    cmd_id: u16,
+    result: u8,
+    text: &str,
+) {
+    let mut rest = text;
+    let mut chunk: u16 = 0;
+    loop {
+        let mut take = rest.len().min(SHELL_CHUNK);
+        while take > 0 && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        let (head, tail) = rest.split_at(take);
+        let last = tail.is_empty();
+        send(
+            tx,
+            seq,
+            MsgType::ShellResponse,
+            &ShellResponse { cmd_id, result, chunk, last, text: head },
+        )
+        .await;
+        if last {
+            break;
+        }
+        rest = tail;
+        chunk = chunk.wrapping_add(1);
     }
 }
 
@@ -306,8 +364,9 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
     TX_CHANNEL.send(Outgoing::Event { name: clip(name), fields: f }).await;
 }
 
-/// Send a shell command response (single chunk). Async — never dropped. Used by the
-/// shell engine ([`crate::shell`]).
+/// Send a shell command response. The writer splits `text` into `chunk`/`last` frames
+/// the host reassembles, so it may exceed one frame (up to [`MAX_RESP`], clipped past
+/// that). Async — never dropped. Used by the shell engine ([`crate::shell`]).
 pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
     TX_CHANNEL
         .send(Outgoing::ShellResponse { cmd_id, result, text: clip(text) })
@@ -329,9 +388,9 @@ pub fn boot_banner(name: &str) {
 
 /// Backing function for [`print!`](crate::print)/[`println!`](crate::println).
 pub fn _print(args: fmt::Arguments) {
-    let mut s = String::<MAX_MSG>::new();
+    let mut s = Clipper::<MAX_MSG>(String::new());
     let _ = write!(s, "{}", args);
-    try_enqueue(Outgoing::Print(s));
+    try_enqueue(Outgoing::Print(s.0));
 }
 
 /// Write formatted text to the console with no trailing newline.
@@ -372,7 +431,10 @@ fn on_panic(info: &PanicInfo) -> ! {
         };
         let mut buf = [0u8; MAX_WIRE];
         if let Ok(n) = encode_frame(MsgType::Log, 0, &payload, &mut buf) {
-            for &b in &buf[..n] {
+            // Lead with a 0x00: any byte still in the shift register (or a partial frame
+            // the silenced writer left behind) would otherwise prefix and corrupt ours.
+            // The delimiter flushes the host decoder so our frame stands alone.
+            for &b in core::iter::once(&0u8).chain(&buf[..n]) {
                 while !USART1.isr().read().txe() {}
                 USART1.tdr().write(|w| w.set_dr(b as u16));
             }

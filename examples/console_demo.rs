@@ -22,6 +22,10 @@ async fn run(_b: Board) {
         debug!("debug sample #{}", n);
         trace!("trace sample #{}", n);
         println!("raw println! line #{}", n);
+        // A line far over the 192-char buffer: must arrive *truncated*, not empty
+        // (the clip path — a plain heapless write would reject it wholesale).
+        const A: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+        info!("longline #{n}: {A}{A}{A}{A}{A}{A}");
         Timer::after_millis(400).await; // let the queue drain before the burst
 
         // Then a burst far larger than the TX queue depth with no awaits between, so

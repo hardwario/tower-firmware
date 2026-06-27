@@ -29,7 +29,7 @@ async fn run(_b: Board) {
         )
         .await;
 
-        if n % 5 == 0 {
+        if n.is_multiple_of(5) {
             console::event("heartbeat", &[("uptime_s", count.as_str())]).await;
             warn!("warning at tick {}", n);
         }

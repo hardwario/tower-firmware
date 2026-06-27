@@ -18,9 +18,19 @@ _port_flag := if port == "" { "" } else { "-p " + port }
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 
+# Host triple — host-side tests must build for the host, since the workspace
+# default target (thumbv6m, see .cargo/config.toml) has no libtest / panic handler.
+host := `rustc -vV | sed -n 's/^host: //p'`
+
 # List available recipes.
 default:
     @just --list
+
+# Run the host-side test suite (the shared `tower-protocol` codec: round-trip,
+# boundary sizes, decoder state machine, and deterministic fuzzing). Runs on the
+# host triple because `cargo test` can't target the bare-metal MCU.
+test *ARGS:
+    cargo test -p tower-protocol --target {{host}} {{ARGS}}
 
 # List the example apps you can build/flash.
 samples:
