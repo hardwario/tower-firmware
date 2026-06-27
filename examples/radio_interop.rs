@@ -152,7 +152,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
                 SendResult::NotDelivered => nd += 1,
                 SendResult::Busy => busy += 1,
                 SendResult::DutyLimited => duty += 1,
-                SendResult::Error(_) => {}
+                _ => {} // Error / WrongMode / NotSynced (latter two not in plain send)
             }
             seq = seq.wrapping_add(1);
         }

@@ -76,6 +76,8 @@ async fn node(net: &mut Net) -> ! {
             SendResult::Busy => warn!(target: "confirmed", "seq={} Busy", seq),
             SendResult::DutyLimited => warn!(target: "confirmed", "seq={} DutyLimited", seq),
             SendResult::Error(e) => error!(target: "confirmed", "seq={} Error {:?}", seq, e),
+            // WrongMode/NotSynced only arise in AFA/FHSS modes (not plain send).
+            other => warn!(target: "confirmed", "seq={} {:?}", seq, other),
         }
         seq = seq.wrapping_add(1);
         embassy_time::Timer::after_secs(2).await;
