@@ -5,6 +5,12 @@ edition = "2024"
 license = "MIT"
 description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
 
+# This package is also the workspace root. `tower-protocol` is the shared no_std
+# wire-format crate, depended on by this firmware and (out-of-tree) by `tower-cli`.
+[workspace]
+members = ["crates/tower-protocol"]
+resolver = "2"
+
 [dependencies]
 # Async executor. The Cortex-M *platform* (the `__pender` + thread-mode loop) is
 # provided by embassy-stm32's low-power executor below, NOT by embassy-executor,
@@ -70,6 +76,18 @@ log = "0.4"
 # no_std, no-alloc (fixed-buffer (de)serialization).
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.0", default-features = false }
+
+# Shared console wire protocol (framing + CRC + message schema). Phase 0 uses only
+# its `crc` module (storage delegates to it); the console wiring lands in Phase 1.
+tower-protocol = { path = "crates/tower-protocol" }
+
+# Bounded buffers for the framed console (the TX queue item, log/print scratch).
+# Matches the version already in the lockfile (pulled transitively by embassy).
+heapless = "0.9"
+
+# Async IO traits for the interrupt-buffered console UART (BufferedUart). Version must
+# match embassy-stm32's (0.7) or the trait impls won't line up.
+embedded-io-async = "0.7"
 
 # Build-time role selection for the two-board radio examples: one source file is
 # built twice with different roles — e.g. `TOWER_FEATURES=role-gateway just flash

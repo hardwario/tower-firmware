@@ -26,6 +26,7 @@ pub mod led;
 pub mod lis2dh12;
 pub mod power;
 pub mod radio;
+pub mod shell;
 pub mod storage;
 pub mod strip;
 pub mod tmp112;

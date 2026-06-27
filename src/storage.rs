@@ -89,6 +89,9 @@ impl<'d> Storage<'d> {
 pub const MAX_VALUE: usize = 256;
 /// Maximum number of distinct keys [`Kv::compact`] can track in one pass.
 pub const MAX_KEYS: usize = 64;
+/// KV key range reserved for console/shell settings (e.g. `/system identity`).
+/// FOTA reserves `0x5400+`; the console uses `0x5500+`.
+pub const CONSOLE_SETTINGS_BASE: u16 = 0x5500;
 /// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
 const KV_HEADER: usize = 8;
 
@@ -311,19 +314,11 @@ impl<'d> Kv<'d> {
 }
 
 /// CRC-32 (IEEE 802.3) over the record header bytes followed by the value.
+///
+/// Delegates to the shared [`tower_protocol::crc`] primitive — byte-for-byte the
+/// same init / poly / final-XOR as the firmware's previous private copy, so EEPROM
+/// records written before the move still verify.
 fn entry_crc(hdr4: &[u8], value: &[u8]) -> u32 {
-    let crc = crc32_update(0xFFFF_FFFF, hdr4);
-    !crc32_update(crc, value)
-}
-
-/// One bitwise CRC-32 pass over `data`, continuing from `crc` (no table).
-fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    crc
+    let crc = tower_protocol::crc::crc32_update(0xFFFF_FFFF, hdr4);
+    !tower_protocol::crc::crc32_update(crc, value)
 }

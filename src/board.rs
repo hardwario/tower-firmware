@@ -12,12 +12,10 @@ use embassy_stm32::flash::Flash;
 use embassy_stm32::gpio::Pull;
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
-use embassy_stm32::peripherals::{
-    DMA1_CH3, PA1, PA9, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2, USART1,
-};
+use embassy_stm32::peripherals::{DMA1_CH3, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::usart::{Config as UartConfig, UartTx};
+use embassy_stm32::usart::{BufferedUart, Config as UartConfig};
 use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
 use embassy_time::Duration;
 use log::LevelFilter;
@@ -29,6 +27,9 @@ use crate::tmp112::{self, Tmp112};
 // — all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, also here).
 bind_interrupts!(struct Irqs {
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
+    // USART1 interrupt — drives the interrupt-buffered console UART (BufferedUart);
+    // no DMA, so no clash with the WS2812 strip's DMA1_CHANNEL2_3.
+    USART1 => embassy_stm32::usart::BufferedInterruptHandler<embassy_stm32::peripherals::USART1>;
 });
 
 /// Default console verbosity set by [`Board::take`]; lower it at runtime with
@@ -101,8 +102,25 @@ impl Board {
     pub fn take(spawner: Spawner) -> Self {
         let p = init();
 
-        // Console — always on.
-        init_console(p.USART1, p.PA9, LOG_LEVEL);
+        // Console — always on. Full-duplex USART1 (PA9 TX / PA10 RX) at 115200 8N1,
+        // interrupt-buffered (BufferedUart): no DMA → no clash with the WS2812 strip's
+        // DMA group. The writer holds a WakeGuard while transmitting so the low-power
+        // executor uses WFI (USART clocked) instead of STOP (which gates it); the shell
+        // reads RX async. CONSOLE-PLAN.md §5.5.
+        let tx_buf = cortex_m::singleton!(: [u8; 256] = [0; 256]).unwrap();
+        let rx_buf = cortex_m::singleton!(: [u8; 128] = [0; 128]).unwrap();
+        let uart = BufferedUart::new(
+            p.USART1,
+            p.PA10,
+            p.PA9,
+            tx_buf,
+            rx_buf,
+            Irqs,
+            UartConfig::default(),
+        )
+        .expect("USART1 115200 8N1 config");
+        let (console_tx, console_rx) = uart.split();
+        crate::console::init(spawner, console_tx, console_rx, LOG_LEVEL);
 
         // TMP112 — put it in shutdown (one-shot) mode so it doesn't free-run.
         let mut i2c_config = I2cConfig::default();
@@ -113,7 +131,10 @@ impl Board {
 
         // USB-aware power management, for every app: inhibit STOP while VBUS
         // (PA12) is high so the console/EXTI stay live; allow STOP when unplugged.
-        let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::None, Irqs);
+        // Pull-down so the sense line reads a defined low when unplugged (no false
+        // "USB present" from a floating pin); the external divider drives it high
+        // when plugged (CONSOLE-PLAN.md §10 notes the V_IH caveat to verify on HW).
+        let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
         spawner.spawn(crate::power::vbus_task(vbus).unwrap());
 
         Board {
@@ -161,12 +182,4 @@ pub fn init() -> Peripherals {
     config.min_stop_pause = Duration::from_ticks(0);
     config.enable_debug_during_sleep = false;
     embassy_stm32::init(config)
-}
-
-/// Bring up the serial log console on USART1 TX (PA9) at 115200 8N1 and install
-/// it as the global [`log`] backend at `max_level`.
-pub fn init_console(usart1: Peri<'static, USART1>, tx: Peri<'static, PA9>, max_level: LevelFilter) {
-    let uart =
-        UartTx::new_blocking(usart1, tx, UartConfig::default()).expect("USART1 115200 8N1 config");
-    crate::console::init(uart, max_level);
 }
