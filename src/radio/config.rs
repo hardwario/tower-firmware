@@ -126,18 +126,24 @@ fn synt_value(fbase_hz: u64, b_div: u64) -> u32 {
     ((num + F_XO / 2) / F_XO) as u32
 }
 
+/// Pack the 26-bit SYNT divider for `f_hz` into the four SYNT3..SYNT0 bytes:
+/// SYNT[25:0] with WCP[7:5]=0 and the band-select `bs` in SYNT0[2:0].
+fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
+    let synt = synt_value(f_hz, b_div);
+    [
+        ((synt >> 21) & 0x1F) as u8, // SYNT3: WCP[7:5]=0 | SYNT[25:21]
+        ((synt >> 13) & 0xFF) as u8, // SYNT2: SYNT[20:13]
+        ((synt >> 5) & 0xFF) as u8,  // SYNT1: SYNT[12:5]
+        (((synt & 0x1F) as u8) << 3) | (bs & 0x07), // SYNT0: SYNT[4:0] | BS
+    ]
+}
+
 /// Write the band/channel-dependent synthesizer registers (SYNT3..0, CHSPACE,
 /// CHNUM) — all a band switch needs to rewrite, since every other RF setting is
 /// band-independent. Shared by [`apply`] and [`set_band`].
 fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), RadioError> {
     // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
-    let synt = synt_value(band.base_hz(), band.b_div());
-    let bs = band.bs_field();
-    let synt3 = ((synt >> 21) & 0x1F) as u8; // WCP[7:5]=0
-    let synt2 = ((synt >> 13) & 0xFF) as u8;
-    let synt1 = ((synt >> 5) & 0xFF) as u8;
-    let synt0 = (((synt & 0x1F) as u8) << 3) | (bs & 0x07);
-    spi.write_regs(regs::SYNT3, &[synt3, synt2, synt1, synt0])?;
+    spi.write_regs(regs::SYNT3, &synt_bytes(band.base_hz(), band.b_div(), band.bs_field()))?;
     // Channel spacing (steps of f_XO/2^15) and channel number.
     let chspace = ((band.spacing_hz() * (1u64 << 15) + F_XO / 2) / F_XO) as u8;
     spi.write_reg(regs::CHSPACE, chspace)?;
@@ -154,6 +160,22 @@ fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), 
 pub async fn set_band(radio: &mut Spirit1, band: Band, channel: u8) -> Result<(), RadioError> {
     radio.to_ready().await?;
     write_band_regs(radio.spi(), band, channel)
+}
+
+/// Retune to an **arbitrary** carrier `f_hz` in the high VCO band (779–956 MHz) at
+/// runtime: bring the part to READY, write SYNT3..0 directly, and force `CHNUM = 0`
+/// so the carrier equals `f_hz` exactly (no CHSPACE offset). The VCO auto-recalibrates
+/// on the next TX/RX entry (same path [`set_band`] relies on). This is the per-hop /
+/// per-AFA-channel retune primitive used by the FHSS and LBT+AFA spectrum-access modes;
+/// it is cheap (one 4-byte SYNT burst + one CHNUM write). `f_hz` must be in 779–956 MHz
+/// (the band the SPSGRF config is tuned for); callers own the channel-plan math.
+pub async fn set_freq_hz(radio: &mut Spirit1, f_hz: u64) -> Result<(), RadioError> {
+    radio.to_ready().await?;
+    let spi = radio.spi();
+    // B=6, BS=1 (high band) — matches both Eu868/Us915 band-select.
+    spi.write_regs(regs::SYNT3, &synt_bytes(f_hz, 6, 1))?;
+    spi.write_reg(regs::CHNUM, 0)?;
+    Ok(())
 }
 
 /// Apply a full RF configuration. Must leave the part in READY. The caller has
