@@ -1,4 +1,4 @@
-//! net_pairing — OTA 3-way pairing under the public pairing key (RADIO.md §7.6).
+//! net_pairing — OTA 3-way pairing under the public pairing key (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash net_pairing   # joiner: requests to join

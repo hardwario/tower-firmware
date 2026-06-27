@@ -13,7 +13,7 @@ use super::{ACK_TURNAROUND, Net, TX_TIMEOUT};
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME};
 
-/// Fixed, **publicly-known** OTA-pairing key (RADIO.md §7.6). It gives the JOIN
+/// Fixed, **publicly-known** OTA-pairing key (docs/radio.md). It gives the JOIN
 /// frames a uniform CCM format with integrity + in-session replay protection, but
 /// NO confidentiality (a sniffer in range during the window recovers the
 /// delivered per-node key) and NO mutual authentication. Mitigate with a short

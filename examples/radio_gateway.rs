@@ -1,4 +1,4 @@
-//! radio_gateway — reference gateway (shipped happy-path app, RADIO.md §10).
+//! radio_gateway — reference gateway (shipped happy-path app, docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash radio_gateway
 //!

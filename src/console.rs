@@ -4,7 +4,7 @@
 //! event, and the boot `Hello` is a COBS+CRC+postcard frame on USART1 TX (PA9) at
 //! 115200. `jolt monitor` therefore shows binary — use the `tower` host CLI.
 //!
-//! Architecture (CONSOLE-PLAN.md §5):
+//! Architecture (docs/console.md):
 //!   * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an
 //!     owned [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking,
 //!     drop-newest on full (a dropped count is reported by the writer);
@@ -222,7 +222,7 @@ pub fn take_rx() -> Option<BufferedUartRx<'static>> {
 /// write awaits the USART TXE interrupt, which STOP would gate (the low-power executor
 /// enters STOP when idle) — the guard forces a plain WFI so the USART stays clocked and
 /// the interrupt fires. At the `receive().await` (truly idle) **no** guard is held, so
-/// STOP is still reached when unplugged. (CONSOLE-PLAN.md §5.1.)
+/// STOP is still reached when unplugged. (docs/console.md.)
 #[embassy_executor::task]
 async fn writer_task(mut tx: BufferedUartTx<'static>) {
     // Lone 0x00 at start-up: flush any partial frame on the host's decoder.

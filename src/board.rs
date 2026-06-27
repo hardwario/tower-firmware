@@ -106,7 +106,7 @@ impl Board {
         // interrupt-buffered (BufferedUart): no DMA → no clash with the WS2812 strip's
         // DMA group. The writer holds a WakeGuard while transmitting so the low-power
         // executor uses WFI (USART clocked) instead of STOP (which gates it); the shell
-        // reads RX async. CONSOLE-PLAN.md §5.5.
+        // reads RX async. docs/console.md.
         let tx_buf = cortex_m::singleton!(: [u8; 256] = [0; 256]).unwrap();
         let rx_buf = cortex_m::singleton!(: [u8; 128] = [0; 128]).unwrap();
         let uart = BufferedUart::new(
@@ -133,7 +133,7 @@ impl Board {
         // (PA12) is high so the console/EXTI stay live; allow STOP when unplugged.
         // Pull-down so the sense line reads a defined low when unplugged (no false
         // "USB present" from a floating pin); the external divider drives it high
-        // when plugged (CONSOLE-PLAN.md §10 notes the V_IH caveat to verify on HW).
+        // when plugged (docs/console.md notes the V_IH caveat to verify on HW).
         let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
         spawner.spawn(crate::power::vbus_task(vbus).unwrap());
 

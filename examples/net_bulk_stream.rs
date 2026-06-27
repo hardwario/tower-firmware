@@ -1,4 +1,4 @@
-//! net_bulk_stream — streaming bulk transfer, no RAM ceiling (RADIO.md §7.5).
+//! net_bulk_stream — streaming bulk transfer, no RAM ceiling (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash net_bulk_stream   # sender: streams a blob from a source
 //!   TOWER_FEATURES=role-node    just flash net_bulk_stream   # requester: streams to a verifying sink

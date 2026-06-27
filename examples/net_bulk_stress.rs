@@ -1,4 +1,4 @@
-//! net_bulk_stress — large bulk transfer stress (RADIO.md §7.5).
+//! net_bulk_stress — large bulk transfer stress (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash net_bulk_stress   # sender: serves a big blob
 //!   TOWER_FEATURES=role-node    just flash net_bulk_stress   # requester: pulls + verifies

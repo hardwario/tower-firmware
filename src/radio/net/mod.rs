@@ -1,5 +1,5 @@
 //! Network layer: confirmed delivery, ACK, retransmit and replay protection
-//! over the secured frame codec (RADIO.md §7).
+//! over the secured frame codec (docs/radio.md).
 //!
 //! `Net` owns the radio + CCM and serializes one transfer at a time (§4). A
 //! *node* `send(confirmed)` transmits a DATA frame then opens a 200 ms ACK
@@ -64,7 +64,7 @@ const KEY_WATERMARK: u16 = 0x5201;
 const KEY_LASTSEEN: u16 = 0x5202;
 
 /// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
-/// holds up to 8 peers (RADIO.md §7.2). One table size covers both — the topology
+/// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
 /// is a usage policy, not a different type.
 pub const MAX_PEERS: usize = 64;
 /// Base Kv key for per-peer last-seen persistence (slot `i` → `KEY_LASTSEEN_BASE + i`).

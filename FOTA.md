@@ -232,7 +232,7 @@ corrupt image is refused, and an interrupted swap never bricks the device.
   writer to add in Phase 1).
 - Net wiring: `src/radio/net/mod.rs` (`send_ack` is where DOWNLINK_PENDING would be set;
   peer keys, counters).
-- Bench/flash workflow: `docs/radio.md`, `PLAN.md`; flash with `TOWER_FEATURES=… just
+- Bench/flash workflow: `docs/radio.md`; flash with `TOWER_FEATURES=… just
   flash <example>`, monitor with `jolt monitor --reset`.
 - External: embassy-boot (bootloader), a no_std Ed25519 crate, SHA-256 (no_std), FCC/EU
   duty numbers in `docs/radio.md`.

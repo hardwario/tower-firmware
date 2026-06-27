@@ -5,7 +5,7 @@
 //! Opt-in: an app calls [`serve`] (base only) or [`serve_ext`] (with its own
 //! commands + settings). A task async-reads the console's `BufferedUartRx`
 //! (interrupt-driven; while USB is present `vbus_task` holds STOP off so the RX
-//! interrupt fires — see CONSOLE-PLAN.md §5.5), reassembles frames via
+//! interrupt fires — see docs/console.md), reassembles frames via
 //! [`FrameDecoder`], and handles two request types against one command tree:
 //!   * `ShellCommand` → walk the tree → run the command's handler → `ShellResponse`;
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.

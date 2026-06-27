@@ -1,4 +1,4 @@
-//! Bulk transfer / downlink pull (RADIO.md §7.5): the requester pulls, the sender
+//! Bulk transfer / downlink pull (docs/radio.md): the requester pulls, the sender
 //! serves. The session id is a counter reserved by the sender (distinct from the
 //! announce frame's counter, so chunk-0's nonce never collides with the announce).
 //! All BULK_DATA chunks share that session counter with a distinct bulk_index,
@@ -18,7 +18,7 @@ use super::{ACK_TURNAROUND, Net, TX_TIMEOUT};
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
-/// Bulk chunk size (RADIO.md §7.5).
+/// Bulk chunk size (docs/radio.md).
 pub const BULK_CHUNK: usize = 64;
 /// Bulk session idle timeout: the sender frees the transfer after this with no progress.
 const BULK_IDLE: Duration = Duration::from_secs(30);

@@ -1,4 +1,4 @@
-//! net_bulk — bulk transfer via the pull mechanism (RADIO.md §7.5).
+//! net_bulk — bulk transfer via the pull mechanism (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash net_bulk   # sender: serves a blob
 //!   TOWER_FEATURES=role-node    just flash net_bulk   # requester: pulls + verifies

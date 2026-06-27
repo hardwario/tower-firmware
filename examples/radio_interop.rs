@@ -1,4 +1,4 @@
-//! radio_interop — comprehensive semi-fuzzy soak campaign (RADIO.md §14).
+//! radio_interop — comprehensive semi-fuzzy soak campaign (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash radio_interop   # randomized sender
 //!   TOWER_FEATURES=role-gateway just flash radio_interop   # invariant checker

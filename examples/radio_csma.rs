@@ -1,4 +1,4 @@
-//! radio_csma — CSMA/CCA: defer TX while the channel is busy (RADIO.md §2.5/§9).
+//! radio_csma — CSMA/CCA: defer TX while the channel is busy (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash radio_csma   # jammer: CW 3 s on / 3 s off
 //!   TOWER_FEATURES=role-node    just flash radio_csma   # sender: TX with CSMA enabled

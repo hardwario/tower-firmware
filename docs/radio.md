@@ -1,8 +1,9 @@
 # TOWER Radio — user guide
 
 A sub-GHz radio stack for the TOWER Core Module, built on the **SPIRIT1**
-transceiver (in the SPSGRF module). This is the *user-facing* guide; the internal
-design spec is `RADIO.md` and the implementation checklist is `PLAN.md`.
+transceiver (in the SPSGRF module). This is the standalone reference for using and
+maintaining the stack — API, wire protocol, the design rationale behind the RF and
+security parameters, and a worked example per feature.
 
 > **Status: complete and hardware-verified.** The full stack is implemented and
 > tested on two boards: the radio layer (SPI, power states, RF config, CW, TX/RX
@@ -10,8 +11,7 @@ design spec is `RADIO.md` and the implementation checklist is `PLAN.md`.
 > frame codec, and the network layer — confirmed delivery + ACK/retransmit,
 > replay protection + counter persistence, the EU duty governor, bulk pull,
 > OTA pairing, and per-peer keys (star / P2P). A semi-fuzzy soak (`radio_interop`)
-> exercises it all under randomized traffic with latched invariant checks. See the
-> per-step results in `PLAN.md`.
+> exercises it all under randomized traffic with latched invariant checks.
 
 ## Hardware
 
@@ -159,7 +159,7 @@ if let Some(rx) = net.recv(Duration::from_secs(10)).await {
 }
 ```
 
-**Counters, replay & persistence (§6/§7.4).** Every transfer consumes one
+**Counters, replay & persistence.** Every transfer consumes one
 monotonic TX counter; the counter feeds the nonce, so it must never repeat. The
 watermark is persisted *ahead* in blocks of `RESERVE=1024`, so after a reboot the
 device resumes **at or above** the last value it could have sent — never reusing
@@ -168,7 +168,7 @@ higher counter than it has seen from that sender and lazy-persists the last-seen
 every `P=32` accepts (replay window ≤ P across a receiver reboot). CCM verify
 happens *before* the replay comparison, so a forged frame can't poison the state.
 
-**Peer table & topologies (§7.2).** Keys are per-peer. `add_peer(id, &key)` binds
+**Peer table & topologies.** Keys are per-peer. `add_peer(id, &key)` binds
 a sender ID to its own AES key and its own replay lane; an unregistered peer falls
 back to the `NetConfig::key` default lane (the single-link case). One table holds
 up to `MAX_PEERS = 64`:
@@ -185,7 +185,7 @@ net.peer_count();  net.remove_peer(NODE_A);  net.peer_last_seen(NODE_B);
 - **P2P** (≤8 peers): both ends `add_peer` the other under a shared link key and
   exchange confirmed messages in either direction.
 
-**Bulk transfer / downlink pull (§7.5).** Large blobs are *pulled*: the sender
+**Bulk transfer / downlink pull.** Large blobs are *pulled*: the sender
 announces `(length, session)`, the requester pulls each ≤64 B chunk with a
 `BULK_REQ(index)` and reassembles. The session counter + 24-bit chunk index keep
 every chunk's nonce unique; the sender frees an idle session after 30 s.
@@ -211,7 +211,7 @@ net.bulk_serve_from(NODE_ID, &mut image_reader).await;   // BulkSource: read fla
 net.bulk_fetch_into(GW_ID, &mut flash_writer).await;     // BulkSink: chunk → write flash + hash
 ```
 
-**OTA pairing (§7.6).** A 3-way JOIN under a fixed, **publicly-known** pairing key
+**OTA pairing.** A 3-way JOIN under a fixed, **publicly-known** pairing key
 (`PAIRING_KEY`): `JOIN_REQ`(node id) → `JOIN_RESP`(per-node key) →
 `JOIN_CONFIRM`(node id), both sides committing only on the confirm. The **joining
 node chooses its own ID** and keeps it; the host only hands out the key (it does
@@ -231,7 +231,7 @@ if let Some(id) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
 if let Some(key) = net.join(my_id, PAIRING_WINDOW).await { /* store key */ }
 ```
 
-**Duty governor (§2.2).** A token-bucket meters **all** TX airtime (data, ACKs,
+**Duty governor.** A token-bucket meters **all** TX airtime (data, ACKs,
 bulk, pairing); a send that would exceed the budget returns `DutyLimited` instead
 of transmitting. The policy follows the band and is reselected by `set_band`: EU
 868 enforces the 1 % / hour limit; US 915 is unrestricted (FCC 15.247 governs by
@@ -293,26 +293,26 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `crypto_ccm_kat` | 1 | AES-128-CCM RFC 3610 vector + tamper test |
 | `crypto_frame_loopback` | 1 | frame codec + nonce + CCM round-trip |
 | `net_secure_ping` | node / gateway | one CCM-sealed DATA frame end-to-end |
-| `net_confirmed` | node / gateway | confirmed delivery + ACK + retransmit (§7.3) |
-| `net_persist` | 1 | TX-counter reserve-ahead survives reboot (§7.4) |
-| `net_duty_kat` | 1 | duty-governor token-bucket KAT (§2.2) |
-| `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA (§7.5) |
+| `net_confirmed` | node / gateway | confirmed delivery + ACK + retransmit |
+| `net_persist` | 1 | TX-counter reserve-ahead survives reboot |
+| `net_duty_kat` | 1 | duty-governor token-bucket KAT |
+| `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA |
 | `net_bulk_stress` | gateway / node | large bulk (multi-KB) + CRC-32 + throughput stress |
 | `net_bulk_stream` | gateway / node | streaming bulk (source/sink), 4–64 KB, constant RAM |
-| `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key (§7.6) |
-| `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
-| `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |
-| `net_channel` | node / gateway | secured link on a non-default channel (VCO recal, §8) |
+| `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key |
+| `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes |
+| `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange |
+| `net_channel` | node / gateway | secured link on a non-default channel (VCO recal) |
 | `radio_band` | node / gateway | runtime 868↔915 switching via `set_band` (live retune) |
 | `radio_afa` | node / gateway | EU LBT+AFA: listen-before-talk + frequency agility (EN 300 220) |
 | `fhss_sweep` | 1 | FHSS channel-plan + 80-channel synth lock + GUARD measure (F1) |
 | `fhss_kat` | 1 | FHSS hop-permutation / dwell / beacon-frame KATs (F3–F5) |
 | `radio_fhss` | node / gateway | US FHSS link (FCC §15.247): lock + hopping confirmed delivery |
 | `fhss_compliance` | 1 | §15.247 evidence: channel count + per-channel airtime histogram |
-| `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT (§3/§6/§9) |
-| `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery (§9) |
-| `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters (§4/§6) |
-| `radio_interop` | node / gateway | semi-fuzzy soak: randomized traffic + invariant checks (§14) |
+| `edge_frame_limits` | 1 | MTU + malformed/forged-frame rejection KAT |
+| `edge_recovery` | 1 | RX-timeout / stuck-state / FIFO recovery |
+| `edge_rapid` | node / gateway | back-to-back confirmed, strict-monotonic counters |
+| `radio_interop` | node / gateway | semi-fuzzy soak: randomized traffic + invariant checks |
 
 ## A note on RX completion (hard-won)
 
@@ -324,11 +324,92 @@ bit (`PCKT_FLT_OPTIONS` bit6 = 0, with no timeout masks) selects "reception ends
 at the reception of the packet", so `RX_DATA_READY` fires normally. `config::apply`
 sets this; it is unrelated to the RF/demod registers.
 
+## Parameters reference
+
+| Constant | Value |
+|---|---|
+| Device ID / crystal | part 304 / version 48 · **50 MHz** (not a TCXO) |
+| Bands / channels | EU 868 & US 915 · 3 per band |
+| EU 868 channels | 868.1 / 868.3 / 868.5 MHz (200 kHz spacing; "g1" ≤ +14 dBm ERP, ≤ 1 % duty) |
+| US 915 channels | 915.0 / 915.3 / 915.6 MHz (300 kHz) — single-channel is **bench-only**; use FHSS for a compliant US link |
+| Modulation / bit rate / deviation / BT | GFSK / 19 200 bps / 20 kHz / 1 |
+| RX bandwidth | ~216 kHz (wide; narrow via AFC_CORR — see Design rationale) |
+| Sync / CRC / preamble | `0xDB624715` / 16-bit `0x1021` / 4 B |
+| FIFO = network frame | 96 B |
+| Header (non-bulk / bulk) / CCM tag | 14 B / 17 B / 8 B |
+| Payload (single / bulk chunk) | ≤ 74 B / 64 B |
+| Nonce | 13 B (`src ‖ counter ‖ bulk_index ‖ 0x0000`) |
+| Time-on-air (max frame / ACK) | ≈ 44.6 ms / ≈ 17.5 ms |
+| TX power (default / max) | +11.6 dBm |
+| CSMA RSSI threshold / max backoff | −90 dBm / ~100 ms |
+| ACK window / inter-rep backoff / RX→TX turnaround | 200 ms / random 0–100 ms / ~20 ms |
+| Confirmed repetitions (range / default) | 1–10 / 3 |
+| Confirmed latency (N=3 / N=10) | ≈ 1.06 s / ≈ 3.55 s worst case |
+| Replay counter | 32-bit; starts at 1; hard-stop + re-key at 2³²−1 |
+| Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers |
+| Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
+| Bulk idle timeout | 30 s |
+| Star nodes / P2P peers | ≤ 64 / ≤ 8 |
+| Reserved IDs | `0x00000000`, `0xFFFFFFFF` |
+| Protocol version | 1 |
+| FHSS (US) | 80 channels · 300 ms slot · 24 s cycle |
+| EU duty cycle | ≤ 1 % per sub-band per device (governed; all TX counted) |
+
+## Design rationale
+
+The reasoning behind the chosen RF and security parameters — what to understand
+before changing any of them.
+
+**RX bandwidth (the central RF trade-off).** ±40 ppm crystal error per unit means
+two units differ by **~80 ppm** worst case. At 868 MHz that's a ~69 kHz carrier
+offset; with the ~59 kHz GFSK signal (Carson) the RX filter must pass *signal +
+2·offset* ≈ **198 kHz** (≈ 206 kHz at 915), so the nearest SPIRIT1 step **≥ ~210 kHz**
+is required for bring-up. **AFC re-centers the residual, but the analog filter must
+still *pass* the offset signal**, so a wide filter is unavoidable until the real
+drift is measured. ±40 ppm is conservative (the SPSGRF is a plain 50 MHz crystal, not
+a TCXO); the SPIRIT1 reports each packet's offset in `AFC_CORR`, so the path to
+narrowing is: run wide, log `AFC_CORR` between real boards over temperature, then set
+RX BW to the measured worst case + margin (a true ~±20 ppm part → ~130 kHz → ~2 dB
+more range). Until narrowed below ~180 kHz the 200 kHz channel spacing overlaps, so
+only ch0/ch2 are simultaneously usable; all three after narrowing.
+
+**Channels are tuned, not spanned.** The receiver sits on **one** channel; the RX BW
+is crystal-drift tolerance *around that center*, not a window over all three — a
+receiver on one channel does **not** hear the others, so **a node and its gateway must
+share a channel**. The 3 channels exist to run co-located networks without
+interference, not for a node to roam. **Band** is region/config-time (EU→868, US→915),
+identical on a gateway and all its nodes, with no OTA negotiation. EU 868 uses the
+868.0–868.6 MHz "g1" sub-band (EN 300 220 / ERC 70-03): **≤ +14 dBm ERP, ≤ 1 % duty**
+(keep conducted +11.6 dBm to ≤ ~2 dBi antenna, else reduce power). Duty is **per
+sub-band, per device** and counts **all** TX — data, ACK, bulk, retransmit, JOIN — and
+the gateway is governed too. **Final regulatory compliance — the current EN 300 220
+revision, an FCC strategy for the US, ERP with the real antenna, lab testing — is the
+integrator's responsibility before shipping.**
+
+**Security model (AES-128-CCM) — the nonce-uniqueness argument.** Each node has its
+own AES-128 key (the gateway holds one per node; the **same key protects both
+directions**). The cleartext header is the **AAD**, the payload is encrypted, and the
+8-byte tag authenticates both. The 13-byte nonce is *derived*, never transmitted:
+`src ‖ counter ‖ bulk_index ‖ 0x0000`. It is unique per `(key, frame)` because: the
+key is per-node and **`src` fixes the sender** (the two directions never collide even
+at equal counter values — no `dir` field needed); the 32-bit **counter** advances one
+per transfer; **`bulk_index`** separates the chunks of one transfer; and a
+**retransmission re-sends the byte-identical frame** (same counter ⇒ same ciphertext ⇒
+safe). An **ACK therefore uses the ACKer's own fresh counter** — the *acknowledged*
+counter rides in the ACK payload, never as the nonce counter — so an ACK and the frame
+it answers never share a nonce. On receive, **CCM-verify first** (this authenticates
+the header, including the counter), **then** compare to the per-peer last-seen and
+update it — so a forged high counter can't poison replay state, and tampered frames are
+dropped before the network layer acts. On key install the TX counter starts at **1**
+(`0` = never sent) and last-seen at **0**; a **re-key resets both** (a new key is a
+disjoint nonce space, so old ciphertext can't replay under it). EEPROM key storage is
+only as safe as the chip's readout protection — **enable flash RDP for production**.
+
 ## Known limitations & caveats
 
 - **OTA pairing has no confidentiality.** The fixed `PAIRING_KEY` is public, so a
   sniffer in range during the (short, user-initiated) pairing window recovers the
-  delivered per-node key, and there is no mutual authentication (§7.6). Pair at
+  delivered per-node key, and there is no mutual authentication. Pair at
   close range / reduced power; enable flash RDP for production key storage.
 - **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant — use FHSS for a
@@ -346,13 +427,13 @@ sets this; it is unrelated to the RF/demod registers.
   (`RAM note:` the FHSS per-channel state is a `[u16; 80]` counter — an earlier
   `[DutyGovernor; 80]` overflowed the 20 KB L0.)
 - **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance
-  without lab instruments; narrowing it (per the §2.1 AFC-vs-temperature data) is a
-  future optimization. All three EU channels are usable as-is.
+  without lab instruments; narrowing it (per the AFC-vs-temperature data — see Design
+  rationale) is a future optimization. All three EU channels are usable as-is.
 - **Counter persistence uses a single reserve-ahead watermark cell** (RESERVE=1024;
   ~10⁸ transfers before EEPROM wear matters). A multi-cell wear-ring is a refinement.
 - **Half-duplex single radio.** `Net` serializes one transfer at a time; CSMA
   mitigates contention but cannot eliminate hidden-node collisions — confirmed
-  delivery + retransmit absorbs the rest (§4).
+  delivery + retransmit absorbs the rest.
 - **`Net::send` does not enable CSMA by default** (CSMA is a radio-layer feature
   shown in `radio_csma`); wire `use_csma=true` into the TX path if your deployment
   needs it on every frame.

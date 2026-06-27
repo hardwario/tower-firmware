@@ -1,4 +1,4 @@
-//! net_duty_kat — deterministic check of the EU duty governor (RADIO.md §2.2).
+//! net_duty_kat — deterministic check of the EU duty governor (docs/radio.md).
 //! Single board, no radio: exercises the token-bucket accounting with known
 //! values and reports PASS/FAIL, so the airtime logic is verified independently
 //! of timing.

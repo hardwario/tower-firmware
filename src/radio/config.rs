@@ -96,7 +96,7 @@ impl Default for RfConfig {
     }
 }
 
-/// Per-reception signal quality (RADIO.md §2.8).
+/// Per-reception signal quality (docs/radio.md).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SignalQuality {
     /// RSSI in dBm.

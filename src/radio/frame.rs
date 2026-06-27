@@ -1,4 +1,4 @@
-//! TOWER network frame codec (RADIO.md §3).
+//! TOWER network frame codec (docs/radio.md).
 //!
 //! Wire layout (little-endian, fits the 96-byte SPIRIT1 FIFO):
 //!
@@ -28,7 +28,7 @@ pub const MAX_BULK_PAYLOAD: usize = 64;
 /// Full frame buffer size (the FIFO).
 pub const MAX_FRAME: usize = 96;
 
-/// Frame types (RADIO.md §3.1).
+/// Frame types (docs/radio.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameType {
@@ -63,7 +63,7 @@ impl FrameType {
     }
 }
 
-/// Frame flag bits (RADIO.md §3.1).
+/// Frame flag bits (docs/radio.md).
 pub mod flags {
     /// bit0: confirmed delivery requested.
     pub const CONFIRMED: u8 = 1 << 0;
