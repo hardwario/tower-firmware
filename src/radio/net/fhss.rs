@@ -30,15 +30,23 @@ use crate::radio::frame::{self, FrameType, HDR_LEN, Header, MAX_FRAME, MAX_PAYLO
 /// Slot length (ms). Cycle = `FHSS_N · FHSS_SLOT_MS`; must exceed 20 s so each
 /// channel is tuned at most once per compliance window (see module docs).
 const FHSS_SLOT_MS: u64 = 300;
-/// Per-slot guard (retune lead + clock-skew margin); measured retune ≪ this.
+/// Per-slot guard (retune lead + clock-skew margin); measured retune ≪ this. Also
+/// the lead by which the node opens its beacon RX *before* the slot boundary, so RX
+/// is armed before the gateway transmits (covers `rx()` setup latency — without it a
+/// late-armed RX can miss the beacon preamble and drop sync).
 const GUARD: Duration = Duration::from_millis(10);
-/// Node RX window for the per-slot beacon (covers beacon ToA + jitter).
-const BEACON_RX_MS: u64 = 60;
+/// Node RX window for the per-slot beacon: opened `GUARD` early, so it spans
+/// `[boundary − GUARD, boundary − GUARD + BEACON_RX_MS]`, generously covering the
+/// beacon ToA (~16 ms) + retune/clock jitter (drift ≪ GUARD even across MISS_LIMIT).
+const BEACON_RX_MS: u64 = 100;
 /// Node park-and-listen window while scanning (> one slot so it can't miss the
 /// gateway's pass over the rendezvous channel).
 const RENDEZVOUS_RX_MS: u64 = 350;
-/// Consecutive missed beacons before declaring loss of sync → re-scan.
-const MISS_LIMIT: u32 = 4;
+/// Consecutive missed beacons before declaring loss of sync → re-scan. Generous:
+/// the node re-anchors on every beacon, and drift over this many slots
+/// (8·300 ms·100 ppm ≈ 240 µs) stays far inside the beacon RX window, so transient
+/// misses (a collided slot, a momentary fade) don't trigger an expensive re-scan.
+const MISS_LIMIT: u32 = 8;
 /// Beacon payload: cycle(4 LE) ‖ slot_index(1).
 const BEACON_PL_LEN: usize = 5;
 /// Broadcast destination (beacons are network-wide).
@@ -288,7 +296,9 @@ impl Net {
 
                 let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
                 self.fhss.cur_channel = ch;
-                Timer::at(t_start).await;
+                // Open RX a guard *before* the boundary so it's armed before the
+                // gateway transmits (covers rx() setup latency).
+                Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
 
                 let got = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await;
                 if let Some((slot_abs, t_rx)) = got {
@@ -413,24 +423,29 @@ impl Net {
 
     /// Receive + authenticate a beacon under the network key (broadcast dest OK;
     /// **no** replay-advance — a beacon is an idempotent time signal, so a rebooted
-    /// gateway can't lock the node out). Returns `(slot_abs, t_rx)`.
+    /// gateway can't lock the node out). Listens until a valid beacon arrives or the
+    /// window elapses, ignoring any non-beacon frame in between (so a stray frame in
+    /// the widened/early window doesn't count as a miss). Returns `(slot_abs, t_rx)`.
     async fn fhss_rx_beacon(&mut self, timeout: Duration) -> Option<(u32, Instant)> {
-        let mut buf = [0u8; MAX_FRAME];
-        let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
-        let t_rx = Instant::now();
-        let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
-        if peek.frame_type != FrameType::Beacon {
-            return None;
-        }
+        let deadline = Instant::now().checked_add(timeout)?;
         let key = self.default_key;
-        let (_, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
-        let pl = &buf[range];
-        if pl.len() < BEACON_PL_LEN {
-            return None;
+        let mut buf = [0u8; MAX_FRAME];
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (len, _) = self.radio.rx(&mut buf, remaining).await.ok()?;
+            let t_rx = Instant::now();
+            // Only a frame that parses, is a Beacon, and CCM-opens counts; otherwise
+            // keep listening for the rest of the window.
+            if let Ok((peek, _)) = frame::Header::parse(&buf[..len])
+                && peek.frame_type == FrameType::Beacon
+                && let Ok((_, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len])
+                && range.len() >= BEACON_PL_LEN
+            {
+                let pl = &buf[range];
+                let cycle = u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]);
+                let slot_abs = cycle * FHSS_N as u32 + pl[4] as u32;
+                return Some((slot_abs, t_rx));
+            }
         }
-        let cycle = u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]);
-        let i = pl[4];
-        let slot_abs = cycle * FHSS_N as u32 + i as u32;
-        Some((slot_abs, t_rx))
     }
 }

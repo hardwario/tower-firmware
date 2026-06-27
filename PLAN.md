@@ -494,6 +494,10 @@ the shared `config::set_freq_hz` retune primitive + the existing CSMA/duty layer
   during deep async poll, corrupting memory (symptoms shifted with code size: a TX
   "StuckState", then hangs before init; it even broke the previously-working AFA
   link). Replacing it with the `[u16; 80]` counter + the structural occupancy bound
-  fixed FHSS and restored AFA. **Follow-up:** FHSS sync robustness is first-pass —
-  the node can drop sync at a transient and re-acquire; widen the beacon RX window /
-  raise the miss limit to harden.
+  fixed FHSS and restored AFA. **Sync hardening (done):** the node opens its beacon
+  RX a GUARD before each slot boundary (so RX is armed before the gateway transmits —
+  covers `rx()` setup latency), uses a wide 100 ms window that ignores stray frames,
+  and tolerates 8 consecutive misses before re-scanning (drift ≪ window). Verified:
+  **0 sync losses + 140 confirmed deliveries over ~45 s**; clean LOST→rescan→LOCKED
+  on real gateway loss. (A gateway *restart* still forces a one-cycle re-acquire —
+  inherent to the new epoch.)

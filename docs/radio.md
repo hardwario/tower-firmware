@@ -315,12 +315,14 @@ sets this; it is unrelated to the RF/demod registers.
 - **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant — use FHSS for a
   compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.
-- **FHSS sync robustness** is first-pass: the link locks, delivers across hops, and
-  recovers from gateway loss, but the node can occasionally drop sync at a transient
-  (e.g. right after the gateway restarts) and re-acquire. Widening the per-slot
-  beacon RX window or raising the miss limit would harden it; the recovery path
-  already handles it. (`RAM note:` the FHSS per-channel state is a `[u16; 80]`
-  counter — an earlier `[DutyGovernor; 80]` overflowed the 20 KB L0.)
+- **FHSS sync** holds steadily once locked (verified: 0 losses + 140 confirmed
+  deliveries over ~45 s / ~1.75 cycles) and re-acquires after a real gateway loss
+  (LOST→rescan→LOCKED). The node opens its beacon RX a guard *before* each slot
+  boundary, listens a wide window ignoring stray frames, and tolerates up to 8
+  consecutive misses (drift over that span ≪ the window) before re-scanning.
+  A *gateway restart* still forces a one-cycle re-acquire (new epoch) — inherent.
+  (`RAM note:` the FHSS per-channel state is a `[u16; 80]` counter — an earlier
+  `[DutyGovernor; 80]` overflowed the 20 KB L0.)
 - **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance
   without lab instruments; narrowing it (per the §2.1 AFC-vs-temperature data) is a
   future optimization. All three EU channels are usable as-is.
