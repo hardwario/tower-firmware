@@ -455,3 +455,41 @@ jolt monitor --reset -p /dev/cu.usbserial-11140                 # observe (per b
 Crypto KAT steps (7, 8) and single-board steps (1, 2) need only one board. All `net_*`/`edge_*`
 steps need both boards flashed and both monitors observed. The final `radio_interop` campaign runs
 unattended; a latched LED or `VERDICT: FAIL` line is the failure signal.
+
+---
+
+## Spectrum-access modes (post-v1: polite high-power access)
+
+Added after the v1 stack to enable higher-power operation under regional rules.
+Selected at runtime (`Access` enum; mutually exclusive, like `set_band`), built on
+the shared `config::set_freq_hz` retune primitive + the existing CSMA/duty layer.
+
+- [x] **EU 868 LBT+AFA (EN 300 220)** — `net/afa.rs` (`enable_afa`, `afa_send` =
+  listen-before-talk + per-channel off-time agility over 8 channels 865.2–868.0 MHz,
+  `afa_serve` = gateway scan). Example `radio_afa`. **Hardware-verified** (E1–E5):
+  confirmed delivery + the agility channel sweep + gateway-scan rendezvous on two
+  boards; sustains >1 % duty (LBT+off-time, not the 1 % cap). Numbers (CCA
+  time/threshold, off-time, sub-band applicability) are bench defaults to verify
+  vs the standard.
+
+- [~] **US 915 FHSS (FCC §15.247)** — `net/fhss.rs` (80-channel hopping, Fisher-
+  Yates schedule, gateway hop-master + per-slot beacon, node blind-rendezvous +
+  lockstep, per-channel dwell governor). **Infrastructure verified** (F1, F3–F5):
+  `fhss_sweep` (channel plan + 80-channel synth lock; measured GUARD = 10 ms) and
+  `fhss_kat` (hop permutation = equal use, dwell ≤0.3 s/ch/20 s, beacon round-trip)
+  all PASS. **On-air link (F6–F9) BLOCKED / experimental** (`radio_fhss`): the
+  gateway wedges on its first beacon TX after a per-channel `set_freq_hz` retune.
+  Two root causes diagnosed, needing a hardware debugger to finish:
+  1. **VCO TX-lock across the band** — `PROTOCOL2.VCO_CALIBRATION` (auto-cal) is
+     OFF at reset and `config::apply` never enables it (the comment wrongly said it
+     was on); after a SYNT retune the VCO keeps stale words and a TX entry hangs in
+     LOCK (StuckState 0x0F) at channels away from power-on. Fix: enable bit1 of
+     PROTOCOL2 and/or implement ST `WaVcoCalibration` (per-channel TX+RX VCO words,
+     cached). (RX locks across all 80 — only TX entry fails — so it's TX-path cal.)
+  2. **RAM/stack pressure** — the failure point shifts with code size (a memory-
+     corruption signature); the `[DutyGovernor; 80]` dwell array (1.6 KB) bloats the
+     `Net` future and its stack temporaries on the 20 KB L0. Fix: drop the per-
+     channel governor (the N=80 / cycle-24 s > 20 s structure already bounds
+     occupancy) or store a lighter per-channel airtime counter.
+  F10 (compliance histogram) and F11 (dual-mode regression) depend on F8 and are
+  pending the link bring-up.
