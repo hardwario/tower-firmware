@@ -21,7 +21,7 @@ SPIRIT1 ↔ STM32L083CZ wiring (from the board, see `src/board.rs`):
 |---|---|---|
 | SDN | PB7 | drive low to enable (hardware pull-up → boots in shutdown) |
 | SPI CS | PA15 | software CS, ≥2 µs setup |
-| SCLK / MOSI / MISO | PB3 / PB5 / PB4 | SPI1, mode 0, 8 MHz |
+| SCLK / MOSI / MISO | PB3 / PB5 / PB4 | SPI1, mode 0, 4 MHz |
 | nIRQ | PA7 | active-low, EXTI line 7 |
 
 Crystal is **50 MHz** (not a TCXO). Band: **EU 868** (ch0/1/2 = 868.1/868.3/868.5 MHz);

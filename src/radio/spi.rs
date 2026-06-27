@@ -22,9 +22,12 @@ use embassy_stm32::time::Hertz;
 
 use super::regs;
 
-/// SPI bus clock. ≤10 MHz per the datasheet; 8 MHz is the closest prescaler step
-/// below that from the 16 MHz sysclk and is comfortable over the on-board trace.
-const SPI_HZ: u32 = 8_000_000;
+/// SPI bus clock (16 MHz sysclk ÷ 4). The SPIRIT1 allows ≤10 MHz, but 4 MHz keeps
+/// the edge rates gentle for good signal integrity over the on-board trace + software
+/// CS, with generous margin below the part's max. The cost is nil: a full FIFO burst
+/// is ~0.2 ms vs the multi-ms radio airtime that dominates every transfer, and the
+/// CPU is idle/sleep-bound. (÷2 → 2 MHz and ÷8 → 8 MHz are the other exact steps.)
+const SPI_HZ: u32 = 4_000_000;
 
 /// CS setup busy-wait, in core cycles at 16 MHz sysclk. 48 cycles ≈ 3 µs, above
 /// the datasheet's 2 µs `t_su(CS)` minimum with margin.
@@ -47,7 +50,7 @@ pub struct Spirit1Spi {
 
 impl Spirit1Spi {
     /// Build the transport from the board's raw SPI1 + pins. CS starts high
-    /// (de-asserted). Configures the bus for SPIRIT1: mode 0, MSB-first, 8 MHz.
+    /// (de-asserted). Configures the bus for SPIRIT1: mode 0, MSB-first, 4 MHz.
     pub fn new(
         spi: Peri<'static, SPI1>,
         sck: Peri<'static, PB3>,
