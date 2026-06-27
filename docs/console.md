@@ -1,0 +1,498 @@
+# TOWER Console — user guide
+
+A framed, bidirectional **host ↔ target console** for the TOWER Core Module
+(STM32L083CZ). One serial link carries everything: structured **logs**, raw
+`print!` output, self-describing **events**, and a RouterOS-style **shell** with
+target-authoritative TAB completion and a declarative, EEPROM-backed **settings
+framework**. The host side is the **`tower`** CLI/TUI.
+
+> **Status: complete and hardware-verified** on the Radio Dongle (STM32L08x). The
+> wire codec (COBS + CRC-32 + postcard), the interrupt-driven `BufferedUart`
+> transport with a low-power-correct `WakeGuard`, the synchronous panic path, log /
+> print / event streaming with overflow accounting, chunked shell responses, the
+> settings framework (5 kinds, range/enum validation, value completion), the
+> app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
+> implemented and tested on real hardware. The codec has 19 host tests including
+> 9000 fuzz iterations (`just test`).
+
+This is the standalone reference for using and maintaining the console subsystem —
+architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
+
+---
+
+## Two pieces
+
+| Piece | Where | What it is |
+|---|---|---|
+| **Firmware SDK** | this repo: `src/console.rs`, `src/shell.rs`, `crates/tower-protocol` | the on-MCU console: logging backend, event/shell APIs, the framed UART transport |
+| **`tower` host CLI** | `github.com/hardwario/tower-cli` (binary `tower`) | decodes the framed link on your machine: logs / events / shell / TUI |
+| **`tower-protocol`** | `crates/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
+
+Because `tower-protocol` is shared, the wire format cannot drift between firmware
+and host. The host pins it to the firmware git tag `tower-protocol-v0.1.0`.
+
+## Hardware
+
+The console owns **USART1** on the Core Module:
+
+| Signal | Pin | Notes |
+|---|---|---|
+| TX | PA9 | target → host |
+| RX | PA10 | host → target (full-duplex; wired through the dongle's USB bridge) |
+| Baud | — | 115200 **8N1** |
+
+It is **interrupt-driven (`BufferedUart`), not DMA** — the WS2812 LED strip owns the
+`DMA1_CHANNEL2_3` IRQ group, so the console can't use DMA. See *Low power* below for
+why this matters and how it's handled.
+
+The link is **always framed** (binary COBS frames). A plain terminal (`jolt monitor`,
+`screen`, `minicom`) shows gibberish — use `tower`.
+
+## Quick start
+
+```sh
+# Firmware: flash any example (it auto-starts the console).
+TOWER_PORT=/dev/cu.usbserial-140 just flash console_demo
+
+# Host: build the CLI once, then stream the device.
+cd ../tower-cli && cargo build --release      # produces `tower`
+tower logs                                    # auto-detects a single USB serial port
+tower -p /dev/cu.usbserial-140 logs           # or name the port explicitly
+```
+
+Every app gets the console for free: `Board::take` (via the `app!` macro) starts it
+and emits a boot `Hello` + banner naming the app. You don't wire anything up.
+
+```rust
+#![no_std]
+#![no_main]
+use tower::{app, board::Board};
+use log::info;
+
+async fn run(_b: Board) {
+    info!("hello from my app");   // → framed Log on USART1, rendered by `tower logs`
+}
+app!(run);
+```
+
+---
+
+## Architecture
+
+```
+ producers                         one writer task                 host
+ ─────────                         ───────────────                 ────
+ log::{error..trace}!  ┐
+ print! / println!     ├─ try_send ─► TX_CHANNEL ─► seq+encode ─► BufferedUartTx ═══► tower
+ console::event().await┘  (drop-      (depth 8)    (COBS+CRC+        (PA9, 115200)
+ shell responses          newest)                   postcard)
+                                       ▲
+ host commands ════► BufferedUartRx ──► FrameDecoder ─► shell ─► responses ─┘
+ (PA10)                (interrupt)
+```
+
+- **Producers** build an owned message and `try_send` it into a bounded channel
+  (depth 8). Non-blocking and safe from any context (including the `log` backend).
+  If the queue is full the newest is dropped and a counter bumped.
+- **One writer task** owns the UART. It assigns the per-frame **`seq`** at send time
+  (so a gap on the wire means *real* loss, never a queue drop), encodes the frame,
+  and writes it. Before the next real frame it emits a `Dropped{count}` marker if
+  anything was dropped.
+- **The codec** (`tower-protocol`) frames every message identically — see *Wire
+  protocol*.
+- **RX** is read asynchronously off `BufferedUartRx` by the shell task (opt-in).
+
+### Low power (the `WakeGuard`)
+
+The SDK runs a low-power STOP executor: when idle it enters STOP, which **gates the
+USART clock**. If the writer awaited the TXE interrupt in STOP, the interrupt would
+never fire and TX would hang. The writer therefore holds a `WakeGuard(Stop1)` **per
+transmit burst** — STOP is downgraded to plain WFI so the USART stays clocked and the
+interrupt fires; the guard is dropped at the idle `receive().await`, so STOP is still
+reached when the device is truly idle (e.g. unplugged). RX likewise needs the device
+awake; while USB is present `power::vbus_task` holds STOP off, so the RX interrupt
+fires and the shell is responsive. Unplugged there is no host, so RX sleeping is fine.
+
+### The panic path
+
+The executor is dead in a panic, so the channel/writer can't run. The panic handler
+silences the buffered ISR and **blocking-writes one framed `Log` (level Error)
+straight to the USART registers via the PAC**, leading with a `0x00` so any byte still
+in the shift register can't prefix and corrupt the frame. `tower logs` shows the panic
+message + location like any other error. If the console isn't up yet, it just halts.
+
+---
+
+## Logging
+
+Use the standard [`log`](https://docs.rs/log) macros. The host adds the timestamp,
+color, and columns — the device only sends level + uptime + module + message.
+
+```rust
+use log::{error, warn, info, debug, trace};
+error!("sensor {} fault: {:?}", id, e);
+info!("interval set to {} s", interval);
+```
+
+- **Levels:** Error, Warn, Info, Debug, Trace. Default max level is **Trace**; lower
+  it at runtime with `log::set_max_level(...)`.
+- **`module`** is the last `::` segment of the log target (e.g. `power`).
+- **Over-long lines are truncated, never dropped** — a message past `MAX_MSG` (192
+  bytes) is clipped at a char boundary (a plain `heapless` write would reject it
+  wholesale and log nothing).
+
+### Raw text
+
+`print!` / `println!` (from the `tower` crate) send a `Print` message — verbatim text
+with no level/timestamp, rendered inline by `tower logs`. `println!` appends `\r\n`.
+
+```rust
+use tower::println;
+println!("raw line {}", n);
+```
+
+### Overflow
+
+If producers outrun the writer, the newest messages are dropped and the host shows a
+single marker before the next frame:
+
+```
+⚠ 22 log frame(s) dropped (device queue full)
+```
+
+No sequence gap is reported, because dropped messages never consumed a `seq`.
+
+---
+
+## Events
+
+Structured, **self-describing** key=value records — the host renders any app's events
+with no shared per-app schema. `event()` is `async` (it applies backpressure and is
+**never dropped**), so call it from async code.
+
+```rust
+use tower::console;
+console::event("measurement", &[("temp_c", "2351"), ("rh", "41")]).await;
+```
+
+Caps (clipped if exceeded): name ≤ 24 bytes, ≤ **6** fields, each key ≤ 12 / value ≤
+20 bytes — sized so a worst-case event always fits one frame. View with `tower events`:
+
+```
+12:01:07.245 EVENT measurement  temp_c=2351 rh=41
+```
+
+---
+
+## The shell
+
+A RouterOS-style command shell over the same link, with **target-authoritative TAB
+completion**: the firmware owns parsing, the command tree, execution **and**
+completion, so the host can never suggest something the device won't accept. Opt in by
+serving it with the board's EEPROM storage:
+
+```rust
+use tower::{app, board::Board, shell};
+async fn run(b: Board) {
+    shell::serve(b.spawner, b.storage);   // base tree + settings
+    // … your app; logs/events keep flowing on the same link …
+}
+app!(run);
+```
+
+Drive it from the host interactively or one-shot:
+
+```sh
+tower shell                              # interactive REPL; TAB completes
+tower exec "/system/resource print"      # run one command, print result, exit (scripts/CI)
+tower complete "/system settings set "   # ask the target what completes here
+```
+
+### Built-in commands
+
+| Command | Does |
+|---|---|
+| `/system reboot` | flush the reply, then `SCB::sys_reset()` |
+| `/system/resource print` | firmware/protocol version, uptime, CPU, clock, memory |
+| `/system settings print` | list every setting and its value |
+| `/system settings set <name>=<value>` | validate by kind + persist |
+| `/system settings get <name>` | show value + constraints + default |
+| `/export` | dump all settings as `settings set` lines (reproducible config) |
+
+Unknown commands return result code 1. Tokens split on `/`, space, and tab, so
+`/system settings set` and `/system/settings/set` are equivalent.
+
+Responses longer than one frame are **chunked** (192-byte `chunk`/`last` frames) and
+reassembled by the host into one response — `/system/resource print` is a 7-line
+example.
+
+---
+
+## Settings framework
+
+Settings are **declarative**: an app provides a `&'static [Setting]` table and the
+shell derives `print` / `set` / `get` / `export` and completion from it — no
+per-setting code. Each setting is persisted in the EEPROM key-value store under its
+key (the console reserves `0x5500+`).
+
+```rust
+use tower::shell::{Setting, Kind};
+static SETTINGS: &[Setting] = &[
+    Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+    Setting { key: 0x5511, name: "verbose",  kind: Kind::Bool,                       default: "false" },
+    Setting { key: 0x5512, name: "mode",     kind: Kind::Enum(&["p2p","star","mesh"]),default: "star" },
+    Setting { key: 0x5513, name: "tx_power", kind: Kind::Int { min: -30, max: 20 },   default: "14" },
+];
+```
+
+### Kinds
+
+| `Kind` | Accepts | Stored as | Use for |
+|---|---|---|---|
+| `Str { max }` | 1..=`max` bytes of UTF-8 (`max` ≤ 64) | raw bytes | names, SSIDs, tokens |
+| `Uint { min, max }` | decimal `u32` in range | 4 LE bytes | intervals, ports, counts, thresholds |
+| `Int { min, max }` | decimal `i32` in range | 4 LE bytes | offsets, tx-power dBm, calibration |
+| `Bool` | `true`/`false`, `on`/`off`, `1`/`0` | 1 byte | flags |
+| `Enum(&[&str])` | one of the listed values | raw bytes | modes, regions, roles |
+
+- **Ranges/choices are enforced on `set`**; an invalid value returns result 2 and
+  prints the constraint:
+  ```
+  > /system settings set interval=99999
+  invalid value for interval (uint 1..=3600)
+  ```
+- **`get` shows the derived metadata:**
+  ```
+  > /system settings get tx_power
+  tx_power = -10  [int -30..=20, default 14]
+  ```
+- **Completion is value-aware:** completing after `=` offers the `Enum` choices or
+  `Bool` true/false:
+  ```
+  > /system settings set mode=⇥     →  p2p  star  mesh
+  ```
+- Unset / unreadable / out-of-range stored values fall back to the `default`.
+
+`identity` is just an SDK `Str` setting (key `0x5500`, ≤32 chars) — nothing special.
+
+---
+
+## Extending the shell (apps)
+
+`serve_ext` lets an app add its **own commands and settings**. App commands
+**deep-merge** with the SDK tree at *every* level, so you can drop a command into an
+existing menu *or* grow your own nested subtree. App settings join the same
+`/system settings` table.
+
+```rust
+use core::fmt::Write;
+use tower::shell::{self, Args, Ctx, Entry, Kind, Outcome, Setting};
+
+// A handler writes its response via `write!(ctx, …)` and returns an Outcome.
+fn cmd_status(ctx: &mut Ctx, _args: &[&str]) -> Outcome {
+    let _ = write!(ctx, "radio: idle, last RSSI -71 dBm");
+    Outcome::ok()              // or Outcome::code(n) for a non-zero result
+}
+
+static APP_COMMANDS: &[Entry] = &[
+    Entry::cmd("uptime", Args::None, cmd_status),               // → /uptime  (top level)
+    Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_status)]),  // → /system hello  (into SDK menu)
+    Entry::menu("radio", &[                                     // → /radio …  (new subtree)
+        Entry::cmd("status", Args::None, cmd_status),
+        Entry::menu("test", &[Entry::cmd("ping", Args::None, cmd_status)]),  // → /radio test ping
+    ]),
+];
+
+static APP_SETTINGS: &[Setting] = &[
+    Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+];
+
+async fn run(b: Board) {
+    shell::serve_ext(b.spawner, b.storage, APP_COMMANDS, APP_SETTINGS);
+}
+```
+
+The handler context (`Ctx`) exposes:
+- `write!(ctx, …)` — `Ctx` implements `core::fmt::Write` (the response text);
+- `ctx.kv` — the EEPROM key-value store (apps own keys outside the `0x5500` range);
+- `ctx.settings` — the merged settings table (`iter()` / `find(name)`).
+
+Merge rules: a menu shadows a same-named command (menus stay descendable); on a
+command-name collision the SDK command wins; completion dedups names. Apps don't need
+any host changes — `tower` is target-authoritative.
+
+---
+
+## The `tower` host CLI
+
+```
+tower [-p <port>] <command>
+```
+
+The port auto-detects when exactly one USB serial device is present; otherwise pass
+`-p`/`--port`. Subcommands:
+
+| Command | What |
+|---|---|
+| `devices` | list serial ports (USB VID:PID + product) |
+| `logs [--no-colors] [--send <text>]` | stream logs + `print!` + the `Dropped` marker; `--send` pokes the device's RX once on connect |
+| `events [--no-colors]` | stream structured events |
+| `shell` | interactive REPL; TAB completes (via `rustyline`); `exit`/`quit` to leave |
+| `exec "<line>"` | run one command, print the (reassembled) response, exit non-zero on a device error/timeout |
+| `complete "<line>"` | print what the target would complete at the cursor (handy for testing/scripts) |
+| `console` | the full-screen TUI (below) |
+| `monitor [--hex]` | transport debugging: dump decoded frames, or every raw byte with `--hex` |
+
+`logs`/`events` auto-reconnect on unplug. Frame-level integrity is reported: a corrupt
+frame and a `seq` gap each print a one-line warning.
+
+### The TUI (`tower console`)
+
+A four-pane [ratatui](https://ratatui.rs) terminal app — Device Events, Shell Command,
+Shell Responses, Device Logs — all on one serial drain:
+
+```
+ HARDWARIO TOWER Console v0.1.0 — /dev/cu.usbserial-140 ●
+┌Device Events──────────────┐┌Device Logs────────────────────────────────┐
+│12:01 measurement temp=23.5 ││12:01 [  64.030] INFO  app: heartbeat 32    │
+│                            ││12:01 [  66.031] WARN  app: link flaky      │
+┌Shell Command──────────────┐│                                            │
+│/ system settings print     ││                                            │
+┌Shell Responses────────────┐│                                            │
+│> /system settings print    ││                                            │
+│identity = node-7           ││                                            │
+└────────────────────────────┘└────────────────────────────────────────────┘
+ Shift-Tab Focus  F3 Zoom  F5 Pause  F8 Clear  F10 Quit          2026-06-28 12:01:09
+```
+
+| Key | Action |
+|---|---|
+| type + Enter | send a shell command (history with ↑/↓) |
+| **Tab** | target-authoritative completion (names + enum/bool values) |
+| **Shift-Tab** | move focus between panes |
+| **F3** | zoom the focused pane full-screen |
+| **F5** | pause the streaming panes (shell stays live) |
+| **F8** | clear the focused pane |
+| **PageUp/Down**, ↑/↓ | scroll a focused stream pane |
+| **F10** | quit (restores the terminal; a panic restores it too) |
+
+---
+
+## Wire protocol (`tower-protocol`)
+
+```
+wire:   COBS( inner )  0x00
+inner:  ver_type(1) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
+        ver_type = (PROTOCOL_VERSION << 5) | (msg_type & 0x1F)
+        crc32    = CRC-32/IEEE over [ver_type, seq, payload…]
+```
+
+- **COBS** framing with a `0x00` delimiter (the only zero on the wire) — the host
+  resynchronizes on the next delimiter after any garbage.
+- **CRC-32/IEEE** over the header + payload catches corruption (the same primitive
+  the EEPROM KV store uses).
+- **postcard** for the payload — compact and `no_std`, but **not self-describing**, so
+  both ends must share the exact struct/enum definitions. That's why `tower-protocol`
+  is one crate, version-pinned.
+- **`seq`** (writer-assigned) lets the host detect real wire loss.
+
+Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→target 16+):
+
+| Type | # | Dir | Payload |
+|---|---|---|---|
+| `Hello` | 0 | T→H | protocol + firmware version (boot announce) |
+| `Log` | 1 | T→H | level, uptime_us, module, message |
+| `Print` | 2 | T→H | raw text |
+| `Event` | 3 | T→H | name + up to 8 (key, value) pairs |
+| `ShellResponse` | 4 | T→H | cmd_id, result, chunk, last, text |
+| `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
+| `Dropped` | 6 | T→H | count of dropped frames |
+| `ShellCommand` | 16 | H→T | cmd_id, line |
+| `ShellComplete` | 17 | H→T | req_id, line, cursor |
+
+A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
+`decode_frame` checks version + type + CRC and returns `(MsgType, seq, payload)`.
+
+### Limits & constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `PROTOCOL_VERSION` | 1 | top 3 bits of `ver_type` |
+| `MAX_FRAME` | 256 | inner frame, pre-COBS (payload budget ≈ 249) |
+| `MAX_WIRE` | 272 | COBS-expanded frame + delimiter |
+| `MAX_MSG` | 192 | log / print text |
+| `SHELL_CHUNK` | 192 | shell-response text per frame (chunked) |
+| `MAX_SETTING` | 64 | largest setting value |
+| TX queue depth | 8 | producer → writer channel |
+
+### Shell result codes
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | `R_OK` | success |
+| 1 | `R_NOT_FOUND` | no such command / setting |
+| 2 | `R_BAD_ARG` | bad / out-of-range value |
+| 3 | `R_STORAGE` | EEPROM write failed |
+
+---
+
+## Firmware API summary
+
+`tower::console`:
+- `event(name, &[(k, v)]).await` — emit a structured event
+- `print!` / `println!` — raw text (re-exported macros)
+- `init(spawner, tx, rx, max_level)`, `take_rx()`, `boot_banner(name)` — wiring
+  (handled for you by `Board::take` / `app!`)
+
+`tower::shell`:
+- `serve(spawner, storage)` / `serve_ext(spawner, storage, app_commands, app_settings)`
+- types: `Entry` (`::cmd` / `::menu`), `Command`, `Args` (`None` / `Names` / `Settings`),
+  `Setting`, `Kind`, `SettingsTable`, `Ctx`, `Outcome` (`::ok` / `::code`), `Handler`
+- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`
+
+`tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
+structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32_ieee}`.
+
+## Examples
+
+| Example | Shows |
+|---|---|
+| `console_demo` | every log level + `println!` + truncation + the `Dropped` marker |
+| `console_panic` | the framed panic path (`tower logs` shows the panic record) |
+| `events_demo` | structured events interleaved with logs |
+| `shell_demo` | the shell: built-ins, settings of every kind, an app command + nested subtree, app settings |
+| `console_full` | the showcase for `tower console` — logs + events + shell together |
+
+Flash any of them, e.g. `TOWER_PORT=/dev/cu.usbserial-140 just flash shell_demo`,
+then drive with `tower shell` / `tower logs` / `tower console`.
+
+## Testing
+
+The codec is the only host-runnable part (the rest is `no_std`):
+
+```sh
+just test          # cargo test -p tower-protocol on the host triple — 19 tests
+```
+
+These cover round-trips for every message, boundary frame sizes, the decoder's
+overflow/reset/resync state machine, exhaustive type mapping, and **9000 deterministic
+bit-flip fuzz iterations** proving every single-bit corruption is detected. (`cargo
+test` alone fails — the workspace default target is `thumbv6m`, which has no test
+harness; `just test` builds for the host.) The firmware paths (logs, events, shell,
+settings, completion, panic, persistence) are verified on the dongle.
+
+## Known limitations & caveats
+
+- **No DMA:** the WS2812 strip owns the DMA group, so the console is interrupt-driven.
+  This is why the writer holds a `WakeGuard` per burst (above).
+- **`fw ?` in the header** appears only if you attach `tower console` and never see a
+  `Hello` — the firmware announces it on boot/VBUS edge, not on host connect. The TUI
+  header otherwise shows the **`tower` CLI** version; the firmware version is in
+  `/system/resource print`.
+- **Setting values can't contain `/`, space, or tab** — those are command tokenizers.
+  Enum values dodge this by being a fixed set.
+- **postcard is not self-describing:** any change to a payload struct/enum is a wire
+  change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`, and the host pins the
+  new tag. Today's tag is `tower-protocol-v0.1.0`.
+- **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
+  large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

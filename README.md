@@ -2,13 +2,13 @@
 
 An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
 Module** (STM32L083CZ). The crate is a **library** of reusable blocks (LED,
-button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip,
-serial logging, EEPROM storage, USB-gated low power) plus a **SPIRIT1 sub-GHz
-radio stack** (secured AES-128-CCM network layer — confirmed delivery, replay
-protection, bulk transfer, OTA pairing); flashable programs live in
-[`examples/`](examples) and are built/flashed by name with
-[`just`](https://just.systems). The radio has its own guide:
-[`docs/radio.md`](docs/radio.md).
+button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, a
+framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated low
+power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer —
+confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
+programs live in [`examples/`](examples) and are built/flashed by name with
+[`just`](https://just.systems). The console and radio each have a guide:
+[`docs/console.md`](docs/console.md) and [`docs/radio.md`](docs/radio.md).
 
 | | |
 |---|---|
@@ -19,7 +19,7 @@ protection, bulk transfer, OTA pairing); flashable programs live in
 | Button | PA8, active-high (external pull-down), EXTI |
 | I2C | I2C2 — PB10/PB11 (AF6), 100 kHz; TMP112 @ `0x49`, LIS2DH12 @ `0x19` |
 | Accelerometer | LIS2DH12 — INT1 → PB6 (EXTI); orientation/dice + tilt |
-| Console | USART1 TX on PA9, 115200 8N1 |
+| Console | USART1 — TX PA9 / RX PA10, 115200 8N1; framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md) |
 | RGB strip | WS2812B/SK6812 on PA1 — TIM2_CH2 PWM + DMA1_CH3 |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12 — gates STOP (stay awake while plugged in) |
@@ -42,7 +42,8 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | Module | Responsibility |
 |---|---|
 | `src/button.rs` | Debounced button driver (click/hold) over any GPIO; `init_exti` (low-power, sleeps when idle) or `init_polled` (when the EXTI line is taken) |
-| `src/console.rs` | Global blocking-UART logger (`log` backend: level + uptime) + `print!`/`println!` |
+| `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART — paired with the `tower` host CLI; see [`docs/console.md`](docs/console.md) |
+| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`); apps deep-merge their own commands + settings via `serve_ext` — see [`docs/console.md`](docs/console.md) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1–6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/power.rs` | `vbus_task` — gates STOP on USB presence via a `WakeGuard` |
