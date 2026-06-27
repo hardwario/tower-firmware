@@ -295,16 +295,20 @@ reset but isn't required.
   `Entry::{Menu, Cmd}` where each `Cmd` carries a **handler fn pointer** (`fn(&mut Ctx,
   &[&str]) -> Outcome`) instead of a closed `CmdId` enum — so the tree is **open**. One
   `resolve()` walk is shared by dispatch and completion. Settings are **declarative and
-  auto-derived**: a `&'static [Setting] { key, name, kind, default }` table (`Kind::{Str,
-  U32, Bool}`) drives generic `/system settings print|set|get` + `/export` with no
-  per-setting code, and completion of `set`/`get` enumerates the table dynamically.
-  Identity is just an SDK `Str` setting (key `0x5500`). **App-extensible:**
+  auto-derived**: a `&'static [Setting] { key, name, kind, default }` table drives generic
+  `/system settings print|set <name>=<value>|get <name>` + `/export` with no per-setting
+  code. `Kind::{Str{max}, Uint{min,max}, Int{min,max}, Bool, Enum(&[&str])}` covers the IoT
+  set — ranges are enforced on `set`, `get` shows the value plus derived constraints +
+  default, and completion enumerates setting names *and* the value choices for `Enum`/`Bool`
+  after `=`. Identity is just an SDK `Str` setting (key `0x5500`). **App-extensible:**
   `serve_ext(spawner, storage, app_commands: &'static [Entry], app_settings: &'static
-  [Setting])` merges an app's commands at the root and its settings into the table (the
-  walker spans base ⧺ app); the host is target-authoritative so it needs **no changes**.
-  Dispatch runs **inline** in the RX task (which async-reads `BufferedUartRx`; no separate
-  engine task / `Mutex<Kv>`). Responses **are chunked** (the writer splits text into
-  `SHELL_CHUNK`=192-byte `chunk`/`last` frames the host reassembles by `cmd_id`).
+  [Setting])` **deep-merges** the app's tree with the SDK's at **every level** (the walker
+  carries SDK ⧺ app slices, descending into the union of same-named menus) — so an app
+  drops commands into an existing menu (`/system hello`) *or* grows its own nested subtree
+  (`/radio test ping`); app settings join the same table. The host is target-authoritative,
+  so it needs **no changes**. Dispatch runs **inline** in the RX task (which async-reads
+  `BufferedUartRx`; no separate engine task / `Mutex<Kv>`). Responses **are chunked** (the
+  writer splits text into `SHELL_CHUNK`=192-byte `chunk`/`last` frames reassembled by `cmd_id`).
 
 ## 7. Host architecture (`tower-cli`)
 

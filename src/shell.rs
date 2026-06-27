@@ -14,16 +14,24 @@
 //! something execution won't accept.
 //!
 //! ## Extending it (apps)
+//! App commands merge into the SDK tree **at every level** — drop a command into an
+//! existing menu (`/system/hello`) or grow your own nested subtree (`/radio/test/ping`).
+//! App settings join the same `/system settings` table and complete their values.
 //! ```ignore
 //! fn cmd_hi(ctx: &mut shell::Ctx, _args: &[&str]) -> shell::Outcome {
 //!     let _ = write!(ctx, "hello");        // Ctx: core::fmt::Write
 //!     shell::Outcome::ok()
 //! }
-//! static CMDS: &[shell::Entry] = &[shell::Entry::cmd("hi", shell::Args::None, cmd_hi)];
-//! static SETS: &[shell::Setting] = &[shell::Setting {
-//!     key: 0x5510, name: "interval", kind: shell::Kind::U32, default: "30",
-//! }];
-//! shell::serve_ext(b.spawner, b.storage, CMDS, SETS); // /hi + /system settings interval
+//! use shell::{Args, Entry, Kind, Setting};
+//! static CMDS: &[Entry] = &[
+//!     Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_hi)]), // into /system
+//!     Entry::menu("radio", &[Entry::cmd("status", Args::None, cmd_hi)]), // new subtree
+//! ];
+//! static SETS: &[Setting] = &[
+//!     Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+//!     Setting { key: 0x5511, name: "mode", kind: Kind::Enum(&["p2p", "star", "mesh"]), default: "star" },
+//! ];
+//! shell::serve_ext(b.spawner, b.storage, CMDS, SETS);
 //! ```
 
 use core::fmt::{self, Write};
@@ -52,15 +60,21 @@ pub const R_STORAGE: u8 = 3;
 
 // ---- declarative settings ---------------------------------------------------
 
-/// How a [`Setting`]'s value is encoded in EEPROM and parsed / printed.
+/// How a [`Setting`]'s value is validated, encoded in EEPROM, and parsed / printed.
 #[derive(Clone, Copy)]
 pub enum Kind {
     /// UTF-8 text, 1..=`max` bytes (`max` is clamped to [`MAX_SETTING`]).
     Str { max: u16 },
-    /// Unsigned 32-bit integer: decimal on the command line, 4 LE bytes in EEPROM.
-    U32,
+    /// Unsigned integer constrained to `min..=max` (decimal in; 4 LE bytes stored).
+    /// Use `0..=u32::MAX` for "unbounded". For intervals, ports, counts, thresholds.
+    Uint { min: u32, max: u32 },
+    /// Signed integer constrained to `min..=max`. For offsets, tx-power dBm, calibration.
+    Int { min: i32, max: i32 },
     /// Boolean: accepts `true`/`false`, `on`/`off`, `1`/`0`; stored as one byte.
     Bool,
+    /// One of a fixed set of string values (stored verbatim; the choices complete after
+    /// `=`). For modes, regions, roles.
+    Enum(&'static [&'static str]),
 }
 
 /// A persisted, named setting. The shell derives `/system settings print|set|get`
@@ -220,10 +234,10 @@ fn tokenize(line: &str) -> Vec<&str, 8> {
     v
 }
 
-/// Outcome of walking the tree with a token slice.
+/// Outcome of walking the tree with a token slice. `Menu` carries the two slices that
+/// make up the current level (SDK base + the app's same-path entries) so completion
+/// can list the merged children; both deeper menus and the root merge the same way.
 enum Resolved {
-    /// Landed on a menu — these are its children (primary = SDK/base, secondary =
-    /// app entries, non-empty only at the root level).
     Menu(&'static [Entry], &'static [Entry]),
     /// Reached a command, plus the index of its first argument token.
     Cmd(&'static Command, usize),
@@ -231,22 +245,43 @@ enum Resolved {
     NoMatch,
 }
 
-/// Walk the tree consuming `toks`. The root level spans the SDK base **and** the
-/// app's entries; deeper levels are a single menu's children.
+/// Children of the menu named `name` in `level`, if any.
+fn menu_children(level: &'static [Entry], name: &str) -> Option<&'static [Entry]> {
+    level.iter().find_map(|e| match e {
+        Entry::Menu(n, ch) if *n == name => Some(*ch),
+        _ => None,
+    })
+}
+
+/// The command named `name` across both levels (base searched first).
+fn find_cmd<'a>(primary: &'a [Entry], secondary: &'a [Entry], name: &str) -> Option<&'a Command> {
+    primary.iter().chain(secondary).find_map(|e| match e {
+        Entry::Cmd(c) if c.name == name => Some(c),
+        _ => None,
+    })
+}
+
+/// Walk the tree consuming `toks`, **deep-merging** the SDK base tree with the app's at
+/// every level: a token names a menu present in either side (descend into the union of
+/// their children) or a command. A menu shadows a same-named command (so menus stay
+/// descendable); base is searched before app on a command-name collision.
 fn resolve(toks: &[&str], app: &'static [Entry]) -> Resolved {
     let mut primary: &'static [Entry] = BASE_ROOT;
     let mut secondary: &'static [Entry] = app;
     let mut i = 0;
     while i < toks.len() {
-        match primary.iter().chain(secondary).find(|e| e.name() == toks[i]) {
-            Some(Entry::Menu(_, children)) => {
-                primary = children;
-                secondary = &[];
-                i += 1;
-            }
-            Some(Entry::Cmd(c)) => return Resolved::Cmd(c, i + 1),
-            None => return Resolved::NoMatch,
+        let pc = menu_children(primary, toks[i]);
+        let sc = menu_children(secondary, toks[i]);
+        if pc.is_some() || sc.is_some() {
+            primary = pc.unwrap_or(&[]);
+            secondary = sc.unwrap_or(&[]);
+            i += 1;
+            continue;
         }
+        return match find_cmd(primary, secondary, toks[i]) {
+            Some(c) => Resolved::Cmd(c, i + 1),
+            None => Resolved::NoMatch,
+        };
     }
     Resolved::Menu(primary, secondary)
 }
@@ -407,7 +442,10 @@ fn settings_get(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     };
     let mut val = String::<MAX_SETTING>::new();
     read_value(ctx.kv, s, &mut val);
-    let _ = write!(ctx, "{} = {}", s.name, val);
+    let (kind, default) = (s.kind, s.default);
+    let _ = write!(ctx, "{} = {}  [", s.name, val);
+    write_constraint(ctx, kind);
+    let _ = write!(ctx, ", default {default}]");
     Outcome::ok()
 }
 
@@ -424,8 +462,11 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     let mut buf = [0u8; MAX_SETTING];
     let n = match encode_value(s.kind, value, &mut buf) {
         Ok(n) => n,
-        Err(msg) => {
-            let _ = write!(ctx, "{msg}");
+        Err(()) => {
+            let kind = s.kind;
+            let _ = write!(ctx, "invalid value for {name} (");
+            write_constraint(ctx, kind);
+            let _ = write!(ctx, ")");
             return Outcome::code(R_BAD_ARG);
         }
     };
@@ -459,27 +500,46 @@ fn parse_bool(s: &str) -> Option<bool> {
     }
 }
 
-/// Validate `value` against `kind` and encode it into `buf`; returns the byte count.
-fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<usize, &'static str> {
+/// Validate `value` against `kind` and encode it into `buf`; returns the byte count, or
+/// `Err(())` if it's out of range / malformed (the caller prints the constraint).
+fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<usize, ()> {
     match kind {
         Kind::Str { max } => {
             let lim = (max as usize).min(MAX_SETTING);
             let b = value.as_bytes();
             if b.is_empty() || b.len() > lim {
-                return Err("value length out of range");
+                return Err(());
             }
             buf[..b.len()].copy_from_slice(b);
             Ok(b.len())
         }
-        Kind::U32 => {
-            let v: u32 = value.parse().map_err(|_| "expected an unsigned integer")?;
+        Kind::Uint { min, max } => {
+            let v: u32 = value.parse().map_err(|_| ())?;
+            if v < min || v > max {
+                return Err(());
+            }
+            buf[..4].copy_from_slice(&v.to_le_bytes());
+            Ok(4)
+        }
+        Kind::Int { min, max } => {
+            let v: i32 = value.parse().map_err(|_| ())?;
+            if v < min || v > max {
+                return Err(());
+            }
             buf[..4].copy_from_slice(&v.to_le_bytes());
             Ok(4)
         }
         Kind::Bool => {
-            let v = parse_bool(value).ok_or("expected true/false")?;
-            buf[0] = v as u8;
+            buf[0] = parse_bool(value).ok_or(())? as u8;
             Ok(1)
+        }
+        Kind::Enum(choices) => {
+            let b = value.as_bytes();
+            if !choices.contains(&value) || b.len() > MAX_SETTING {
+                return Err(());
+            }
+            buf[..b.len()].copy_from_slice(b);
+            Ok(b.len())
         }
     }
 }
@@ -490,14 +550,19 @@ fn read_value(kv: &Kv<'static>, s: &Setting, out: &mut String<MAX_SETTING>) {
     if let Ok(Some(n)) = kv.get_bytes(s.key, &mut buf) {
         let n = n.min(MAX_SETTING);
         match s.kind {
-            Kind::Str { .. } => {
+            Kind::Str { .. } | Kind::Enum(..) => {
                 if let Ok(st) = core::str::from_utf8(&buf[..n]) {
                     let _ = out.push_str(st);
                     return;
                 }
             }
-            Kind::U32 if n >= 4 => {
+            Kind::Uint { .. } if n >= 4 => {
                 let v = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let _ = write!(out, "{v}");
+                return;
+            }
+            Kind::Int { .. } if n >= 4 => {
+                let v = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                 let _ = write!(out, "{v}");
                 return;
             }
@@ -509,6 +574,30 @@ fn read_value(kv: &Kv<'static>, s: &Setting, out: &mut String<MAX_SETTING>) {
         }
     }
     let _ = out.push_str(s.default);
+}
+
+/// Write a human-readable constraint for `kind` (e.g. `uint 1..=3600`, `enum p2p|star`).
+fn write_constraint(ctx: &mut Ctx<'_>, kind: Kind) {
+    match kind {
+        Kind::Str { max } => {
+            let _ = write!(ctx, "str 1..={max}");
+        }
+        Kind::Uint { min, max } => {
+            let _ = write!(ctx, "uint {min}..={max}");
+        }
+        Kind::Int { min, max } => {
+            let _ = write!(ctx, "int {min}..={max}");
+        }
+        Kind::Bool => {
+            let _ = write!(ctx, "bool");
+        }
+        Kind::Enum(choices) => {
+            let _ = write!(ctx, "enum ");
+            for (i, c) in choices.iter().enumerate() {
+                let _ = write!(ctx, "{}{c}", if i == 0 { "" } else { "|" });
+            }
+        }
+    }
 }
 
 // ---- completion -------------------------------------------------------------
@@ -541,24 +630,28 @@ fn complete(
 
     let mut candidates: Vec<Candidate<'static>, 16> = Vec::new();
     let mut more = false;
+    // The offset the host will replace from — normally the partial's start, but for
+    // `set name=<value>` completion it moves to just after the `=`.
+    let mut token_start = partial_start;
 
     match resolve(&prefix_toks, app) {
-        // In a menu → complete child menu/command names (base ⧺ app at the root).
+        // In a menu → complete child menu/command names (base ⧺ app, deduped by name).
         Resolved::Menu(a, b) => {
             for e in a.iter().chain(b) {
-                if e.name().starts_with(partial) {
+                let name = e.name();
+                if name.starts_with(partial) && !candidates.iter().any(|c| c.text == name) {
                     let kind = match e {
                         Entry::Menu(..) => CandidateKind::Menu,
                         Entry::Cmd(..) => CandidateKind::Command,
                     };
-                    if candidates.push(Candidate { text: e.name(), kind }).is_err() {
+                    if candidates.push(Candidate { text: name, kind }).is_err() {
                         more = true;
                         break;
                     }
                 }
             }
         }
-        // Past a command → complete its argument names, or setting names for set/get.
+        // Past a command → complete its argument names, or setting names / values.
         Resolved::Cmd(cmd, _) => match cmd.args {
             Args::None => {}
             Args::Names(names) => {
@@ -568,6 +661,27 @@ fn complete(
                     {
                         more = true;
                         break;
+                    }
+                }
+            }
+            // `set name=<TAB>` → complete the value (enum choices / bool); else the name.
+            Args::Settings { assign } if assign && partial.contains('=') => {
+                let eq = partial.find('=').unwrap();
+                token_start = partial_start + eq + 1;
+                let vpart = &partial[eq + 1..];
+                if let Some(s) = settings.find(&partial[..eq]) {
+                    let vals: &[&'static str] = match s.kind {
+                        Kind::Enum(choices) => choices,
+                        Kind::Bool => &["true", "false"],
+                        _ => &[],
+                    };
+                    for &v in vals {
+                        if v.starts_with(vpart)
+                            && candidates.push(Candidate { text: v, kind: CandidateKind::Value }).is_err()
+                        {
+                            more = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -588,7 +702,7 @@ fn complete(
 
     ShellCompletions {
         req_id,
-        token_start: partial_start as u16,
+        token_start: token_start as u16,
         common_prefix: common_prefix(&candidates),
         candidates,
         more,
