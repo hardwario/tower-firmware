@@ -15,9 +15,11 @@
 //! - **Limits.** The receive buffer is monolithic, so the cap is RAM, not the
 //!   protocol (the 24-bit index allows 1 GB): 8 KB (~11.9 KB future → ~8.6 KB stack
 //!   left) overflows the L0 stack — keep blobs ≲ 6 KB here, or add a *streaming*
-//!   consume-per-chunk API for larger. On EU 868 the 1 % duty governor also throttles
-//!   *sustained* bulk (a ~4 KB transfer is ~2.5 s of gateway airtime), which is
-//!   correct regulatory behaviour — a single transfer is fine; back-to-back ones slow.
+//!   consume-per-chunk API for larger. On EU 868 the 1 % duty governor caps
+//!   *sustained* bulk (correct regulatory behaviour): a ~4 KB transfer costs ~2.7 s
+//!   of gateway airtime, the bucket holds 36 s (1 % of an hour) and refills at
+//!   10 ms/s, so you can burst ~13 transfers, then it throttles to ~1 per ~4.5 min
+//!   (the 1 % rate). A single transfer is always unaffected.
 
 #![no_std]
 #![no_main]
