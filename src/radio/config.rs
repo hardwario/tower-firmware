@@ -178,6 +178,29 @@ pub async fn set_freq_hz(radio: &mut Spirit1, f_hz: u64) -> Result<(), RadioErro
     Ok(())
 }
 
+// --- EU 868 LBT+AFA channel plan (EN 300 220) -------------------------------
+// Listen-Before-Talk + Adaptive Frequency Agility lets EU operation relax the
+// 1 % duty limit in sub-bands that permit it. The whole set stays inside the
+// **865.0–868.6 MHz** sub-band (≈25 mW, 1 %-or-LBT+AFA) so the power/duty rule
+// never changes mid-set. (Exact min-channel count, LBT CCA time/threshold, and
+// off-time per EN 300 220-1 / ERC 70-03 are config to **verify** before any
+// product claim — these values are bench defaults that exercise the mechanism.)
+
+/// Number of EU AFA channels.
+pub const AFA_N: u8 = 8;
+/// AFA channel-0 carrier (Hz).
+pub const AFA_BASE_HZ: u64 = 865_200_000;
+/// AFA channel spacing (Hz). 400 kHz > the ~60–100 kHz occupied BW (non-overlapping).
+pub const AFA_SPACE_HZ: u64 = 400_000;
+
+/// Carrier (Hz) of AFA channel `k` (0..[`AFA_N`)): 865.2 + k·0.4 MHz, ≤ 868.0 MHz.
+pub const fn afa_freq_hz(k: u8) -> u64 {
+    AFA_BASE_HZ + (k as u64) * AFA_SPACE_HZ
+}
+
+// All AFA channels stay within the 865.0–868.6 MHz sub-band.
+const _: () = assert!(afa_freq_hz(AFA_N - 1) <= 868_600_000);
+
 /// Apply a full RF configuration. Must leave the part in READY. The caller has
 /// already brought the radio out of shutdown and verified the device ID.
 pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError> {

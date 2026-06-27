@@ -17,9 +17,11 @@
 //! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
 //! transfer, §7.5) and [`pairing`] (OTA 3-way JOIN, §7.6).
 
+mod afa;
 mod bulk;
 mod pairing;
 
+pub use afa::{AfaConfig, AfaRole};
 pub use bulk::BULK_CHUNK;
 pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 
@@ -84,10 +86,26 @@ pub enum SendResult {
     NotDelivered,
     /// CSMA reported the channel busy.
     Busy,
-    /// The duty governor refused the TX (would exceed the airtime budget).
+    /// The duty governor refused the TX (would exceed the airtime budget), or in
+    /// LBT+AFA mode every channel was busy/in-off-time (couldn't transmit politely).
     DutyLimited,
+    /// A mode-specific send was called in the wrong [`Access`] mode (e.g. `afa_send`
+    /// outside AFA mode), or a plain `send` was attempted while a hopping/agility
+    /// mode owns the channel schedule.
+    WrongMode,
     /// A local error (bad length, radio fault).
     Error(RadioError),
+}
+
+/// Spectrum-access mode (mutually exclusive, runtime-switchable like `set_band`).
+/// The default [`Duty`](Access::Duty) path is unchanged; AFA/FHSS add polite,
+/// region-specific access on top (EU LBT+AFA / US FHSS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Plain channel access governed by the band duty cycle (EU 1 %). Default.
+    Duty,
+    /// EU 868 Listen-Before-Talk + Adaptive Frequency Agility (EN 300 220).
+    Afa,
 }
 
 /// A received, authenticated application message.
@@ -153,6 +171,10 @@ pub struct Net {
     cached_ack_src: u32,
     /// Simple LCG state for the retransmit backoff (seeded from my_id).
     rng: u32,
+    /// Active spectrum-access mode (Duty default; AFA/FHSS switch at runtime).
+    access: Access,
+    /// EU LBT+AFA state (inert unless `access == Afa`).
+    afa: afa::Afa,
 }
 
 impl Net {
@@ -202,7 +224,15 @@ impl Net {
             cached_ack_for: 0,
             cached_ack_src: 0,
             rng: cfg.my_id | 1,
+            access: Access::Duty,
+            afa: afa::Afa::disabled(),
         })
+    }
+
+    /// The active spectrum-access mode ([`Access::Duty`] unless AFA/FHSS was enabled).
+    #[must_use]
+    pub fn access(&self) -> Access {
+        self.access
     }
 
     /// This device's ID.
