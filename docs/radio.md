@@ -281,6 +281,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_persist` | 1 | TX-counter reserve-ahead survives reboot (§7.4) |
 | `net_duty_kat` | 1 | duty-governor token-bucket KAT (§2.2) |
 | `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA (§7.5) |
+| `net_bulk_stress` | gateway / node | large bulk (multi-KB) + CRC-32 + throughput stress |
 | `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key (§7.6) |
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |
