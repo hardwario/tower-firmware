@@ -12,9 +12,10 @@
 > appeared to fail (TX dead) — **root cause: the low-power STOP executor gates the USART
 > clock while the writer awaits the TXE interrupt; fix: hold a `WakeGuard` per transmit
 > burst** (→ WFI). (2) **`seq` is assigned by the writer at send time**, not producers,
-> so queue drops don't consume sequence numbers (§4). (3) The shell/settings **framework
-> is pragmatic** — a walkable command tree + match-on-`CmdId`, not the fully-generic
-> descriptor framework §6 sketches (§6 note).
+> so queue drops don't consume sequence numbers (§4). (3) The shell/settings framework
+> is now **generalized**: a walkable tree of `Entry::{Menu, Cmd}` where each `Cmd` holds
+> a handler **fn pointer** (so apps extend it), and a declarative `Setting` table drives
+> `/system settings print|set|get` + `/export` with no per-setting code (§6 note).
 
 ---
 
@@ -282,22 +283,28 @@ reset but isn't required.
   command (spec: "print everything, not just deviations").
 - **First commands:** `/system reboot` (flush the response frame **before**
   `SCB::sys_reset()`, or the host sees a truncated reply), `/system/resource print`,
-  `/system identity set name=…` / `/system identity print` (≤32 chars, stored in
-  `Kv` under the `0x5500+` range), and `/export`.
+  the table-derived `/system settings print|set <name>=<value>|get <name>` (`identity`
+  is a `Str` setting in `Kv` under `0x5500+`), and `/export`.
 - **Wiring & ownership:** logging/TX is always-on (`Board::take` spawns the writer);
   the **shell is opt-in** — an app calls `console::shell::serve(spawner, board.storage)`,
   which *consumes* `Kv` and spawns the reader + engine. Apps that don't want a shell
   keep `board.storage`; an app needing both shares it as
   `Mutex<CriticalSectionRawMutex, Kv>`. (App-extensible trees — merging an app's
   `&'static [Node]` into the SDK root — are a follow-up; v1 ships the base tree.)
-- **As built (Phase 3/4):** the framework is **pragmatic**, not the fully-generic
-  descriptor table above — a walkable `static` tree (`Entry::Menu/Cmd` + `CmdId`), one
-  `resolve()` walk shared by dispatch and completion, and a `match CmdId` for execution.
-  Identity is handled directly against the KV (key `0x5500`), **not** auto-derived from
-  a setting descriptor. Dispatch runs **inline** in the RX task (which async-reads
-  `BufferedUartRx`; no separate engine task / `Mutex<Kv>`). Responses **are chunked**
-  (the writer splits text into `SHELL_CHUNK`=192-byte `chunk`/`last` frames the host
-  reassembles by `cmd_id`). Auto-derived settings remain a follow-up.
+- **As built (Phase 3/4 + framework):** a walkable `static` tree of
+  `Entry::{Menu, Cmd}` where each `Cmd` carries a **handler fn pointer** (`fn(&mut Ctx,
+  &[&str]) -> Outcome`) instead of a closed `CmdId` enum — so the tree is **open**. One
+  `resolve()` walk is shared by dispatch and completion. Settings are **declarative and
+  auto-derived**: a `&'static [Setting] { key, name, kind, default }` table (`Kind::{Str,
+  U32, Bool}`) drives generic `/system settings print|set|get` + `/export` with no
+  per-setting code, and completion of `set`/`get` enumerates the table dynamically.
+  Identity is just an SDK `Str` setting (key `0x5500`). **App-extensible:**
+  `serve_ext(spawner, storage, app_commands: &'static [Entry], app_settings: &'static
+  [Setting])` merges an app's commands at the root and its settings into the table (the
+  walker spans base ⧺ app); the host is target-authoritative so it needs **no changes**.
+  Dispatch runs **inline** in the RX task (which async-reads `BufferedUartRx`; no separate
+  engine task / `Mutex<Kv>`). Responses **are chunked** (the writer splits text into
+  `SHELL_CHUNK`=192-byte `chunk`/`last` frames the host reassembles by `cmd_id`).
 
 ## 7. Host architecture (`tower-cli`)
 
@@ -377,18 +384,20 @@ Each phase ends with an on-hardware verify, mirroring the FOTA/FHSS style.
 - **Exit:** events stream reliably alongside logs and render without per-app schema.
 
 ### Phase 3 — RX + shell execution + `tower shell`
-- **Built:** `shell::serve` spawns a task that **async-reads the console's
+- **Built:** `shell::serve`/`serve_ext` spawns a task that **async-reads the console's
   `BufferedUartRx`** (interrupt-driven; §5.5), feeds `FrameDecoder`, and dispatches
-  `ShellCommand` **inline** against the walkable tree → `ShellResponse` (chunked,
-  `chunk`/`last`) with result codes. `/system identity set|print` (≤32 chars, KV key
-  `0x5500`), `/system/resource print`, `/export`, `/system reboot` (flush then
-  `SCB::sys_reset`), unknown → result 1.
+  `ShellCommand` **inline** against the walkable tree → runs the command's handler →
+  `ShellResponse` (chunked, `chunk`/`last`) with result codes. Built-ins:
+  `/system settings print|set <name>=<value>|get <name>` (table-derived; `identity` is
+  a `Str` setting at KV `0x5500`), `/system/resource print`, `/export`, `/system reboot`
+  (flush then `SCB::sys_reset`), unknown → result 1.
 - **Test:** `tower shell` (interactive) or `tower exec "<line>"` (one-shot, for
-  scripts/CI) runs `/system identity set name=tower-01`, `… print` (persists across
-  reset), `/system/resource print` (multi-chunk, reassembled to one response on the
-  host), a bad command returns a non-zero result; commands work while logs stream.
-- **Exit:** interactive shell with persistent identity; chunked responses; result
-  codes; coexists with logs/events.
+  scripts/CI) runs `/system settings set identity=tower-01`, `… print` (persists across
+  reset), `/system/resource print` (multi-chunk, reassembled on the host); bad/unknown
+  settings return non-zero result codes; commands work while logs stream. HW-verified on
+  a dongle for `Str`/`U32`/`Bool` settings plus an app command + app settings.
+- **Exit:** interactive shell with declarative, persistent settings; app-extensible tree
+  (`serve_ext`); chunked responses; result codes; coexists with logs/events.
 
 ### Phase 4 — TAB completion (target-authoritative)
 - **Engine (target):** the *same* tokenizer + tree-walk `dispatch` uses (no forked
@@ -404,7 +413,8 @@ Each phase ends with an on-hardware verify, mirroring the FOTA/FHSS style.
   `token_start` lets the host replace `line[token_start..cursor]` without re-tokenizing;
   per-candidate `kind` (Menu/Command/Arg/Value) drives coloring and the auto-insert
   separator (`/`/space/`=`); >16 candidates set a `more` flag. Candidates are
-  `&'static str` from the tree (zero-copy).
+  `&'static str` from the tree — or, for `settings set`/`get`, the setting names from
+  the table (zero-copy either way).
 - **Host:** `tower shell` (`rustyline`/`reedline` `Completer`) and the TUI command pane
   fire the round-trip and wait (~150 ms) for the matching `req_id`; single candidate →
   insert + separator, multiple → insert `common_prefix` + show the list. Stale `req_id`s
