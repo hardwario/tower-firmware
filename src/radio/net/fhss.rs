@@ -12,8 +12,9 @@
 //!
 //! **Compliance (sized for margin, not the limit):** 80 channels × 300 ms slot →
 //! cycle 24 s > 20 s, so any channel is *tuned* at most once per 20 s window =
-//! ≤ 0.3 s (25 % under the 0.4 s/20 s limit, strict reading). A per-channel dwell
-//! governor independently caps *transmitted* airtime at ≤ 300 ms/20 s. GUARD = 10 ms
+//! ≤ 0.3 s (25 % under the 0.4 s/20 s limit, strict reading) — occupancy is bounded
+//! *by the hop schedule*, not a governor; per-channel airtime is recorded only for
+//! the compliance histogram. GUARD = 10 ms
 //! (measured retune+lock was 762 µs; floor dominates) ≫ the ~30 µs/slot clock drift.
 //! (Exact §15.247 numbers are FCC-KDB config to **verify** before any product claim.)
 
@@ -23,7 +24,7 @@ use super::{Access, Net, Received, SendResult, TX_TIMEOUT};
 use crate::radio::ccm::TAG_LEN;
 use crate::radio::config::{self, Band, FHSS_N, FHSS_RENDEZVOUS_CH, fhss_freq_hz};
 use crate::radio::device::RadioError;
-use crate::radio::duty::{self, DutyGovernor};
+use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, HDR_LEN, Header, MAX_FRAME, MAX_PAYLOAD};
 
 /// Slot length (ms). Cycle = `FHSS_N · FHSS_SLOT_MS`; must exceed 20 s so each
@@ -86,8 +87,13 @@ pub(crate) struct Fhss {
     last_beacon: Instant,
     miss: u32,
     cur_channel: u8,
-    /// Per-channel transmitted-airtime governor (§15.247 dwell).
-    dwell: [DutyGovernor; FHSS_N as usize],
+    /// Per-channel transmitted airtime (ms) accumulated this session — a light
+    /// *measurement* for the §15.247 compliance histogram. Occupancy itself is
+    /// bounded *structurally* (N=80, cycle 24 s > 20 s ⇒ each channel tuned ≤ once
+    /// per 20 s ⇒ ≤ one 300 ms slot), so no per-channel enforcement governor is
+    /// needed. (A `[DutyGovernor; 80]` here cost 1.6 KB and overflowed the L0
+    /// during deep async poll — this `[u16; 80]` is 160 B.)
+    airtime_ms: [u16; FHSS_N as usize],
 }
 
 impl Fhss {
@@ -100,7 +106,7 @@ impl Fhss {
             last_beacon: Instant::now(),
             miss: 0,
             cur_channel: FHSS_RENDEZVOUS_CH,
-            dwell: core::array::from_fn(|_| DutyGovernor::fhss_channel()),
+            airtime_ms: [0; FHSS_N as usize],
         }
     }
 }
@@ -167,7 +173,7 @@ impl Net {
         self.fhss.role = role;
         self.fhss.seed = seed;
         self.fhss.miss = 0;
-        self.fhss.dwell = core::array::from_fn(|_| DutyGovernor::fhss_channel());
+        self.fhss.airtime_ms = [0; FHSS_N as usize];
         self.access = Access::Fhss;
         match role {
             FhssRole::Master => {
@@ -201,12 +207,11 @@ impl Net {
         self.fhss.cur_channel
     }
 
-    /// Transmitted airtime consumed on channel `ch` in the rolling window (ms),
-    /// for the compliance histogram (`cap − remaining budget`).
+    /// Transmitted airtime accumulated on channel `ch` this session (ms), for the
+    /// compliance histogram.
     #[must_use]
     pub fn fhss_channel_airtime_ms(&self, ch: u8) -> u32 {
-        let g = &self.fhss.dwell[ch as usize];
-        duty::FHSS_DWELL_BURST_MS.saturating_sub(g.budget_ms())
+        self.fhss.airtime_ms[ch as usize] as u32
     }
 
     /// Channel for slot `slot_abs` under `seed`.
@@ -303,8 +308,11 @@ impl Net {
 
     /// **Node:** send one frame on the *current* slot's channel (call right after a
     /// Synced [`fhss_node_tick`](Self::fhss_node_tick) — the gateway is listening on
-    /// that channel). Dwell-metered; refuses if the slot has too little time left for
-    /// the exchange (slot-straddle rule) or if not synced. One TX counter is consumed.
+    /// that channel). Refuses (`DutyLimited`) if the slot has too little time left for
+    /// the exchange (slot-straddle rule), or `NotSynced` if not locked. Per-channel
+    /// occupancy is bounded structurally (the hop schedule), so no airtime governor
+    /// gates the TX; consumed airtime is recorded for the compliance histogram. One
+    /// TX counter is consumed.
     pub async fn fhss_send(&mut self, dest: u32, data: &[u8], confirmed: bool) -> SendResult {
         if self.access != Access::Fhss {
             return SendResult::WrongMode;
@@ -351,10 +359,8 @@ impl Net {
 
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
         self.fhss.cur_channel = ch;
-        if !self.fhss.dwell[ch as usize].try_tx(duty::frame_toa_ms(n)) {
-            self.advance_tx_counter();
-            return SendResult::DutyLimited;
-        }
+        self.fhss.airtime_ms[ch as usize] =
+            self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
         let result = match self.radio.tx(&buf[..n], false, TX_TIMEOUT).await {
             // Unconfirmed → delivered once sent; confirmed → wait for the ACK.
             Ok(()) if !confirmed || self.await_ack(dest, counter).await => SendResult::Delivered,
@@ -399,9 +405,9 @@ impl Net {
         let key = self.default_key;
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &pl, &mut buf) {
             self.advance_tx_counter();
-            if self.fhss.dwell[ch as usize].try_tx(duty::frame_toa_ms(n)) {
-                let _ = self.radio.tx(&buf[..n], false, TX_TIMEOUT).await;
-            }
+            self.fhss.airtime_ms[ch as usize] =
+                self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
+            let _ = self.radio.tx(&buf[..n], false, TX_TIMEOUT).await;
         }
     }
 

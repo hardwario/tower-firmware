@@ -1,13 +1,4 @@
-//! radio_fhss — US 915 FHSS link (FCC §15.247), star topology. **EXPERIMENTAL.**
-//!
-//! ⚠️ The on-air link is **not yet brought up**: on the bench the gateway wedges on
-//! its first beacon TX after a per-channel `set_freq_hz` retune (a VCO TX-lock /
-//! memory-pressure issue across 903–927 MHz that needs a hardware debugger to
-//! resolve — the failure point shifts with code size, a memory-corruption signature).
-//! The verified, working FHSS pieces are the channel-plan + per-channel lock sweep
-//! (`fhss_sweep`, F1) and the hop-permutation / dwell-governor / beacon-frame KATs
-//! (`fhss_kat`, F3–F5). This example is the intended driver once the radio-layer
-//! bring-up is done; see PLAN.md "FHSS link (F6–F9) — blocked".
+//! radio_fhss — US 915 FHSS link (FCC §15.247), star topology.
 //!
 //!   TOWER_FEATURES=role-gateway just flash radio_fhss   # hop time-master (beacons)
 //!   TOWER_FEATURES=role-node    just flash radio_fhss   # follower (scans → locks → sends)
