@@ -3,6 +3,14 @@
 //! announce frame's counter, so chunk-0's nonce never collides with the announce).
 //! All BULK_DATA chunks share that session counter with a distinct bulk_index,
 //! keeping their nonces unique. `impl Net` block over [`super::Net`].
+//!
+//! The transfer is **streamed on both ends**: the sender pulls each chunk from a
+//! [`BulkSource`] on demand, and the requester hands each chunk to a [`BulkSink`]
+//! as it arrives — neither side ever buffers the whole transfer, so RAM is constant
+//! regardless of length. That is the path a flash-backed source/sink (e.g. FOTA:
+//! serve an image from flash, stream the received image straight to flash) needs.
+//! The slice-backed [`Net::bulk_serve`] / [`Net::bulk_fetch`] are thin convenience
+//! wrappers over the streaming core [`Net::bulk_serve_from`] / [`Net::bulk_fetch_into`].
 
 use embassy_time::{Duration, Instant, Timer};
 
@@ -21,20 +29,60 @@ const BULK_REQ_REPS: u8 = 6;
 /// One serve-loop receive slice on the sender side.
 const BULK_SERVE_SLICE: Duration = Duration::from_millis(500);
 
+/// A source of bulk data, pulled chunk-by-chunk by [`Net::bulk_serve_from`] so the
+/// sender never holds the whole transfer in RAM. Implement it over a slice (see the
+/// [`Net::bulk_serve`] wrapper) or, for FOTA, over a flash reader.
+pub trait BulkSource {
+    /// Total number of bytes to serve (fixed for the whole transfer; announced once).
+    fn total_len(&self) -> usize;
+    /// Fill `out` with the bytes at byte `offset` (`offset` is chunk-aligned and
+    /// `out.len()` ≤ [`BULK_CHUNK`] — exactly the bytes remaining for the last
+    /// chunk). Returns the number of bytes written (normally `out.len()`).
+    #[allow(async_fn_in_trait)] // single-threaded embedded executor; no Send bound needed
+    async fn read(&mut self, offset: usize, out: &mut [u8]) -> usize;
+}
+
+/// A sink for bulk data, fed chunk-by-chunk by [`Net::bulk_fetch_into`] so the
+/// requester never holds the whole transfer in RAM. Implement it to verify, hash,
+/// or — for FOTA — stream straight to a flash staging slot.
+pub trait BulkSink {
+    /// Called once after the announce with the total length, before any chunk is
+    /// pulled. Return `false` to refuse the transfer (e.g. too large for the
+    /// destination, or the flash slot can't be erased), aborting the fetch.
+    #[allow(async_fn_in_trait)]
+    async fn begin(&mut self, total_len: usize) -> bool;
+    /// Called for each chunk in increasing-`offset` order with its plaintext bytes
+    /// (`chunk.len()` ≤ [`BULK_CHUNK`]). Return `false` to abort the transfer
+    /// (e.g. a flash write failed).
+    #[allow(async_fn_in_trait)]
+    async fn consume(&mut self, offset: usize, chunk: &[u8]) -> bool;
+}
+
 impl Net {
-    /// Serve `data` as a bulk transfer to `dest`: announce the length + session,
-    /// then answer BULK_REQ(index) with BULK_DATA(index, ≤64 B) until the last
-    /// chunk is pulled or the session idles out (30 s). Returns whether the last
-    /// chunk was served.
+    /// Serve an in-RAM `data` slice as a bulk transfer to `dest` — a convenience
+    /// wrapper over [`bulk_serve_from`](Self::bulk_serve_from). Returns whether the
+    /// last chunk was served.
     pub async fn bulk_serve(&mut self, dest: u32, data: &[u8]) -> bool {
+        let mut src = SliceSource { data };
+        self.bulk_serve_from(dest, &mut src).await
+    }
+
+    /// Serve `source` as a bulk transfer to `dest`: announce the length + session,
+    /// then answer BULK_REQ(index) with BULK_DATA(index, ≤64 B) — pulling each chunk
+    /// from `source` on demand — until the last chunk is pulled or the session idles
+    /// out (30 s). The source is never fully buffered, so the transfer size is
+    /// bounded by neither RAM nor (the 24-bit index aside) the protocol. Returns
+    /// whether the last chunk was served.
+    pub async fn bulk_serve_from<S: BulkSource>(&mut self, dest: u32, source: &mut S) -> bool {
         let key = self.key_for(dest);
-        let n_chunks = data.len().div_ceil(BULK_CHUNK).max(1);
+        let total_len = source.total_len();
+        let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
         let announce_counter = self.tx_counter;
         self.advance_tx_counter();
         let session = self.tx_counter; // reserved for all chunks; consumed at the end
 
         let mut ann = [0u8; 8];
-        ann[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        ann[..4].copy_from_slice(&(total_len as u32).to_le_bytes());
         ann[4..8].copy_from_slice(&session.to_le_bytes());
         let ann_hdr = Header {
             frame_type: FrameType::Data,
@@ -49,6 +97,7 @@ impl Net {
         let mut served_last = false;
         let mut last_progress = Instant::now();
         let mut rxbuf = [0u8; BULK_CHUNK];
+        let mut chunk = [0u8; BULK_CHUNK];
         loop {
             if Instant::now().saturating_duration_since(last_progress)
                 >= if served_last { Duration::from_secs(2) } else { BULK_IDLE }
@@ -75,7 +124,8 @@ impl Net {
             got_req = true;
             last_progress = Instant::now();
             let start = k * BULK_CHUNK;
-            let end = (start + BULK_CHUNK).min(data.len());
+            let want = (total_len - start).min(BULK_CHUNK);
+            let n = source.read(start, &mut chunk[..want]).await;
             let last = k == n_chunks - 1;
             let dhdr = Header {
                 frame_type: FrameType::BulkData,
@@ -86,7 +136,7 @@ impl Net {
                 bulk_index: Some(k as u32),
             };
             Timer::after(ACK_TURNAROUND).await; // let the requester switch to RX
-            self.tx_frame(&key, &dhdr, &data[start..end]).await;
+            self.tx_frame(&key, &dhdr, &chunk[..n]).await;
             if last {
                 served_last = true;
             }
@@ -95,10 +145,22 @@ impl Net {
         served_last
     }
 
-    /// Fetch a bulk transfer from `src` into `out`: receive the announcement,
-    /// then pull each chunk with BULK_REQ (retransmitting on loss). Returns the
-    /// total length received, or `None` on announce/chunk failure or `out` too small.
+    /// Fetch a bulk transfer from `src` into the `out` slice — a convenience wrapper
+    /// over [`bulk_fetch_into`](Self::bulk_fetch_into). Returns the total length
+    /// received, or `None` on announce/chunk failure or `out` too small.
     pub async fn bulk_fetch(&mut self, src: u32, out: &mut [u8]) -> Option<usize> {
+        let mut sink = SliceSink { out };
+        self.bulk_fetch_into(src, &mut sink).await
+    }
+
+    /// Fetch a bulk transfer from `src`, streaming each chunk to `sink`: receive the
+    /// announcement (calling [`BulkSink::begin`] with the total length), then pull
+    /// each chunk with BULK_REQ (retransmitting on loss) and hand it to
+    /// [`BulkSink::consume`] in increasing-offset order. Nothing is buffered beyond
+    /// one chunk, so the transfer size is bounded by neither RAM nor (the 24-bit
+    /// index aside) the protocol. Returns the total length received, or `None` on
+    /// announce/chunk failure or a sink that refused (`begin`/`consume` → `false`).
+    pub async fn bulk_fetch_into<S: BulkSink>(&mut self, src: u32, sink: &mut S) -> Option<usize> {
         let key = self.key_for(src);
         // Wait for the bulk-announce.
         let mut abuf = [0u8; 8];
@@ -115,8 +177,8 @@ impl Net {
                 break (len, s);
             }
         };
-        if total_len > out.len() {
-            return None;
+        if !sink.begin(total_len).await {
+            return None; // sink refused the transfer (e.g. too large / can't stage)
         }
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
 
@@ -146,13 +208,15 @@ impl Net {
                     && dhdr.bulk_index == Some(k as u32)
                 {
                     let off = k * BULK_CHUNK;
-                    // Bound the copy to the announced length: a peer-controlled
-                    // (authenticated, but possibly buggy) `dlen` must never write
-                    // past `out` — e.g. a full 64 B last chunk for a 65 B total.
+                    // Bound to the announced length: a peer-controlled (authenticated,
+                    // but possibly buggy) `dlen` must never feed the sink past
+                    // `total_len` — e.g. a full 64 B last chunk for a 65 B total.
                     if off + dlen > total_len {
                         continue; // malformed chunk; retry within reps
                     }
-                    out[off..off + dlen].copy_from_slice(&dbuf[..dlen]);
+                    if !sink.consume(off, &dbuf[..dlen]).await {
+                        return None; // sink aborted (e.g. flash write failed)
+                    }
                     received += dlen;
                     got = true;
                     break;
@@ -192,5 +256,40 @@ impl Net {
         }
         out[..plen].copy_from_slice(&buf[range]);
         Some((hdr, plen))
+    }
+}
+
+/// [`BulkSource`] over an in-RAM slice (backs [`Net::bulk_serve`]).
+struct SliceSource<'a> {
+    data: &'a [u8],
+}
+
+impl BulkSource for SliceSource<'_> {
+    fn total_len(&self) -> usize {
+        self.data.len()
+    }
+    async fn read(&mut self, offset: usize, out: &mut [u8]) -> usize {
+        let n = out.len();
+        out.copy_from_slice(&self.data[offset..offset + n]);
+        n
+    }
+}
+
+/// [`BulkSink`] into an in-RAM slice (backs [`Net::bulk_fetch`]); the up-front
+/// length check in `begin` preserves the old "out too small → `None`" behaviour.
+struct SliceSink<'a> {
+    out: &'a mut [u8],
+}
+
+impl BulkSink for SliceSink<'_> {
+    async fn begin(&mut self, total_len: usize) -> bool {
+        total_len <= self.out.len()
+    }
+    async fn consume(&mut self, offset: usize, chunk: &[u8]) -> bool {
+        if offset + chunk.len() > self.out.len() {
+            return false;
+        }
+        self.out[offset..offset + chunk.len()].copy_from_slice(chunk);
+        true
     }
 }

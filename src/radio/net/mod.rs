@@ -23,7 +23,7 @@ mod fhss;
 mod pairing;
 
 pub use afa::{AfaConfig, AfaRole};
-pub use bulk::BULK_CHUNK;
+pub use bulk::{BULK_CHUNK, BulkSink, BulkSource};
 pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
 pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 

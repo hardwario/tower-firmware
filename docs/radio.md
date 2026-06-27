@@ -191,8 +191,24 @@ announces `(length, session)`, the requester pulls each ≤64 B chunk with a
 every chunk's nonce unique; the sender frees an idle session after 30 s.
 
 ```rust
-net.bulk_serve(NODE_ID, &blob).await;              // sender
+net.bulk_serve(NODE_ID, &blob).await;              // sender (in-RAM slice)
 let n = net.bulk_fetch(GW_ID, &mut out).await;     // requester → bytes received
+```
+
+The transfer is **streamed on both ends** — the slice calls above are thin
+wrappers over `bulk_serve_from(dest, &mut source)` / `bulk_fetch_into(src, &mut
+sink)`, which pull each chunk from a [`BulkSource`] and hand each chunk to a
+[`BulkSink`] as it arrives. Neither side buffers the whole transfer, so RAM is
+**constant regardless of size** (only the slice wrappers are bounded, by their
+slice). This removes the old monolithic-buffer ceiling (~6 KB on this 20 KB part)
+and is the path a flash-backed FOTA needs: serve an image from a flash reader,
+stream the received image straight into a staging slot. Verified on hardware to
+**64 KB (1024 chunks, firmware-sized)** with constant RAM — see `net_bulk_stream`.
+
+```rust
+// FOTA-shaped usage: implement the two traits over flash instead of a slice.
+net.bulk_serve_from(NODE_ID, &mut image_reader).await;   // BulkSource: read flash → chunk
+net.bulk_fetch_into(GW_ID, &mut flash_writer).await;     // BulkSink: chunk → write flash + hash
 ```
 
 **OTA pairing (§7.6).** A 3-way JOIN under a fixed, **publicly-known** pairing key
@@ -282,6 +298,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_duty_kat` | 1 | duty-governor token-bucket KAT (§2.2) |
 | `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA (§7.5) |
 | `net_bulk_stress` | gateway / node | large bulk (multi-KB) + CRC-32 + throughput stress |
+| `net_bulk_stream` | gateway / node | streaming bulk (source/sink), 4–64 KB, constant RAM |
 | `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key (§7.6) |
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes (§7.2) |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange (§7.2) |

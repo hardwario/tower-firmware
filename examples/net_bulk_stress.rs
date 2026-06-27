@@ -12,10 +12,11 @@
 //! Hardware-measured on two boards (4 MHz SPI):
 //! - 4 KB / 64 chunks and 6 KB / 96 chunks complete reliably, CRC OK every round,
 //!   ~4–6 kbps effective (dominated by the per-chunk req/resp round-trip, not airtime).
-//! - **Limits.** The receive buffer is monolithic, so the cap is RAM, not the
-//!   protocol (the 24-bit index allows 1 GB): 8 KB (~11.9 KB future → ~8.6 KB stack
-//!   left) overflows the L0 stack — keep blobs ≲ 6 KB here, or add a *streaming*
-//!   consume-per-chunk API for larger. On EU 868 the 1 % duty governor caps
+//! - **Limits.** This example's receive buffer is monolithic, so its cap is RAM, not
+//!   the protocol (the 24-bit index allows 1 GB): 8 KB (~11.9 KB future → ~8.6 KB
+//!   stack left) overflows the L0 stack — keep blobs ≲ 6 KB *here*. For larger
+//!   transfers use the **streaming** `bulk_serve_from`/`bulk_fetch_into` API
+//!   (`net_bulk_stream` demos it to 64 KB at constant RAM). On EU 868 the 1 % duty governor caps
 //!   *sustained* bulk (correct regulatory behaviour): a ~4 KB transfer costs ~2.7 s
 //!   of gateway airtime, the bucket holds 36 s (1 % of an hour) and refills at
 //!   10 ms/s, so you can burst ~13 transfers, then it throttles to ~1 per ~4.5 min
