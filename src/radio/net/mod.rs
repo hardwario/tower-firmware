@@ -19,10 +19,12 @@
 
 mod afa;
 mod bulk;
+mod fhss;
 mod pairing;
 
 pub use afa::{AfaConfig, AfaRole};
 pub use bulk::BULK_CHUNK;
+pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
 pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 
 use embassy_time::{Duration, Timer};
@@ -93,6 +95,9 @@ pub enum SendResult {
     /// outside AFA mode), or a plain `send` was attempted while a hopping/agility
     /// mode owns the channel schedule.
     WrongMode,
+    /// FHSS `fhss_send` was called while the node has not locked to the gateway's
+    /// hop schedule (not Synced).
+    NotSynced,
     /// A local error (bad length, radio fault).
     Error(RadioError),
 }
@@ -106,6 +111,10 @@ pub enum Access {
     Duty,
     /// EU 868 Listen-Before-Talk + Adaptive Frequency Agility (EN 300 220).
     Afa,
+    /// US 915 frequency hopping (FCC §15.247). Plain `send` is refused in this mode
+    /// (a static-channel TX while hopping would violate the hopping requirement);
+    /// use [`Net::fhss_send`].
+    Fhss,
 }
 
 /// A received, authenticated application message.
@@ -175,6 +184,8 @@ pub struct Net {
     access: Access,
     /// EU LBT+AFA state (inert unless `access == Afa`).
     afa: afa::Afa,
+    /// US FHSS state (inert unless `access == Fhss`).
+    fhss: fhss::Fhss,
 }
 
 impl Net {
@@ -226,6 +237,7 @@ impl Net {
             rng: cfg.my_id | 1,
             access: Access::Duty,
             afa: afa::Afa::disabled(),
+            fhss: fhss::Fhss::disabled(),
         })
     }
 
@@ -371,6 +383,11 @@ impl Net {
         confirmed: bool,
         reps: u8,
     ) -> SendResult {
+        // In FHSS mode a static-channel TX would break the hopping requirement;
+        // callers must use fhss_send (which hops). AFA still allows plain send.
+        if self.access == Access::Fhss {
+            return SendResult::WrongMode;
+        }
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (§3)
         }
