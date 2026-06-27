@@ -315,12 +315,16 @@ sets this; it is unrelated to the RF/demod registers.
 - **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant — use FHSS for a
   compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.
-- **FHSS sync** holds steadily once locked (verified: 0 losses + 140 confirmed
-  deliveries over ~45 s / ~1.75 cycles) and re-acquires after a real gateway loss
-  (LOST→rescan→LOCKED). The node opens its beacon RX a guard *before* each slot
-  boundary, listens a wide window ignoring stray frames, and tolerates up to 8
-  consecutive misses (drift over that span ≪ the window) before re-scanning.
-  A *gateway restart* still forces a one-cycle re-acquire (new epoch) — inherent.
+- **FHSS sync** is robust. The node opens its beacon RX a guard *before* each slot
+  boundary (armed before the gateway transmits), listens a wide window that ignores
+  stray frames, and — crucially — **rides through a fade by predicting the channel
+  on its kept clock anchor** (drift ≪ the RX window for dozens of slots), re-locking
+  within one slot once RF returns rather than treating a missed beacon as a loss.
+  Only after ~7 s of misses (anchor too stale / gateway restarted) does it fall back
+  to rendezvous scanning. **Soak-verified: 1 lock, 0 sync losses, 1133 confirmed
+  deliveries over ~6 min / ~15 cycles, max delivery gap 2 slots** (an earlier
+  per-slot-strict design dropped sync 1–2×/6 min with ~23 s re-acquire each). A
+  *gateway restart* still forces a one-cycle re-acquire (new epoch) — inherent.
   (`RAM note:` the FHSS per-channel state is a `[u16; 80]` counter — an earlier
   `[DutyGovernor; 80]` overflowed the 20 KB L0.)
 - **RX bandwidth is set wide (~216 kHz)** to tolerate the 50 MHz-crystal tolerance

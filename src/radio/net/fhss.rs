@@ -42,11 +42,14 @@ const BEACON_RX_MS: u64 = 100;
 /// Node park-and-listen window while scanning (> one slot so it can't miss the
 /// gateway's pass over the rendezvous channel).
 const RENDEZVOUS_RX_MS: u64 = 350;
-/// Consecutive missed beacons before declaring loss of sync → re-scan. Generous:
-/// the node re-anchors on every beacon, and drift over this many slots
-/// (8·300 ms·100 ppm ≈ 240 µs) stays far inside the beacon RX window, so transient
-/// misses (a collided slot, a momentary fade) don't trigger an expensive re-scan.
-const MISS_LIMIT: u32 = 8;
+/// Consecutive missed beacons the node rides through on its predicted channel
+/// (keeping its clock anchor) before giving up and re-scanning from the rendezvous
+/// channel. The anchor's drift over this span (24·300 ms·100 ppm ≈ 720 µs) stays far
+/// inside the beacon RX window, so the prediction is still correct and a fade up to
+/// ~24·300 ms ≈ 7 s re-locks within one slot once RF returns — *without* a sync loss
+/// or a ~1-cycle rendezvous. A genuinely dead/restarted gateway is detected in ~7 s,
+/// then recovered via the rendezvous channel.
+const REACQUIRE_LIMIT: u32 = 24;
 /// Beacon payload: cycle(4 LE) ‖ slot_index(1).
 const BEACON_PL_LEN: usize = 5;
 /// Broadcast destination (beacons are network-wide).
@@ -268,51 +271,60 @@ impl Net {
         MasterSlot { channel: ch, slot, received }
     }
 
-    /// **Node:** run one slot — when Scanning, park on the rendezvous channel and
-    /// listen for a beacon (locking on receipt); when Synced, retune to the slot's
-    /// channel, wait for the boundary, and catch the beacon to re-align. After this
-    /// returns Synced with `got_beacon`, the gateway is listening on `channel` for
-    /// the rest of the slot, so the caller may [`fhss_send`](Self::fhss_send) now.
+    /// **Node:** run one slot. Whenever a clock anchor is held (Synced, or riding
+    /// through a transient), predict this slot's channel, open RX a guard before the
+    /// boundary, and catch the beacon to re-align. A missed beacon **keeps the anchor
+    /// and keeps predicting** — drift stays ≪ the RX window for many slots, so a fade
+    /// of up to [`REACQUIRE_LIMIT`] slots is ridden through and re-locks within one
+    /// slot once RF returns (it is *not* a sync loss). Only after the anchor is too
+    /// stale to trust (the gap exceeds that, e.g. the gateway restarted onto a new
+    /// epoch) is the anchor dropped and the node falls back to parking on the fixed
+    /// rendezvous channel (the gateway's permutation sweeps onto it once per cycle).
+    /// After this returns Synced with `got_beacon`, the gateway is listening on
+    /// `channel` for the rest of the slot, so the caller may
+    /// [`fhss_send`](Self::fhss_send) now.
     pub async fn fhss_node_tick(&mut self) -> NodeSlot {
         let seed = self.fhss.seed;
-        match self.fhss.state {
-            FhssState::Scanning => {
-                let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(FHSS_RENDEZVOUS_CH)).await;
-                self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
-                let got = self.fhss_rx_beacon(Duration::from_millis(RENDEZVOUS_RX_MS)).await;
-                if let Some((slot_abs, t_rx)) = got {
-                    self.fhss_lock(slot_abs, t_rx);
-                    NodeSlot { state: FhssState::Synced, channel: FHSS_RENDEZVOUS_CH, slot: slot_abs, got_beacon: true }
-                } else {
-                    NodeSlot { state: FhssState::Scanning, channel: FHSS_RENDEZVOUS_CH, slot: 0, got_beacon: false }
-                }
-            }
-            FhssState::Synced => {
-                let anchor = self.fhss.anchor.expect("node anchor");
-                let now = Instant::now();
-                let slot = Self::fhss_cur_slot(anchor, now) + 1;
-                let ch = Self::fhss_channel_for(seed, slot);
-                let t_start = Self::fhss_slot_start(anchor, slot);
 
-                let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
-                self.fhss.cur_channel = ch;
-                // Open RX a guard *before* the boundary so it's armed before the
-                // gateway transmits (covers rx() setup latency).
-                Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
+        if let Some(anchor) = self.fhss.anchor {
+            // Track by prediction (initial Synced *and* fast re-acquire after a fade).
+            let now = Instant::now();
+            let slot = Self::fhss_cur_slot(anchor, now) + 1;
+            let ch = Self::fhss_channel_for(seed, slot);
+            let t_start = Self::fhss_slot_start(anchor, slot);
 
-                let got = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await;
-                if let Some((slot_abs, t_rx)) = got {
-                    self.fhss_lock(slot_abs, t_rx);
-                    NodeSlot { state: FhssState::Synced, channel: ch, slot, got_beacon: true }
-                } else {
-                    self.fhss.miss += 1;
-                    if self.fhss.miss >= MISS_LIMIT {
-                        self.fhss.state = FhssState::Scanning;
-                        self.fhss.anchor = None;
-                    }
-                    NodeSlot { state: self.fhss.state, channel: ch, slot, got_beacon: false }
-                }
+            let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
+            self.fhss.cur_channel = ch;
+            // Open RX a guard *before* the boundary so it's armed before the gateway
+            // transmits (covers rx() setup latency).
+            Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
+
+            if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await {
+                self.fhss_lock(slot_abs, t_rx); // → Synced, miss = 0, re-anchored
+                return NodeSlot { state: FhssState::Synced, channel: ch, slot, got_beacon: true };
             }
+
+            // Missed this slot's beacon — keep predicting on the (drift-tracked)
+            // anchor. Stay Synced through a fade; only give up the anchor once it's
+            // too stale to trust, then re-scan from the rendezvous channel.
+            self.fhss.miss += 1;
+            if self.fhss.miss >= REACQUIRE_LIMIT {
+                self.fhss.anchor = None;
+                self.fhss.state = FhssState::Scanning;
+                return NodeSlot { state: FhssState::Scanning, channel: ch, slot, got_beacon: false };
+            }
+            return NodeSlot { state: FhssState::Synced, channel: ch, slot, got_beacon: false };
+        }
+
+        // No anchor: initial acquisition or post-restart — park on the rendezvous
+        // channel and listen a wide window for the gateway's once-per-cycle pass.
+        let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(FHSS_RENDEZVOUS_CH)).await;
+        self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
+        if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(RENDEZVOUS_RX_MS)).await {
+            self.fhss_lock(slot_abs, t_rx);
+            NodeSlot { state: FhssState::Synced, channel: FHSS_RENDEZVOUS_CH, slot: slot_abs, got_beacon: true }
+        } else {
+            NodeSlot { state: FhssState::Scanning, channel: FHSS_RENDEZVOUS_CH, slot: 0, got_beacon: false }
         }
     }
 

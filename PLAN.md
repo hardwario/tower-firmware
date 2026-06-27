@@ -494,10 +494,14 @@ the shared `config::set_freq_hz` retune primitive + the existing CSMA/duty layer
   during deep async poll, corrupting memory (symptoms shifted with code size: a TX
   "StuckState", then hangs before init; it even broke the previously-working AFA
   link). Replacing it with the `[u16; 80]` counter + the structural occupancy bound
-  fixed FHSS and restored AFA. **Sync hardening (done):** the node opens its beacon
-  RX a GUARD before each slot boundary (so RX is armed before the gateway transmits —
-  covers `rx()` setup latency), uses a wide 100 ms window that ignores stray frames,
-  and tolerates 8 consecutive misses before re-scanning (drift ≪ window). Verified:
-  **0 sync losses + 140 confirmed deliveries over ~45 s**; clean LOST→rescan→LOCKED
-  on real gateway loss. (A gateway *restart* still forces a one-cycle re-acquire —
-  inherent to the new epoch.)
+  fixed FHSS and restored AFA. **Sync hardening (done):** (a) open the node beacon
+  RX a GUARD before each slot boundary so it's armed before the gateway transmits
+  (covers `rx()` setup latency); (b) wide 100 ms window that loops past stray frames;
+  (c) **fast re-acquire** — a missed beacon keeps the clock anchor and the node keeps
+  predicting the channel (drift ≪ window for dozens of slots), re-locking within one
+  slot once RF returns instead of declaring loss + slow rendezvous; only after
+  `REACQUIRE_LIMIT`≈7 s of misses (stale anchor / gateway restart) does it fall back
+  to fixed-rendezvous scanning. **Soak-verified:** 6-min runs went from 1–2 sync
+  losses (≈23 s re-acquire each) → **1 lock, 0 losses, 1133 deliveries over ~6 min /
+  ~15 cycles, max delivery gap 2 slots.** (A gateway *restart* still forces a
+  one-cycle re-acquire — inherent to the new epoch.)
