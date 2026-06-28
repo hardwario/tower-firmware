@@ -59,6 +59,25 @@ impl<'d> Storage<'d> {
         Self { flash }
     }
 
+    /// Reclaim the underlying blocking [`Flash`] handle.
+    ///
+    /// The L0 has a single `Flash` peripheral that drives **both** the data EEPROM
+    /// (this module) and the **program flash** (where FOTA stages an image). They are
+    /// disjoint regions on the same handle, so a program-flash writer (see
+    /// [`crate::fota::Stage`]) borrows the very handle `Storage` owns. Use this to hand
+    /// it over — e.g. for FOTA staging that does not also need the EEPROM KV store.
+    pub fn into_flash(self) -> Flash<'d, Blocking> {
+        self.flash
+    }
+
+    /// Borrow the underlying blocking [`Flash`] handle (program-flash + EEPROM live on
+    /// the same peripheral; see [`into_flash`](Self::into_flash)). Lets a FOTA
+    /// [`Stage`](crate::fota::Stage) write program flash while `Storage` retains
+    /// ownership of the EEPROM KV state.
+    pub fn flash_mut(&mut self) -> &mut Flash<'d, Blocking> {
+        &mut self.flash
+    }
+
     /// Total EEPROM size in bytes.
     pub const fn len(&self) -> usize {
         EEPROM_SIZE
@@ -115,6 +134,14 @@ impl<'d> Kv<'d> {
     /// Reclaim the underlying [`Storage`] for raw access.
     pub fn into_storage(self) -> Storage<'d> {
         self.storage
+    }
+
+    /// Borrow the underlying [`Storage`] — lets the network layer reach **program flash**
+    /// (via [`Storage::flash_mut`]) during a FOTA download while `Net` keeps owning the KV
+    /// store for its counter state. The EEPROM (this KV) and program flash are disjoint
+    /// regions on the one `Flash` peripheral, so they don't interfere.
+    pub fn storage_mut(&mut self) -> &mut Storage<'d> {
+        &mut self.storage
     }
 
     /// Store raw bytes under `key`. Use this for scalars (`&x.to_le_bytes()`) or

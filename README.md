@@ -7,8 +7,10 @@ framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated 
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer —
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
-[`just`](https://just.systems). The console and radio each have a guide:
-[`docs/console.md`](docs/console.md) and [`docs/radio.md`](docs/radio.md).
+[`just`](https://just.systems). It also has a signed, A/B **firmware-over-the-air**
+update path (`tower::fota` + an embassy-boot bootloader). Each subsystem has a guide:
+[`docs/console.md`](docs/console.md), [`docs/radio.md`](docs/radio.md), and
+[`docs/fota.md`](docs/fota.md).
 
 | | |
 |---|---|
@@ -29,7 +31,8 @@ programs live in [`examples/`](examples) and are built/flashed by name with
 
 ```sh
 # One-time: cargo install just cargo-binutils   (+ rustup component add llvm-tools)
-#           (add probe-rs-tools only for SWD `cargo run`; jolt UART flashing needs neither)
+#           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
+#           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing needs neither)
 just samples              # list the example apps
 just run thermometer      # build + flash, then watch the console from boot
 just monitor              # (re)attach to a running MCU without resetting it
@@ -52,6 +55,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing — see [`docs/radio.md`](docs/radio.md) |
+| `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + SHA-256 install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
 | `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
 ### LED indication
@@ -171,21 +175,22 @@ and `rustup component add llvm-tools`.
 ```sh
 just samples                 # list examples
 just build blinky            # → target/firmware.bin (+ size)
-just flash blinky            # build + flash over the UART bootloader (jolt)
-just run thermometer         # build + flash, then monitor (resets on attach → catches boot)
-just monitor                 # attach to the running MCU (no reset); add --reset to restart
-just flash blinky --no-verify  # extra args pass through to `jolt flash`
+just flash blinky            # build + flash over the UART bootloader (tower)
+just run thermometer         # build + flash, then stream the framed console logs
+just logs                    # stream the framed console from the running MCU (tower logs)
+just flash blinky --no-verify  # extra args pass through to `tower flash`
 ```
 
-Set `TOWER_PORT=/dev/cu.usbserial-XXXX` if more than one serial port is present.
-`cargo run --release --example blinky` also flashes via the SWD probe-rs runner
-in `.cargo/config.toml` if you use a J-Link/ST-Link instead of `jolt`.
+Flashing + console use the [`tower`](https://github.com/hardwario/tower-cli) CLI (it
+programs the STM32L0 over the UART bootloader and decodes the framed console); install it
+on your `PATH`. Set `TOWER_PORT=/dev/cu.usbserial-XXXX` if more than one serial port is
+present. `cargo run --release --example blinky` also flashes via the SWD probe-rs runner
+in `.cargo/config.toml` if you use a J-Link/ST-Link instead.
 
 `just build NAME` runs `cargo objcopy --example NAME` → `target/firmware.bin`
-(linked at `0x08000000`). `jolt monitor` opens the port without resetting the
-firmware (BOOT0/NRST are on the FTDI's auxiliary lines, not DTR/RTS); **close the
-monitor before flashing** (`jolt flash` needs exclusive port access). Any serial
-terminal works too, e.g. `picocom -b 115200 /dev/cu.usbserial-XXXX`.
+(linked at `0x08000000`). The console is **framed** (COBS+CRC+postcard), so use
+`tower logs` — a raw serial terminal shows binary. `tower logs` reads without resetting
+the MCU; **close it before flashing** (`tower flash` needs exclusive port access).
 
 ## Tweaking
 

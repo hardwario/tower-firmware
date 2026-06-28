@@ -1,0 +1,34 @@
+[package]
+name = "tower-bootloader"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "embassy-boot bootloader for the HARDWARIO TOWER Core Module (STM32L083CZ). Reads the A/B partition table from its own memory.x, verifies a staged FOTA image's Ed25519 signature + SHA-256, swaps it in (DFU -> ACTIVE) with power-loss-safe rollback, then jumps to the active app. See docs/fota.md."
+
+# Standalone binary crate (not part of the `tower` lib) so it can carry its OWN
+# memory.x linking FLASH to the BOOTLOADER region (0x0800_0000, 32K) — the canonical
+# embassy-boot layout (cf. embassy examples/boot/bootloader/stm32). It deliberately
+# does NOT depend on `tower`, and enables embassy-stm32 WITHOUT `memory-x`, so there is
+# exactly one memory.x on the link path (its own) — no search-path precedence to reason
+# about. Versions match the workspace's locked stack.
+[dependencies]
+embassy-stm32 = { version = "0.6.0", features = ["stm32l083cz"] }
+embassy-boot-stm32 = { version = "0.8.0" }
+# CRITICAL for the STM32L0: its program flash erases to 0x00 (not 0xFF — the L0/L1 NVM is
+# inverted from normal NOR). embassy-boot's swap-progress marker logic assumes the erased
+# value, so without `flash-erase-zero` it misreads a fresh state as "already swapped" and
+# reverts every update. embassy-boot-stm32 doesn't forward this feature, so we enable it on
+# the shared embassy-boot directly (Cargo unifies it). Verified on HW: erase → reads 0x00.
+embassy-boot = { version = "0.7.0", features = ["flash-erase-zero"] }
+embassy-sync = { version = "0.8.0" }
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+# The bootloader is the FOTA authenticity gate: it verifies the staged image's Ed25519
+# signature + SHA-256 before swapping (docs/fota.md). `verify` pulls salty;
+# the shared crate also gives the signed `Manifest`, `verify_signed`, and `VENDOR_PUBKEY`.
+# Keeping salty here (one copy) instead of in the duplicated A/B app slots is the flash win.
+tower-protocol = { path = "../tower-protocol", features = ["verify"] }
+# SHA-256 over the staged DFU image, checked against the signed manifest's hash.
+sha2 = { version = "0.10", default-features = false }
+# NorFlash/ReadNorFlash traits for the raw manifest + DFU reads.
+embedded-storage = "0.3"

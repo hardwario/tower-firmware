@@ -14,6 +14,7 @@
 //! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
 //! - [`storage`] — EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
+//! - [`fota`] — firmware-over-the-air image staging (program-flash sink + layout + state).
 //! - [`ws2812`] — WS2812B/SK6812 strip driver (timer PWM + DMA).
 //! - [`strip`] — addressable-LED effects (rainbow, chase, …) with brightness+gamma.
 
@@ -22,6 +23,7 @@
 pub mod board;
 pub mod button;
 pub mod console;
+pub mod fota;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;

@@ -186,6 +186,13 @@ pub struct Net {
     afa: afa::Afa,
     /// US FHSS state (inert unless `access == Fhss`).
     fhss: fhss::Fhss,
+    /// FOTA advertise, gateway side: when set, our auto-ACKs carry `DOWNLINK_PENDING`
+    /// to tell the node an update is waiting (docs/fota.md). Rides existing ACKs, so
+    /// it costs no extra airtime. Set via [`set_downlink_pending`](Net::set_downlink_pending).
+    downlink_pending: bool,
+    /// FOTA advertise, node side: set when an ACK we received carried `DOWNLINK_PENDING`;
+    /// read-and-cleared via [`take_downlink_pending`](Net::take_downlink_pending).
+    downlink_pending_rx: bool,
 }
 
 impl Net {
@@ -238,7 +245,36 @@ impl Net {
             access: Access::Duty,
             afa: afa::Afa::disabled(),
             fhss: fhss::Fhss::disabled(),
+            downlink_pending: false,
+            downlink_pending_rx: false,
         })
+    }
+
+    /// FOTA advertise (gateway): make subsequent auto-ACKs carry `DOWNLINK_PENDING`, the
+    /// "an update is waiting for you" signal (docs/fota.md). Clear it once the node has
+    /// pulled. The bit rides existing ACKs, so advertising costs no extra airtime.
+    pub fn set_downlink_pending(&mut self, pending: bool) {
+        self.downlink_pending = pending;
+    }
+
+    /// FOTA advertise (node): whether the most recent ACK we received carried
+    /// `DOWNLINK_PENDING` (read-and-cleared). Poll it after a confirmed
+    /// [`send`](Self::send): if `true`, the gateway has an update — pull it when
+    /// idle/scheduled (the node controls *when*, good for battery/duty).
+    pub fn take_downlink_pending(&mut self) -> bool {
+        core::mem::take(&mut self.downlink_pending_rx)
+    }
+
+    /// Consume the network layer and reclaim its [`Kv`] (and thus the `Flash` it owns), for an
+    /// app that needs program-flash access once the radio is done. Drops the radio + peer table
+    /// — call only when finished transceiving.
+    ///
+    /// The as-built FOTA flow does **not** need this: [`pull_update`](crate::fota::pull_update)
+    /// stages the image through `Net`'s own flash, and the **bootloader** (not the app) arms the
+    /// swap after a reset — so the node never reclaims the flash to drive an updater itself.
+    /// Kept as a general resource-reclaim accessor.
+    pub fn into_kv(self) -> Kv<'static> {
+        self.kv
     }
 
     /// The active spectrum-access mode ([`Access::Duty`] unless AFA/FHSS was enabled).
@@ -529,6 +565,10 @@ impl Net {
         if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
             return false;
         }
+        // A valid ACK may advertise a pending downlink (FOTA "update available", §Phase 4).
+        if hdr.flags & flags::DOWNLINK_PENDING != 0 {
+            self.downlink_pending_rx = true;
+        }
         // ACK payload: acked counter (4 LE) + rssi (1).
         let pl = &buf[range];
         pl.len() >= 4 && u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]) == counter
@@ -546,7 +586,8 @@ impl Net {
         payload[4] = rssi_dbm as i8 as u8;
         let hdr = Header {
             frame_type: FrameType::Ack,
-            flags: 0, // downlink-pending added with the pull mechanism (Step 13)
+            // Advertise a pending FOTA downlink if the gateway has one (docs/fota.md).
+            flags: if self.downlink_pending { flags::DOWNLINK_PENDING } else { 0 },
             src: self.my_id,
             dest,
             counter: ack_counter,

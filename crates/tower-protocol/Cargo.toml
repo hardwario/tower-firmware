@@ -15,3 +15,12 @@ postcard = { version = "1.0", default-features = false }
 cobs = { version = "0.3", default-features = false }
 # Bounded collections for the candidate/field lists; `serde` feature for (de)ser.
 heapless = { version = "0.9", default-features = false, features = ["serde"] }
+# Embedded Ed25519 (Cortex-M-friendly; the same crate embassy-boot uses for its
+# ed25519-salty verify). Only pulled in by the `verify` feature, so pure-wire consumers
+# (e.g. the host CLI's parsing) don't take a crypto dependency. The firmware enables it
+# to verify a signed FOTA `Manifest` before arming a swap (docs/fota.md).
+salty = { version = "0.3", optional = true }
+
+[features]
+# Device-side FOTA signature verification: `fota::verify_signed`. Pulls `salty`.
+verify = ["dep:salty"]

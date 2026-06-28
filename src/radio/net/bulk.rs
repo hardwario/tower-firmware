@@ -26,6 +26,10 @@ const BULK_IDLE: Duration = Duration::from_secs(30);
 const BULK_RESP_WINDOW: Duration = Duration::from_millis(250);
 /// Requester BULK_REQ repetitions per chunk before giving up.
 const BULK_REQ_REPS: u8 = 6;
+/// How often [`Net::bulk_fetch_to_flash`] persists its high-water mark (every N chunks =
+/// N·64 B). A power-cut/stall re-pulls at most this much; the value trades EEPROM writes
+/// (a same-size in-place rewrite of one cell) against re-pull on resume. 32 ≈ 2 KB.
+const HWM_PERSIST_CHUNKS: usize = 32;
 /// One serve-loop receive slice on the sender side.
 const BULK_SERVE_SLICE: Duration = Duration::from_millis(500);
 
@@ -208,11 +212,12 @@ impl Net {
                     && dhdr.bulk_index == Some(k as u32)
                 {
                     let off = k * BULK_CHUNK;
-                    // Bound to the announced length: a peer-controlled (authenticated,
-                    // but possibly buggy) `dlen` must never feed the sink past
-                    // `total_len` — e.g. a full 64 B last chunk for a 65 B total.
-                    if off + dlen > total_len {
-                        continue; // malformed chunk; retry within reps
+                    // Require exactly the expected chunk length (full BULK_CHUNK, or the
+                    // remainder for the last chunk): a peer-controlled (authenticated but
+                    // possibly buggy) or short (e.g. host-proxy miss) `dlen` must never feed
+                    // the sink a partial/over-long chunk — retry instead.
+                    if dlen != (total_len - off).min(BULK_CHUNK) {
+                        continue; // wrong-size chunk; retry within reps
                     }
                     if !sink.consume(off, &dbuf[..dlen]).await {
                         return None; // sink aborted (e.g. flash write failed)
@@ -228,6 +233,140 @@ impl Net {
             }
         }
         Some(received)
+    }
+
+    /// Fetch a bulk transfer from `src` **straight into a program-flash slot**, with **resume**
+    /// — the FOTA staging pull (docs/fota.md). Functionally [`bulk_fetch_into`] with the
+    /// sink built in: each chunk is programmed into the slot through the network layer's *own*
+    /// [`Flash`](embassy_stm32::flash::Flash) (which `Net` owns via its
+    /// [`Kv`](crate::storage::Kv)), so there is no borrow conflict with the `&mut self` radio
+    /// calls — the flash is touched only *between* receives, never held across one.
+    ///
+    /// `base`/`size` are flash offsets/lengths of the destination slot (e.g.
+    /// [`DFU_OFFSET`](crate::fota::DFU_OFFSET) / [`DFU_SIZE`](crate::fota::DFU_SIZE)). `start`
+    /// is the resume offset (bytes already staged from a prior call): `start == 0` erases the
+    /// slot up front and pulls the whole image; `start > 0` **skips the erase** and re-requests
+    /// only from chunk `start/BULK_CHUNK`. If `progress_key` is `Some`, the running staged
+    /// count is persisted there (u32 LE) every [`HWM_PERSIST_CHUNKS`] chunks and at the end —
+    /// the high-water mark a duty stall or power-cut resumes from.
+    ///
+    /// Returns the total bytes **contiguously staged** (`start` + newly received); it equals
+    /// the announced length when the image is complete, or less if a chunk stalled (duty limit
+    /// / loss / flash error) — the caller persists that as the HWM and retries to resume.
+    ///
+    /// No hashing here: the **bootloader** recomputes SHA-256 over the staged DFU and checks it
+    /// against the signed manifest before swapping (docs/fota.md).
+    pub async fn bulk_fetch_to_flash(
+        &mut self,
+        src: u32,
+        base: u32,
+        size: u32,
+        start: u32,
+        progress_key: Option<u16>,
+    ) -> usize {
+        use crate::fota::{Stage, WRITE_SIZE};
+
+        let w = WRITE_SIZE as usize;
+        let key = self.key_for(src);
+        // Wait for the bulk-announce (identical handshake to bulk_fetch_into).
+        let mut abuf = [0u8; 8];
+        let (total_len, session) = loop {
+            let Some((hdr, plen)) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await
+            else {
+                return start as usize; // no announce — no progress, resume next time
+            };
+            if hdr.frame_type == FrameType::Data
+                && hdr.flags & flags::BULK_ANNOUNCE != 0
+                && hdr.src == src
+                && hdr.dest == self.my_id
+                && plen >= 8
+            {
+                let len = u32::from_le_bytes([abuf[0], abuf[1], abuf[2], abuf[3]]) as usize;
+                let s = u32::from_le_bytes([abuf[4], abuf[5], abuf[6], abuf[7]]);
+                break (len, s);
+            }
+        };
+        if total_len as u32 > size {
+            return start as usize; // image too large for the slot
+        }
+        let start = (start as usize).min(total_len); // clamp a stale HWM
+        if start == 0 {
+            // Fresh start: erase the destination for the announced length (one short flash
+            // borrow, released before the radio loop). A resume keeps the staged bytes.
+            if Stage::new(self.kv.storage_mut().flash_mut(), base, size)
+                .erase(total_len as u32)
+                .is_err()
+            {
+                return 0;
+            }
+        }
+
+        let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
+        let mut received = start;
+        let mut since_persist = 0usize;
+        for k in (start / BULK_CHUNK)..n_chunks {
+            let req_counter = self.tx_counter; // one counter per chunk; retransmits reuse it
+            let req_hdr = Header {
+                frame_type: FrameType::BulkReq,
+                flags: 0,
+                src: self.my_id,
+                dest: src,
+                counter: req_counter,
+                bulk_index: Some(k as u32),
+            };
+            let req_payload = session.to_le_bytes();
+            let mut got = false;
+            for _ in 0..BULK_REQ_REPS {
+                if !self.tx_frame(&key, &req_hdr, &req_payload).await {
+                    continue;
+                }
+                let mut dbuf = [0u8; BULK_CHUNK];
+                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await
+                    && dhdr.frame_type == FrameType::BulkData
+                    && dhdr.src == src
+                    && dhdr.dest == self.my_id
+                    && dhdr.counter == session
+                    && dhdr.bulk_index == Some(k as u32)
+                {
+                    let off = k * BULK_CHUNK;
+                    // Require exactly the expected chunk length (full BULK_CHUNK, or the
+                    // remainder for the last chunk). Rejecting a short/long chunk — e.g. a
+                    // host-proxy serve that couldn't fetch the bytes in time — makes the node
+                    // retransmit its BULK_REQ rather than program a gap into the image.
+                    if dlen != (total_len - off).min(BULK_CHUNK) {
+                        continue; // wrong-size chunk; retry within reps
+                    }
+                    // Program the chunk — padding a partial tail up to a flash word.
+                    let mut padded = [0u8; BULK_CHUNK];
+                    padded[..dlen].copy_from_slice(&dbuf[..dlen]);
+                    let plen = dlen.div_ceil(w) * w;
+                    if Stage::new(self.kv.storage_mut().flash_mut(), base, size)
+                        .program(off as u32, &padded[..plen])
+                        .is_err()
+                    {
+                        break; // flash write failed — stop; the HWM lets a retry resume
+                    }
+                    received += dlen;
+                    got = true;
+                    break;
+                }
+            }
+            self.advance_tx_counter();
+            if !got {
+                break; // chunk stalled (duty / loss) — stop; resume from the HWM next time
+            }
+            since_persist += 1;
+            if since_persist >= HWM_PERSIST_CHUNKS {
+                since_persist = 0;
+                if let Some(k) = progress_key {
+                    let _ = self.kv.set_bytes(k, &(received as u32).to_le_bytes());
+                }
+            }
+        }
+        if let Some(k) = progress_key {
+            let _ = self.kv.set_bytes(k, &(received as u32).to_le_bytes());
+        }
+        received
     }
 
     /// Seal `hdr`+`payload` under `key` and transmit it (no ACK), metered by the

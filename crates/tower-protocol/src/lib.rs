@@ -17,6 +17,7 @@
 #![no_std]
 
 pub mod crc;
+pub mod fota;
 pub mod msg;
 
 pub use msg::*;
@@ -48,9 +49,18 @@ pub enum MsgType {
     ShellResponse = 4,
     ShellCompletions = 5,
     Dropped = 6,
+    /// FOTA host-proxy: the target (a FOTA gateway) asks the host for image/manifest
+    /// bytes. **Raw** payload (not postcard): `offset(4, LE) ‖ len(2, LE)` — `offset ==
+    /// u32::MAX` ([`fota::FOTA_MANIFEST_OFFSET`]) requests the signed manifest. See
+    /// `docs/fota.md` "host-proxy".
+    FotaReq = 7,
     // host -> target
     ShellCommand = 16,
     ShellComplete = 17,
+    /// FOTA host-proxy reply: the host returns the requested bytes. **Raw** payload (not
+    /// postcard): `offset(4, LE) ‖ bytes…` (offset echoes the request, or `u32::MAX` for
+    /// the manifest).
+    FotaData = 18,
 }
 
 impl MsgType {
@@ -63,8 +73,10 @@ impl MsgType {
             4 => Self::ShellResponse,
             5 => Self::ShellCompletions,
             6 => Self::Dropped,
+            7 => Self::FotaReq,
             16 => Self::ShellCommand,
             17 => Self::ShellComplete,
+            18 => Self::FotaData,
             _ => return None,
         })
     }
@@ -107,6 +119,38 @@ pub fn encode_frame<T: Serialize>(
     if body + CRC_LEN > MAX_FRAME {
         return Err(Error::Encode);
     }
+    let crc = crc::crc32_ieee(&inner[..body]);
+    inner[body..body + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
+    let inner_len = body + CRC_LEN;
+
+    if cobs::max_encoding_length(inner_len) + 1 > out.len() {
+        return Err(Error::Overflow);
+    }
+    let enc = cobs::encode(&inner[..inner_len], out);
+    out[enc] = 0x00;
+    Ok(enc + 1)
+}
+
+/// Like [`encode_frame`] but the payload is **raw bytes**, not postcard-serialized — for
+/// message types whose payload is a fixed binary layout ([`MsgType::FotaReq`] /
+/// [`MsgType::FotaData`]), so a host implementation needs only COBS + CRC, no postcard.
+/// The frame is otherwise identical (`ver_type ‖ seq ‖ payload ‖ crc`, COBS-wrapped), so
+/// [`decode_frame`] reads it back the same way and returns `payload` as the raw slice.
+pub fn encode_frame_raw(
+    msg_type: MsgType,
+    seq: u16,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let mut inner = [0u8; MAX_FRAME];
+    inner[0] = (PROTOCOL_VERSION << 5) | (msg_type as u8 & 0x1F);
+    inner[1..3].copy_from_slice(&seq.to_le_bytes());
+
+    let body = HDR + payload.len();
+    if body + CRC_LEN > MAX_FRAME {
+        return Err(Error::Encode);
+    }
+    inner[HDR..body].copy_from_slice(payload);
     let crc = crc::crc32_ieee(&inner[..body]);
     inner[body..body + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
     let inner_len = body + CRC_LEN;

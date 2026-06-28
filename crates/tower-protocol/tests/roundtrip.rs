@@ -258,13 +258,33 @@ fn empty_payload_roundtrips() {
 
 #[test]
 fn msg_type_from_u8_is_exhaustive() {
-    for v in [0u8, 1, 2, 3, 4, 5, 6, 16, 17] {
+    for v in [0u8, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18] {
         assert!(MsgType::from_u8(v).is_some(), "type {v} should be known");
         assert_eq!(MsgType::from_u8(v).unwrap() as u8, v, "round-trip discriminant");
     }
-    for v in [7u8, 8, 14, 15, 18, 19, 31, 100, 255] {
+    for v in [8u8, 9, 14, 15, 19, 20, 31, 100, 255] {
         assert!(MsgType::from_u8(v).is_none(), "type {v} should be unknown");
     }
+}
+
+#[test]
+fn raw_frame_roundtrips() {
+    // A raw (non-postcard) payload encodes and decodes back byte-for-byte.
+    let payload = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x12, 0x34];
+    let mut out = [0u8; MAX_WIRE];
+    let n = tower_protocol::encode_frame_raw(MsgType::FotaReq, 7, &payload, &mut out).unwrap();
+
+    let mut dec = FrameDecoder::new();
+    for &b in &out[..n] {
+        if let Some(inner) = dec.push(b) {
+            let (ty, seq, p) = decode_frame(inner).unwrap();
+            assert_eq!(ty, MsgType::FotaReq);
+            assert_eq!(seq, 7);
+            assert_eq!(p, &payload);
+            return;
+        }
+    }
+    panic!("no frame decoded");
 }
 
 #[test]

@@ -1,0 +1,19 @@
+[package]
+name = "fota-sign"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Host CLI that signs a HARDWARIO TOWER firmware image into a signed FOTA manifest (Ed25519 over the shared tower-protocol Manifest). Carries a DEV key for bring-up; supply a real key for production. See docs/fota.md."
+
+# Standalone host tool — NOT a workspace member (the workspace targets thumbv6m). Build /
+# run via `just fota-sign ...` which passes the host target explicitly.
+
+[dependencies]
+# Host-side Ed25519 signer. Deterministic (RFC 8032) — no RNG needed to sign. The device
+# verifies the same signatures with `salty` (tower-protocol's `verify` feature).
+ed25519-dalek = "2"
+# Image hashing — same SHA-256 the device folds over the staged image.
+sha2 = "0.10"
+# The shared Manifest layout (so signer + device agree byte-for-byte). The `verify`
+# feature pulls salty so the interop test can confirm dalek-signed -> salty-verified.
+tower-protocol = { path = "../../crates/tower-protocol", features = ["verify"] }

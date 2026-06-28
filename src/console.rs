@@ -2,7 +2,8 @@
 //!
 //! The UART is **always framed** (`tower-protocol`): every log record, `print!`,
 //! event, and the boot `Hello` is a COBS+CRC+postcard frame on USART1 TX (PA9) at
-//! 115200. `jolt monitor` therefore shows binary — use the `tower` host CLI.
+//! 115200. A raw serial monitor therefore shows binary — use the `tower` host CLI
+//! (`tower logs`), which decodes the frames.
 //!
 //! Architecture (docs/console.md):
 //!   * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an
@@ -36,7 +37,7 @@ use serde::Serialize;
 use tower_protocol::msg::{
     Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse,
 };
-use tower_protocol::{MAX_WIRE, MsgType, PROTOCOL_VERSION, encode_frame};
+use tower_protocol::{MAX_WIRE, MsgType, PROTOCOL_VERSION, encode_frame, encode_frame_raw};
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
 const MAX_MSG: usize = 192;
@@ -84,6 +85,9 @@ enum Outgoing {
     },
     /// Completion result — all fields borrow the `'static` command tree, so no copy.
     Completions(ShellCompletions<'static>),
+    /// FOTA host-proxy request (a gateway asks the host for image/manifest bytes). Sent as
+    /// a **raw** frame; the reply arrives as a `FotaData` frame on RX. See `docs/fota.md`.
+    FotaReq { offset: u32, len: u16 },
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
@@ -287,6 +291,12 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
             Outgoing::Completions(c) => {
                 send(&mut tx, &mut seq, MsgType::ShellCompletions, c).await
             }
+            Outgoing::FotaReq { offset, len } => {
+                let mut payload = [0u8; 6];
+                payload[0..4].copy_from_slice(&offset.to_le_bytes());
+                payload[4..6].copy_from_slice(&len.to_le_bytes());
+                send_raw(&mut tx, &mut seq, MsgType::FotaReq, &payload).await
+            }
         }
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
@@ -305,6 +315,24 @@ async fn send<T: Serialize>(
 ) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame(msg_type, *seq, payload, &mut buf) {
+        Ok(n) => {
+            *seq = seq.wrapping_add(1);
+            let _ = tx.write_all(&buf[..n]).await;
+        }
+        Err(_) => bump_dropped(),
+    }
+}
+
+/// Like [`send`] but for a **raw** (non-postcard) payload — used by `FotaReq`, whose
+/// payload is a fixed binary layout the host parses without postcard.
+async fn send_raw(
+    tx: &mut BufferedUartTx<'static>,
+    seq: &mut u16,
+    msg_type: MsgType,
+    payload: &[u8],
+) {
+    let mut buf = [0u8; MAX_WIRE];
+    match encode_frame_raw(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
             *seq = seq.wrapping_add(1);
             let _ = tx.write_all(&buf[..n]).await;
@@ -377,6 +405,15 @@ pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
 /// nothing is copied. Async — never dropped. Used by the shell engine.
 pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
     TX_CHANNEL.send(Outgoing::Completions(c)).await;
+}
+
+/// Send a FOTA host-proxy request to the host (a gateway asking for image/manifest bytes).
+/// Goes through the writer task as a raw `FotaReq` frame; the host replies with a `FotaData`
+/// frame the caller reads off the RX half (see `fota::HostProxySource`). Async — applies
+/// backpressure and is never dropped (so the request always goes out). `offset ==
+/// `[`tower_protocol::fota::FOTA_MANIFEST_OFFSET`] requests the signed manifest.
+pub async fn send_fota_req(offset: u32, len: u16) {
+    TX_CHANNEL.send(Outgoing::FotaReq { offset, len }).await;
 }
 
 /// Emit the boot `Hello` (firmware string for the host header) and a banner log.

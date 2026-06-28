@@ -1,2 +1,4 @@
 .DS_Store
 /target
+# tools/fota-sign is an out-of-workspace std binary with its own build dir.
+/tools/fota-sign/target
