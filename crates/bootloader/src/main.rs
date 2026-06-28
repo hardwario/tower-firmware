@@ -2,11 +2,15 @@
 //!
 //! Blocking loader that is also the **FOTA authenticity gate**. On a clean boot it checks
 //! the MANIFEST region: if the app staged a signed manifest there, the loader reads the DFU
-//! image, verifies the **Ed25519 signature** over the manifest and that **SHA-256(DFU) ==
-//! manifest.sha256**, and only then arms the embassy-boot swap (`mark_updated`). It clears
-//! the manifest request *before* arming, so a power loss never re-installs. Then it lets
-//! embassy-boot perform (or resume, or revert) the A/B swap and jumps to ACTIVE. The app
-//! confirms a good boot with `mark_booted`.
+//! image, verifies the **Ed25519 signature** over the manifest and that the **image digest**
+//! (a 256-bit truncation of SHA-512) matches `manifest.sha256`, and only then arms the
+//! embassy-boot swap (`mark_updated`). It clears the manifest request *before* arming, so a
+//! power loss never re-installs. Then it lets embassy-boot perform (or resume, or revert) the
+//! A/B swap and jumps to ACTIVE. The app confirms a good boot with `mark_booted`.
+//!
+//! The image digest reuses **salty's SHA-512** — the hash the Ed25519 verify already links —
+//! truncated to 32 bytes, so the loader carries one hash engine instead of two (no separate
+//! `sha2`). The signer (`tools/fota-sign`) computes the identical truncated SHA-512.
 //!
 //! Verifying **here** (not in the app) keeps salty out of the duplicated A/B app slots — the
 //! flash win that makes a radio + crypto OTA node fit the L083 — and runs the verify on the
@@ -31,20 +35,20 @@ use embassy_stm32::flash::{BANK1_REGION, Flash, WRITE_SIZE};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
-use sha2::{Digest, Sha256};
+use salty::Sha512;
 use tower_protocol::fota::{SIGNED_LEN, VENDOR_PUBKEY, split_signed, verify_signed};
 
 // Flash offsets — kept in lockstep with src/fota/mod.rs and the memory.x files (the
 // bootloader can't depend on the `tower` lib, so the layout is duplicated here, like
 // memory.x). The DFU image is read raw; the MANIFEST region holds the staged signed manifest.
-const MANIFEST_OFFSET: u32 = 0x0_B000;
+const MANIFEST_OFFSET: u32 = 0x0_8000;
 const MANIFEST_SIZE: u32 = 2 * 1024;
-const DFU_OFFSET: u32 = 0x1_D000;
+const DFU_OFFSET: u32 = 0x1_B800;
 // The image is *staged* in DFU (72 KB, deliberately one page larger than ACTIVE for the
 // embassy-boot swap) but *runs* from ACTIVE after the swap, so the real bound on image size is
 // the ACTIVE slot, not the DFU slot. Verifying against ACTIVE_SIZE rejects an image in the
 // (ACTIVE_SIZE, DFU_SIZE] gap that would pass the hash yet be truncated when copied to ACTIVE.
-const ACTIVE_SIZE: u32 = 70 * 1024;
+const ACTIVE_SIZE: u32 = 76 * 1024;
 
 /// Per-product hardware id this loader accepts images for. `0` (the default) accepts an image
 /// with **any** `manifest.hw_id` — the single-product case (the Core Module). Set this to a
@@ -105,8 +109,9 @@ fn main() -> ! {
 }
 
 /// Authenticate a staged image: the signed manifest must verify against [`VENDOR_PUBKEY`]
-/// (Ed25519) **and** the SHA-256 of the first `manifest.size` DFU bytes must equal the
-/// manifest's `sha256`. Returns `false` on any mismatch or read error.
+/// (Ed25519) **and** the image digest of the first `manifest.size` DFU bytes — a 256-bit
+/// truncation of SHA-512, computed with salty's already-linked hash — must equal the manifest's
+/// `sha256` field. Returns `false` on any mismatch or read error.
 ///
 /// Scope of the gate: **authenticity + integrity + post-swap fit + (opt-in) cross-product**.
 /// The `manifest.hw_id` check is gated on [`DEVICE_HW_ID`] (default `0` = accept any, the
@@ -128,7 +133,7 @@ fn verify_staged<F: NorFlash + ReadNorFlash, M: RawMutex>(
     if manifest.size > ACTIVE_SIZE {
         return false;
     }
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha512::new();
     let mut buf = [0u8; 128];
     let mut off = 0u32;
     while off < manifest.size {
@@ -142,8 +147,9 @@ fn verify_staged<F: NorFlash + ReadNorFlash, M: RawMutex>(
         hasher.update(&buf[..n]);
         off += n as u32;
     }
-    let got: [u8; 32] = hasher.finalize().into();
-    got == manifest.sha256
+    // Truncate the 64-byte SHA-512 to the manifest's 32-byte digest field.
+    let full = hasher.finalize();
+    full[..32] == manifest.sha256
 }
 
 #[unsafe(no_mangle)]

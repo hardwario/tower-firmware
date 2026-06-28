@@ -12,7 +12,7 @@
 //!   [`storage`](crate::storage) lacks: it wraps the **EEPROM**, while FOTA needs
 //!   **program-flash** erase/program on the same `Flash` handle).
 //! - [`FlashSink`] — a [`BulkSink`](crate::radio::net::BulkSink) that streams a received
-//!   image straight into the **DFU** slot with constant RAM, folding a running SHA-256
+//!   image straight into the **DFU** slot with constant RAM, folding the running image digest
 //!   (used standalone by `examples/fota_stage.rs`; the OTA pull instead writes through
 //!   `Net`'s own flash — see [`Net::bulk_fetch_to_flash`](crate::radio::net::Net::bulk_fetch_to_flash)).
 //! - [`pull_update`] / [`PullOutcome`] — the node OTA driver: pull the signed manifest,
@@ -22,8 +22,8 @@
 //!   fetches each chunk from the **host** over the console link on demand.
 //!
 //! The signature/hash check is **not** here — it runs in the immutable **bootloader**
-//! (`crates/bootloader`), which reads the stashed manifest, verifies Ed25519 + SHA-256
-//! against the staged DFU image, and only then arms the A/B swap. Keeping salty out of the
+//! (`crates/bootloader`), which reads the stashed manifest, verifies Ed25519 + the image
+//! digest against the staged DFU image, and only then arms the A/B swap. Keeping salty out of the
 //! *duplicated* A/B app slots is the flash saving that makes a radio + crypto OTA node fit
 //! the L083. See `docs/fota.md` for the full as-built picture (design, layout, and caveats).
 
@@ -57,18 +57,21 @@ pub use tower_protocol::fota::{
 // the bootloader's `prepare_boot` panic at runtime → a silent/dead loader, so the guards
 // below turn that into a build error.
 //
-// The BOOTLOADER is large (32 KB): it carries the Ed25519 verify (salty) + SHA-256, because
-// the signature/hash check runs **bootloader-side**, not in the app (docs/fota.md). That keeps
-// salty out of the *duplicated* A/B app slots — net flash saving — and runs the verify on a
-// clean stack. The MANIFEST region is where the app stashes the signed
-// manifest for the bootloader to read before a swap.
+// The BOOTLOADER is 20 KB: it carries the Ed25519 verify (salty) + a SHA-512-based image
+// digest, because the signature/hash check runs **bootloader-side**, not in the app
+// (docs/fota.md). That keeps salty out of the *duplicated* A/B app slots — net flash saving —
+// and runs the verify on a clean stack. (It reuses salty's SHA-512 for the image digest rather
+// than linking a second hash crate; the loader binary is ≈16 KB, so 20 KB leaves ~4 KB margin —
+// guarded by `just size-check` so it can't silently erode toward the brick-on-overflow limit.)
+// The 12 KB reclaimed from the old 32 KB region went to ACTIVE/DFU. The MANIFEST region is where
+// the app stashes the signed manifest for the bootloader to read before a swap.
 //
 //   region            abs addr        offset     size    purpose
-//   BOOTLOADER        0x0800_0000     0x00000    32 KB    loader + Ed25519/SHA verify + swap
-//   BOOTLOADER_STATE  0x0800_8000     0x08000    12 KB    embassy-boot swap magic + progress
-//   MANIFEST          0x0800_B000     0x0B000     2 KB    signed manifest staged for the loader
-//   ACTIVE            0x0800_B800     0x0B800    70 KB    running app (linked here)
-//   DFU               0x0801_D000     0x1D000    72 KB    staging slot (must be > ACTIVE)
+//   BOOTLOADER        0x0800_0000     0x00000    20 KB    loader + Ed25519/SHA-512 verify + swap
+//   BOOTLOADER_STATE  0x0800_5000     0x05000    12 KB    embassy-boot swap magic + progress
+//   MANIFEST          0x0800_8000     0x08000     2 KB    signed manifest staged for the loader
+//   ACTIVE            0x0800_8800     0x08800    76 KB    running app (linked here)
+//   DFU               0x0801_B800     0x1B800    78 KB    staging slot (must be > ACTIVE)
 //   (spare)           0x0802_F000     0x2F000     4 KB    margin / future
 // ---------------------------------------------------------------------------
 
@@ -83,26 +86,26 @@ pub const WRITE_SIZE: u32 = 4;
 
 /// Bootloader region offset.
 pub const BOOTLOADER_OFFSET: u32 = 0x0_0000;
-/// Bootloader region size (holds the loader + salty Ed25519 verify + SHA-256).
-pub const BOOTLOADER_SIZE: u32 = 32 * 1024;
+/// Bootloader region size (holds the loader + salty Ed25519 verify + SHA-512 image digest).
+pub const BOOTLOADER_SIZE: u32 = 20 * 1024;
 /// embassy-boot swap-state region offset.
-pub const STATE_OFFSET: u32 = 0x0_8000;
+pub const STATE_OFFSET: u32 = 0x0_5000;
 /// embassy-boot swap-state region size (sized for ACTIVE's per-page progress; see guards).
 pub const STATE_SIZE: u32 = 12 * 1024;
 /// MANIFEST region offset — where the app stashes the signed [`Manifest`] for the bootloader
 /// to read + verify before swapping (the only image metadata that crosses the app↔loader
 /// boundary). Read raw by the loader; written by the app via [`Stage`].
-pub const MANIFEST_OFFSET: u32 = 0x0_B000;
+pub const MANIFEST_OFFSET: u32 = 0x0_8000;
 /// MANIFEST region size (one or more pages; holds a [`SIGNED_LEN`]-byte signed manifest).
 pub const MANIFEST_SIZE: u32 = 2 * 1024;
 /// ACTIVE (running app) slot offset — the app's `memory.x` FLASH origin.
-pub const ACTIVE_OFFSET: u32 = 0x0_B800;
+pub const ACTIVE_OFFSET: u32 = 0x0_8800;
 /// ACTIVE (running app) slot size.
-pub const ACTIVE_SIZE: u32 = 70 * 1024;
+pub const ACTIVE_SIZE: u32 = 76 * 1024;
 /// DFU (staging) slot offset — where a downloaded image is written before swap.
-pub const DFU_OFFSET: u32 = 0x1_D000;
+pub const DFU_OFFSET: u32 = 0x1_B800;
 /// DFU (staging) slot size — **larger** than ACTIVE (embassy-boot swap needs the slack).
-pub const DFU_SIZE: u32 = 72 * 1024;
+pub const DFU_SIZE: u32 = 78 * 1024;
 /// Spare region offset (margin / future use).
 pub const SPARE_OFFSET: u32 = 0x2_F000;
 /// Total program flash on the STM32L083CZ.

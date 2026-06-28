@@ -55,7 +55,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing — see [`docs/radio.md`](docs/radio.md) |
-| `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + SHA-256 install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
+| `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + image-digest install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
 | `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
 Also in the workspace: `crates/bootloader/` (the embassy-boot A/B FOTA bootloader) and

@@ -12,8 +12,14 @@ description = "Host CLI that signs a HARDWARIO TOWER firmware image into a signe
 # Host-side Ed25519 signer. Deterministic (RFC 8032) — no RNG needed to sign. The device
 # verifies the same signatures with `salty` (tower-protocol's `verify` feature).
 ed25519-dalek = "2"
-# Image hashing — same SHA-256 the device folds over the staged image.
+# Image hashing — SHA-512 truncated to 256 bits, the same digest the device computes (the
+# bootloader reuses salty's SHA-512; see `image_digest`).
 sha2 = "0.10"
 # The shared Manifest layout (so signer + device agree byte-for-byte). The `verify`
 # feature pulls salty so the interop test can confirm dalek-signed -> salty-verified.
 tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0", features = ["verify"] }
+
+[dev-dependencies]
+# Device-side SHA-512, to assert the host (sha2) and device (salty) image digests agree
+# (`host_and_device_image_digest_agree`). The same crate + version the bootloader uses.
+salty = "0.3"

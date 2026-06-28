@@ -1093,7 +1093,7 @@ dependencies = [
  "embassy-stm32",
  "embassy-sync",
  "embedded-storage",
- "sha2",
+ "salty",
  "tower-protocol",
 ]
 

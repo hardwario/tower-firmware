@@ -24,11 +24,19 @@
 
 use embassy_time::{Instant, Timer};
 use log::{error, info};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 use tower::fota::{DFU_OFFSET, DFU_SIZE, FlashSink, Stage};
 use tower::radio::net::{BULK_CHUNK, BulkSink};
 use tower::{app, board::Board};
 use tower_protocol::crc;
+
+/// Reference image digest matching [`FlashSink::finish`]: SHA-512 truncated to 256 bits.
+fn digest32(h: Sha512) -> [u8; 32] {
+    let full: [u8; 64] = h.finalize().into();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&full[..32]);
+    out
+}
 
 /// Image sizes to stage (all ≤ DFU slot). `65535` is not a multiple of 64 or 4, so it
 /// drives the last-chunk pad path; the rest are clean firmware-sized blobs. L0 flash
@@ -71,7 +79,7 @@ async fn run(b: Board) {
             // Log progress ~every 25% (and yield there) so a multi-second stage is visibly
             // alive and the console drains — the blocking flash writes never yield on their own.
             let step = (n_chunks / 4).max(1);
-            let mut ref_hasher = Sha256::new();
+            let mut ref_hasher = Sha512::new();
             let mut expect_crc = 0xFFFF_FFFFu32;
             let mut feed_ok = true;
             let mut chunk = [0u8; BULK_CHUNK];
@@ -96,7 +104,7 @@ async fn run(b: Board) {
 
             let received = sink.received() as usize;
             let staged_sha = sink.finish(); // releases the &mut flash borrow
-            let expect_sha: [u8; 32] = ref_hasher.finalize().into();
+            let expect_sha = digest32(ref_hasher);
             let expect_crc = !expect_crc;
 
             if !feed_ok {
@@ -106,7 +114,7 @@ async fn run(b: Board) {
 
             // --- read back from flash and re-verify independently ---
             let mut rstage = Stage::new(&mut flash, DFU_OFFSET, DFU_SIZE);
-            let mut rb_hasher = Sha256::new();
+            let mut rb_hasher = Sha512::new();
             let mut rb_crc = 0xFFFF_FFFFu32;
             let mut byte_errors: u32 = 0;
             let mut read_ok = true;
@@ -128,7 +136,7 @@ async fn run(b: Board) {
                 rb_crc = crc::crc32_update(rb_crc, &buf[..n]);
                 o += n;
             }
-            let rb_sha: [u8; 32] = rb_hasher.finalize().into();
+            let rb_sha = digest32(rb_hasher);
             let rb_crc = !rb_crc;
 
             let ms = t0.elapsed().as_millis().max(1);

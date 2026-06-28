@@ -5,16 +5,16 @@
    0x0800_0000), which embassy-boot's FirmwareUpdater/FirmwareState from_linkerfile reads
    (the app uses them for get_state/mark_booted — it no longer verifies; the bootloader does).
    Slots are NOT equal — DFU is larger than ACTIVE (embassy-boot swap requirement). The app
-   stashes the signed manifest in the MANIFEST region (offset 0x0B000, not a linker region
+   stashes the signed manifest in the MANIFEST region (offset 0x08000, not a linker region
    here) for the bootloader to verify before swapping.
 
    NOTE 1 K = 1 KiBi = 1024 bytes. */
 MEMORY
 {
-  BOOTLOADER       : ORIGIN = 0x08000000, LENGTH = 32K
-  BOOTLOADER_STATE : ORIGIN = 0x08008000, LENGTH = 12K
-  FLASH            : ORIGIN = 0x0800B800, LENGTH = 70K  /* ACTIVE — the app runs here */
-  DFU              : ORIGIN = 0x0801D000, LENGTH = 72K
+  BOOTLOADER       : ORIGIN = 0x08000000, LENGTH = 20K
+  BOOTLOADER_STATE : ORIGIN = 0x08005000, LENGTH = 12K
+  FLASH            : ORIGIN = 0x08008800, LENGTH = 76K  /* ACTIVE — the app runs here */
+  DFU              : ORIGIN = 0x0801B800, LENGTH = 78K
   RAM        (rwx) : ORIGIN = 0x20000000, LENGTH = 20K
 }
 

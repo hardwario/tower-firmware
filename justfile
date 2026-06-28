@@ -28,17 +28,41 @@ _feat_flag := if features == "" { "" } else { "--features " + features }
 # default target (thumbv6m, see .cargo/config.toml) has no libtest / panic handler.
 host := `rustc -vV | sed -n 's/^host: //p'`
 
+# Bootloader code budget (bytes) for `size-check`: the 20 KB BOOTLOADER region (BOOTLOADER_SIZE
+# in src/fota/mod.rs) minus a 2 KB reserve. The loader is ≈16 KB today; this warns well before it
+# could overflow its partition — which on the SWD-less Radio Dongle is an unrecoverable brick.
+boot_budget := "18432"
+
 # List available recipes.
 default:
     @just --list
+
+# Guard the bootloader against silently eating its flash-region margin. The linker only hard-fails
+# at the *full* 20 KB region (= brick on the SWD-less Dongle), so this trips ~2 KB earlier
+# (`boot_budget`) as an early warning. Wired into `just test`; also run it in CI. If it fires:
+# trim the loader, or *deliberately* raise `boot_budget` together with BOOTLOADER_SIZE.
+size-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    text=$(cargo size --release -p tower-bootloader 2>/dev/null | tail -1 | awk '{print $1}')
+    region=20480
+    printf 'bootloader: %s B used / %s B region (budget %s B; %s B reserve to the hard limit)\n' \
+        "$text" "$region" "{{boot_budget}}" "$(( region - {{boot_budget}} ))"
+    if [ "$text" -gt {{boot_budget}} ]; then
+        printf 'ERROR: bootloader %s B exceeds the %s B budget — only %s B from the %s B brick limit.\n' \
+            "$text" "{{boot_budget}}" "$(( region - text ))" "$region" >&2
+        printf 'Trim the loader, or deliberately raise boot_budget + BOOTLOADER_SIZE (src/fota/mod.rs).\n' >&2
+        exit 1
+    fi
 
 # Run the firmware's host-side tests on the host triple (the firmware itself is no_std):
 #   - `tower-kv`    : the EEPROM key-value codec (record format / scan / in-place update /
 #                     compaction + power-loss edges), extracted so it CAN be unit-tested.
 #   - `fota-sign`   : host↔device Ed25519 interop (dalek↔salty) + the DEV_SEED↔VENDOR_PUBKEY pin.
 # The shared wire-protocol codec/manifest tests live in their own repo —
-# github.com/hardwario/tower-protocol (`cargo test --features verify` there).
-test *ARGS:
+# github.com/hardwario/tower-protocol (`cargo test --features verify` there). Also runs
+# `size-check` (the bootloader flash-budget guard) so margin erosion fails the test run.
+test *ARGS: size-check
     cargo test -p tower-kv --target {{host}} {{ARGS}}
     cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{ARGS}}
 

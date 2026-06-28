@@ -5,10 +5,10 @@
 //!       (`tower::fota::VENDOR_PUBKEY`).
 //!
 //!   just fota-sign sign --version <N> --in <image.bin> --out <image.fmanifest> [--hw-id <H>]
-//!       Hash the image (SHA-256), build a Manifest {version, size, sha256, hw_id}, sign
-//!       its canonical bytes with the vendor Ed25519 key, and write the 116-byte signed
-//!       manifest blob. Deliver it alongside the image; the device verifies it (signature
-//!       + image hash + rollback) before arming a swap.
+//!       Hash the image (SHA-512 truncated to 256 bits — see `image_digest`), build a
+//!       Manifest {version, size, sha256, hw_id}, sign its canonical bytes with the vendor
+//!       Ed25519 key, and write the 116-byte signed manifest blob. Deliver it alongside the
+//!       image; the device verifies it (signature + image hash + rollback) before a swap.
 //!
 //! The key here is a fixed **DEV** seed for bring-up — anyone can read it, so images it
 //! signs are NOT production-trustworthy. For production, replace `DEV_SEED` with a key
@@ -17,12 +17,26 @@
 use std::process::exit;
 
 use ed25519_dalek::{Signer, SigningKey};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 use tower_protocol::fota::Manifest;
 
 /// DEV signing seed (32 bytes) — bring-up only; see the module note. The matching public
 /// key (`fota-sign pubkey`) is baked into the firmware.
 const DEV_SEED: [u8; 32] = *b"tower-fota dev signing key v1!!!";
+
+/// The image digest carried in `Manifest::sha256`: **SHA-512 truncated to 256 bits**.
+/// Truncating a 512-bit hash to 256 is standard practice (cf. SHA-512/256) and lets the
+/// device bootloader reuse salty's SHA-512 — the hash its Ed25519 verify already links —
+/// instead of a second hash engine. `crates/bootloader` computes the identical value over the
+/// staged image, so the two MUST agree (see the `host_and_device_image_digest_agree` test).
+fn image_digest(image: &[u8]) -> [u8; 32] {
+    let mut h = Sha512::new();
+    h.update(image);
+    let full: [u8; 64] = h.finalize().into();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&full[..32]);
+    out
+}
 
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&DEV_SEED)
@@ -79,9 +93,7 @@ fn cmd_sign(args: &[String]) {
     let out_path = out_path.unwrap_or_else(|| die("--out is required"));
 
     let image = std::fs::read(&in_path).unwrap_or_else(|e| die(&format!("read {in_path}: {e}")));
-    let mut hasher = Sha256::new();
-    hasher.update(&image);
-    let sha256: [u8; 32] = hasher.finalize().into();
+    let sha256 = image_digest(&image);
 
     let manifest = Manifest {
         flags: 0,
@@ -143,15 +155,12 @@ mod tests {
         let pubkey = key.verifying_key().to_bytes();
 
         let image = b"a pretend firmware image of some length";
-        let mut h = Sha256::new();
-        h.update(image);
-        let sha256: [u8; 32] = h.finalize().into();
         let m = Manifest {
             flags: 0,
             hw_id: 0,
             version: 7,
             size: image.len() as u32,
-            sha256,
+            sha256: image_digest(image),
         };
 
         let sig = key.sign(&m.encode());
@@ -164,5 +173,27 @@ mod tests {
         let mut bad = signed;
         bad[20] ^= 0x01;
         assert!(verify_signed(&pubkey, &bad).is_none());
+    }
+
+    /// The signer's image digest (sha2's SHA-512, truncated) MUST equal the device's (salty's
+    /// SHA-512, truncated — fed in 128-byte chunks exactly as the bootloader reads flash). Both
+    /// are standard SHA-512, but the digest crosses two independent implementations, so — like
+    /// the dalek↔salty signature pin above — this guards against either drifting (a mismatch
+    /// would make every signed image fail the device's hash check). The image spans multiple
+    /// 128-byte blocks plus a partial tail to exercise salty's block buffering.
+    #[test]
+    fn host_and_device_image_digest_agree() {
+        let image: std::vec::Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let host = image_digest(&image);
+        let mut dev = salty::Sha512::new();
+        for chunk in image.chunks(128) {
+            dev.update(chunk);
+        }
+        let dev_full = dev.finalize();
+        assert_eq!(
+            host,
+            dev_full[..32],
+            "host sha2 vs device salty SHA-512 digest drift"
+        );
     }
 }

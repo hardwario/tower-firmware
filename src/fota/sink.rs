@@ -4,16 +4,17 @@
 //! a [`BulkSink`] fed one ≤64 B chunk at a time by
 //! [`Net::bulk_fetch_into`](crate::radio::net::Net::bulk_fetch_into), but instead of
 //! merely checking bytes it **programs them into program flash** via [`Stage`] and
-//! folds a running **SHA-256** over the image. RAM stays constant regardless of image
-//! size — only the chunk, a one-word pad buffer, and the hash state are held.
+//! folds the running **image digest** over the image. RAM stays constant regardless of
+//! image size — only the chunk, a one-word pad buffer, and the hash state are held.
 //!
-//! The whole-image hash it computes is what the bootloader will check against the
-//! signed [`Manifest`](super::Manifest) before swapping (docs/fota.md). Per-chunk wire
-//! integrity is already handled by the CCM-authenticated transport; this hash is the
-//! end-to-end check that the bytes landed in flash intact.
+//! The whole-image digest it computes is what the bootloader checks against the signed
+//! [`Manifest`](super::Manifest) before swapping (docs/fota.md) — the SDK's image digest is
+//! **SHA-512 truncated to 256 bits** (the bootloader reuses salty's SHA-512; the host signer
+//! matches). Per-chunk wire integrity is already handled by the CCM-authenticated transport;
+//! this digest is the end-to-end check that the bytes landed in flash intact.
 
 use log::error;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 
 use super::{Error, Stage, WRITE_SIZE, round_up};
 use crate::radio::net::{BULK_CHUNK, BulkSink};
@@ -24,7 +25,7 @@ use crate::radio::net::{BULK_CHUNK, BulkSink};
 /// [`finish`](Self::finish).
 pub struct FlashSink<'f, 'd> {
     stage: Stage<'f, 'd>,
-    hasher: Sha256,
+    hasher: Sha512,
     /// Bytes consumed and programmed so far (also the next expected offset).
     written: u32,
     /// Total announced for this transfer (set in [`begin`](BulkSink::begin)).
@@ -38,7 +39,7 @@ impl<'f, 'd> FlashSink<'f, 'd> {
     pub fn new(stage: Stage<'f, 'd>) -> Self {
         Self {
             stage,
-            hasher: Sha256::new(),
+            hasher: Sha512::new(),
             written: 0,
             total: 0,
             failed: false,
@@ -57,13 +58,14 @@ impl<'f, 'd> FlashSink<'f, 'd> {
         self.failed
     }
 
-    /// Finalize and return the SHA-256 of the bytes consumed (the staged image hash).
-    /// Consumes the sink — call [`received`](Self::received) first if you need the size.
+    /// Finalize and return the image digest of the bytes consumed (SHA-512 truncated to 256
+    /// bits — the SDK's manifest digest; see the module docs). Consumes the sink — call
+    /// [`received`](Self::received) first if you need the size.
     #[must_use]
     pub fn finish(self) -> [u8; 32] {
-        let digest = self.hasher.finalize();
+        let digest = self.hasher.finalize(); // 64-byte SHA-512
         let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
+        out.copy_from_slice(&digest[..32]);
         out
     }
 
@@ -99,7 +101,7 @@ impl BulkSink for FlashSink<'_, '_> {
             self.failed = true;
             return false;
         }
-        self.hasher = Sha256::new();
+        self.hasher = Sha512::new();
         self.written = 0;
         self.total = total;
         self.failed = false;
