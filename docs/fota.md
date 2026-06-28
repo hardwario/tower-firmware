@@ -245,9 +245,9 @@ rejected by the length-checked bulk fetcher and the node's `BULK_REQ` retransmit
 fetch — a slow/dead host degrades to a failed pull, never a corrupt image.
 
 Host side: **`tower fota serve --image <bin> --manifest <fmanifest>`** opens the serial port and
-answers `FotaReq` with `FotaData` (reconnects if the gateway resets). Build it via the
-`.cargo/config.toml` paths override to the local `tower-protocol` until the public tag is
-bumped.
+answers `FotaReq` with `FotaData` (reconnects if the gateway resets). It ships in the `tower` CLI
+([tower-cli](https://github.com/hardwario/tower-cli)), which pins the shared `tower-protocol`
+crate at the same tag as the firmware.
 
 ---
 
@@ -367,16 +367,15 @@ as-built design above.
   update.
 - **The vendor key is a DEV key** (published seed in `fota-sign`) — replace before shipping.
 - **STM32L0 erases to `0x00`** — any embassy-boot use needs `flash-erase-zero`.
-- **`tower fota serve` is local-dev** until the public `tower-protocol` tag is bumped to include
-  the FOTA message types (tower-cli pins it; the paths override covers dev).
 
 ---
 
 ## Testing
 
-- **Host (`just test`):** the manifest codec, Ed25519 accept/tamper/old/wrong-key rejection,
-  rollback gate, the raw-frame round-trip, and a vendor-key validity check
-  (`crates/tower-protocol`).
+- **Host (`just test`):** the `fota-sign` signer — host↔device Ed25519 interop (dalek signs,
+  salty verifies) and the `DEV_SEED`↔`VENDOR_PUBKEY` pin. The manifest codec + Ed25519
+  accept/tamper/old/wrong-key rejection + rollback gate run in the
+  [`tower-protocol`](https://github.com/hardwario/tower-protocol) repo (`cargo test --features verify`).
 - **On hardware:** `fota_stage` (staging), `fota_app` (swap + confirm + revert), and `fota_ota`
   (full real-firmware swap: pull → bootloader verify → swap → confirm) — all verified on Radio
   Dongles + host.
@@ -390,9 +389,9 @@ as-built design above.
   `installed_version`/`set_installed_version`), `hostproxy.rs` (`HostProxySource`).
 - **Staging pull / flash reclaim:** `src/radio/net/bulk.rs` (`bulk_fetch_to_flash`),
   `src/radio/net/mod.rs` (`into_kv`, `set/take_downlink_pending`), `src/storage.rs`.
-- **Shared manifest + host-proxy protocol:** `crates/tower-protocol/src/fota.rs` (`Manifest`,
-  `verify_signed`, `VENDOR_PUBKEY`, `FOTA_MANIFEST_OFFSET`), `src/lib.rs` (`FotaReq`/`FotaData`,
-  `encode_frame_raw`).
+- **Shared manifest + host-proxy protocol:** the [`tower-protocol`](https://github.com/hardwario/tower-protocol)
+  repo — `src/fota.rs` (`Manifest`, `verify_signed`, `VENDOR_PUBKEY`, `FOTA_MANIFEST_OFFSET`),
+  `src/lib.rs` (`FotaReq`/`FotaData`, `encode_frame_raw`).
 - **Bootloader (the verifier):** `crates/bootloader/` (`main.rs`, `memory.x`, `Cargo.toml`).
 - **App linking:** `link/memory-fota-app.x` + `build.rs`, `fota-active` Cargo feature.
 - **Host tools:** `tools/fota-sign/` (signer), `tools/fota_merge.py` (merge). `tower fota serve`

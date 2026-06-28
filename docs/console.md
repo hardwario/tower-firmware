@@ -24,12 +24,12 @@ architecture, wire protocol, the firmware + host APIs, and a worked example per 
 
 | Piece | Where | What it is |
 |---|---|---|
-| **Firmware SDK** | this repo: `src/console.rs`, `src/shell.rs`, `crates/tower-protocol` | the on-MCU console: logging backend, event/shell APIs, the framed UART transport |
+| **Firmware SDK** | this repo: `src/console.rs`, `src/shell.rs` | the on-MCU console: logging backend, event/shell APIs, the framed UART transport |
 | **`tower` host CLI** | `github.com/hardwario/tower-cli` (binary `tower`) | decodes the framed link on your machine: logs / events / shell / TUI |
-| **`tower-protocol`** | `crates/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
+| **`tower-protocol`** | `github.com/hardwario/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
 
 Because `tower-protocol` is shared, the wire format cannot drift between firmware
-and host. The host pins it to the firmware git tag `tower-protocol-v0.1.0`.
+and host. Both ends pin it to the same git tag (currently `v0.2.0`).
 
 ## Hardware
 
@@ -469,18 +469,18 @@ then drive with `tower shell` / `tower logs` / `tower console`.
 
 ## Testing
 
-The codec is the only host-runnable part (the rest is `no_std`):
+The wire codec lives in its own repo now
+([`tower-protocol`](https://github.com/hardwario/tower-protocol)); its host tests run there:
 
 ```sh
-just test          # cargo test -p tower-protocol --features verify on the host — 29 tests
+cargo test --features verify   # in a tower-protocol checkout — 29 tests (20 codec + 9 FOTA)
 ```
 
 These cover round-trips for every message, boundary frame sizes, the decoder's
 overflow/reset/resync state machine, exhaustive type mapping, and **9000 deterministic
-bit-flip fuzz iterations** proving every single-bit corruption is detected. (`cargo
-test` alone fails — the workspace default target is `thumbv6m`, which has no test
-harness; `just test` builds for the host.) The firmware paths (logs, events, shell,
-settings, completion, panic, persistence) are verified on the dongle.
+bit-flip fuzz iterations** proving every single-bit corruption is detected. (They run on the
+host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware-side paths
+(logs, events, shell, settings, completion, panic, persistence) are verified on the dongle.
 
 ## Known limitations & caveats
 
@@ -493,7 +493,7 @@ settings, completion, panic, persistence) are verified on the dongle.
 - **Setting values can't contain `/`, space, or tab** — those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
-  change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`, and the host pins the
-  new tag. Today's tag is `tower-protocol-v0.1.0`.
+  change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
+  pin the new tag in lockstep. Today's tag is `v0.2.0`.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.
