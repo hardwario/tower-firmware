@@ -15,11 +15,11 @@ use tower::{app, board::Board};
 async fn run(_b: Board) {
     let mut pass = true;
 
-    // ToA: ⌈(4+4+1+30+2)·8·1000/19200⌉ = ⌈17.08⌉ = 18 ms (rounded up, §2.6).
+    // ToA: ⌈(4+4+1+30+2)·8·1000/19200⌉ = ⌈17.08⌉ = 18 ms (rounded up, docs/radio.md).
     let toa = frame_toa_ms(30);
     info!(target: "duty_kat", "ToA(30B) = {} ms (expect 18)", toa);
     pass &= toa == 18;
-    // Max non-bulk frame (96 B): ⌈44.58⌉ = 45 ms (§2.6).
+    // Max non-bulk frame (96 B): ⌈44.58⌉ = 45 ms (docs/radio.md).
     let toa_max = frame_toa_ms(96);
     info!(target: "duty_kat", "ToA(96B) = {} ms (expect 45)", toa_max);
     pass &= toa_max == 45;

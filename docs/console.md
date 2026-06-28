@@ -12,8 +12,8 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > print / event streaming with overflow accounting, chunked shell responses, the
 > settings framework (5 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
-> implemented and tested on real hardware. The codec has 19 host tests including
-> 9000 fuzz iterations (`just test`).
+> implemented and tested on real hardware. The codec has 20 host tests including
+> 9000 fuzz iterations; `just test` runs 29 in all (adding the 9 FOTA-manifest tests).
 
 This is the standalone reference for using and maintaining the console subsystem —
 architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
@@ -335,7 +335,7 @@ The port auto-detects when exactly one USB serial device is present; otherwise p
 
 | Command | What |
 |---|---|
-| `devices` | list serial ports (USB VID:PID + product) |
+| `devices` | list all serial ports (one bare port name per line) |
 | `logs [--no-colors] [--send <text>]` | stream logs + `print!` + the `Dropped` marker; `--send` pokes the device's RX once on connect |
 | `events [--no-colors]` | stream structured events |
 | `shell` | interactive REPL; TAB completes (via `rustyline`); `exit`/`quit` to leave |
@@ -472,7 +472,7 @@ then drive with `tower shell` / `tower logs` / `tower console`.
 The codec is the only host-runnable part (the rest is `no_std`):
 
 ```sh
-just test          # cargo test -p tower-protocol on the host triple — 19 tests
+just test          # cargo test -p tower-protocol --features verify on the host — 29 tests
 ```
 
 These cover round-trips for every message, boundary frame sizes, the decoder's

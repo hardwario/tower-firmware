@@ -1,4 +1,4 @@
-//! net_p2p — peer-to-peer confirmed exchange under a shared link key (§7.2).
+//! net_p2p — peer-to-peer confirmed exchange under a shared link key (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-peer-a just flash net_p2p   # initiator (PING)
 //!   TOWER_FEATURES=role-peer-b just flash net_p2p   # responder (PONG)

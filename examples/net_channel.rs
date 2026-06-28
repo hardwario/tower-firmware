@@ -1,4 +1,4 @@
-//! net_channel — secured confirmed link on a NON-default channel (§2.2/§8).
+//! net_channel — secured confirmed link on a NON-default channel (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash net_channel   # sender on ch2
 //!   TOWER_FEATURES=role-gateway just flash net_channel   # receiver on ch2
@@ -8,7 +8,7 @@
 //! programming (CHNUM/CHSPACE) and the per-channel VCO auto-calibration in
 //! `config::apply` — if the synthesizer didn't re-lock on the new channel, nothing
 //! would link. Re-flash with `CHANNEL` = 0/1/2 to sweep the EU 868 sub-band and
-//! confirm each is usable (the "shared-channel rule": both ends must agree, §8).
+//! confirm each is usable (the "shared-channel rule": both ends must agree, docs/radio.md).
 //! Both boards MUST use the same channel.
 
 #![no_std]

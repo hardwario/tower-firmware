@@ -25,7 +25,7 @@ pub const FHSS_DWELL_BURST_MS: u32 = 100;
 pub const FHSS_PERMIL: u32 = 10;
 
 /// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
-/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — §2.6. Rounded
+/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — docs/radio.md. Rounded
 /// up so the regulatory budget is never under-counted.
 #[must_use]
 pub fn frame_toa_ms(frame_len: usize) -> u32 {

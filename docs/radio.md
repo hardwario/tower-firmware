@@ -24,8 +24,10 @@ SPIRIT1 ↔ STM32L083CZ wiring (from the board, see `src/board.rs`):
 | SCLK / MOSI / MISO | PB3 / PB5 / PB4 | SPI1, mode 0, 4 MHz |
 | nIRQ | PA7 | active-low, EXTI line 7 |
 
-Crystal is **50 MHz** (not a TCXO). Band: **EU 868** (ch0/1/2 = 868.1/868.3/868.5 MHz);
-US 915 is a future option behind the same `Band` abstraction.
+Crystal is **50 MHz** (not a TCXO). Band is runtime-selectable via the `Band` abstraction:
+**EU 868** (ch0/1/2 = 868.1/868.3/868.5 MHz, 1 % duty) and **US 915** (ch0/1/2 =
+915.0/915.2/915.4 MHz). 915 single-channel is bench-only; FCC §15.247 compliance comes from
+the FHSS mode (see *Spectrum-access modes* below).
 
 ## Building & flashing
 
@@ -331,7 +333,7 @@ sets this; it is unrelated to the RF/demod registers.
 | Device ID / crystal | part 304 / version 48 · **50 MHz** (not a TCXO) |
 | Bands / channels | EU 868 & US 915 · 3 per band |
 | EU 868 channels | 868.1 / 868.3 / 868.5 MHz (200 kHz spacing; "g1" ≤ +14 dBm ERP, ≤ 1 % duty) |
-| US 915 channels | 915.0 / 915.3 / 915.6 MHz (300 kHz) — single-channel is **bench-only**; use FHSS for a compliant US link |
+| US 915 channels | 915.0 / 915.2 / 915.4 MHz (200 kHz spacing) — single-channel is **bench-only**; use FHSS for a compliant US link |
 | Modulation / bit rate / deviation / BT | GFSK / 19 200 bps / 20 kHz / 1 |
 | RX bandwidth | ~216 kHz (wide; narrow via AFC_CORR — see Design rationale) |
 | Sync / CRC / preamble | `0xDB624715` / 16-bit `0x1021` / 4 B |
@@ -339,13 +341,13 @@ sets this; it is unrelated to the RF/demod registers.
 | Header (non-bulk / bulk) / CCM tag | 14 B / 17 B / 8 B |
 | Payload (single / bulk chunk) | ≤ 74 B / 64 B |
 | Nonce | 13 B (`src ‖ counter ‖ bulk_index ‖ 0x0000`) |
-| Time-on-air (max frame / ACK) | ≈ 44.6 ms / ≈ 17.5 ms |
+| Time-on-air (max frame / ACK) | ≈ 44.6 ms (96 B) / ≈ 15.8 ms (27 B) |
 | TX power (default / max) | +11.6 dBm |
 | CSMA RSSI threshold / max backoff | −90 dBm / ~100 ms |
 | ACK window / inter-rep backoff / RX→TX turnaround | 200 ms / random 0–100 ms / ~20 ms |
 | Confirmed repetitions (range / default) | 1–10 / 3 |
 | Confirmed latency (N=3 / N=10) | ≈ 1.06 s / ≈ 3.55 s worst case |
-| Replay counter | 32-bit; starts at 1; hard-stop + re-key at 2³²−1 |
+| Replay counter | 32-bit; starts at 1; **saturating** at 2³²−1 (fail-closed, not wrap) — re-key well before |
 | Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers |
 | Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
 | Bulk idle timeout | 30 s |
@@ -402,8 +404,12 @@ the header, including the counter), **then** compare to the per-peer last-seen a
 update it — so a forged high counter can't poison replay state, and tampered frames are
 dropped before the network layer acts. On key install the TX counter starts at **1**
 (`0` = never sent) and last-seen at **0**; a **re-key resets both** (a new key is a
-disjoint nonce space, so old ciphertext can't replay under it). EEPROM key storage is
-only as safe as the chip's readout protection — **enable flash RDP for production**.
+disjoint nonce space, so old ciphertext can't replay under it). The counter **saturates**
+at 2³²−1 instead of wrapping: at the ceiling it sticks, and the strict `counter > last-seen`
+rule makes the peer reject every further frame as a replay, so the link fails **closed**
+rather than silently reusing a low nonce — re-key well before then (≈136 yr at 1 Hz, so not
+a practical limit). EEPROM key storage is only as safe as the chip's readout protection —
+**enable flash RDP for production**.
 
 ## Known limitations & caveats
 

@@ -8,7 +8,7 @@
 //! **joiner chooses its own ID** and keeps it — the host does NOT assign it; the
 //! host only learns that ID and the key it handed out, to install the peer. Both
 //! log the key (they must match) and the joiner's ID (the same on both sides),
-//! proving the handshake. (The key is sniffable in-window by design; see §7.6.)
+//! proving the handshake. (The key is sniffable in-window by design; see docs/radio.md.)
 
 #![no_std]
 #![no_main]

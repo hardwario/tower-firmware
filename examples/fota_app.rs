@@ -1,4 +1,4 @@
-//! fota_app — Phase 2 app: links into ACTIVE, boots under the bootloader, and exercises
+//! fota_app — A/B swap bench app: links into ACTIVE, boots under the bootloader, and exercises
 //! the full A/B swap path on the bench (docs/fota.md). **Button-free** — drives itself
 //! from the boot state, so it runs on the Radio Dongle (no user button) as well as the
 //! Core Module.
@@ -44,7 +44,7 @@ use tower::fota::{ACTIVE_OFFSET, ACTIVE_SIZE, FLASH_BASE};
 use tower::{app, board::Board};
 
 /// Reported firmware version — bumped by the `fota-v2` feature (cosmetic; a real v1→v2
-/// change comes from staging a different image over OTA in Phase 4).
+/// change comes from staging a different image over OTA — see fota_ota).
 #[cfg(not(feature = "fota-v2"))]
 const VERSION: u32 = 1;
 #[cfg(feature = "fota-v2")]

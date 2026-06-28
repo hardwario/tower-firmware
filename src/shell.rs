@@ -48,6 +48,9 @@ use crate::console;
 use crate::storage::{CONSOLE_SETTINGS_BASE, Kv, Storage};
 
 const MAX_LINE: usize = 96;
+/// Shell-response build buffer. Must stay equal to `console::MAX_RESP` (the transport's
+/// per-message cap): `console::shell_response` re-clips to that, so if this grew larger the
+/// excess would be silently dropped there.
 const RESP_CAP: usize = 256;
 /// Largest value (bytes) a setting can hold (and a `Str` setting's `max`).
 pub const MAX_SETTING: usize = 64;

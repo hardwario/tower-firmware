@@ -1,4 +1,4 @@
-//! edge_frame_limits — MTU + malformed/forged-frame rejection KAT (§3/§6/§9).
+//! edge_frame_limits — MTU + malformed/forged-frame rejection KAT (docs/radio.md).
 //! Single board, no radio link: drives the frame codec + AES-CCM at its
 //! boundaries and asserts each accept/reject, printing one PASS/FAIL verdict.
 //!

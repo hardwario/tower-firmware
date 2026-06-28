@@ -113,7 +113,7 @@ impl Net {
     /// transmits on the first one the channel-assessment finds free; a confirmed
     /// send then waits for the ACK on that same channel. Returns `Busy` only if
     /// every channel was busy/in-off-time for a whole attempt. One TX counter is
-    /// consumed (§6), matching [`send`](Self::send).
+    /// consumed (docs/radio.md), matching [`send`](Self::send).
     pub async fn afa_send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
         if self.access != Access::Afa {
             return SendResult::WrongMode;

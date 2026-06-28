@@ -1,4 +1,4 @@
-//! fota_stage — Phase 1 staging verify: program flash <- generated image (docs/fota.md).
+//! fota_stage — staging verify: program flash <- generated image (docs/fota.md).
 //!
 //!   just flash fota_stage      # single board, no radio, no role feature
 //!   just run   fota_stage      # flash + open the monitor (catches the boot banner)
@@ -10,7 +10,7 @@
 //! and folding a running SHA-256. Then the image is **read back from flash** and
 //! independently re-hashed + CRC'd + byte-compared against the reference pattern.
 //!
-//! What it validates (the Phase 1 exit criteria): a full-size image lands in DFU
+//! What it validates (the staging exit criteria): a full-size image lands in DFU
 //! flash byte-perfect; the SHA the sink computed matches the SHA recomputed from
 //! flash; survives the real erase/program path at size; RAM is constant (only a
 //! chunk, a page read buffer, and two hash states — no image buffer).
@@ -88,7 +88,7 @@ async fn run(b: Board) {
                     feed_ok = false;
                     break;
                 }
-                if k > 0 && k % step == 0 && n_chunks > 64 {
+                if k > 0 && k.is_multiple_of(step) && n_chunks > 64 {
                     info!(target: "fota", "{} B: staging {}%", size, k * 100 / n_chunks);
                     Timer::after_millis(10).await; // let the console writer task run
                 }

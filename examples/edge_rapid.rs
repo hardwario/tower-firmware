@@ -1,10 +1,10 @@
-//! edge_rapid — back-to-back transfers: one-at-a-time, monotonic counters (§4/§6).
+//! edge_rapid — back-to-back transfers: one-at-a-time, monotonic counters (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash edge_rapid   # hammers confirmed sends
 //!   TOWER_FEATURES=role-gateway just flash edge_rapid   # checks ordering
 //!
 //! The node fires confirmed sends with NO inter-send delay (the Net serializes
-//! them — one transfer at a time, §4). The gateway asserts every accepted frame's
+//! them — one transfer at a time, docs/radio.md). The gateway asserts every accepted frame's
 //! counter is strictly greater than the last (monotonic, no reorder, no double-
 //! accept) — a violation latches a FAIL. Gaps (lost frames) are fine; what must
 //! never happen is an out-of-order or repeated counter being accepted.
@@ -61,7 +61,7 @@ async fn run(b: Board) {
                 SendResult::Delivered => ok += 1,
                 _ => fail += 1,
             }
-            if seq % 20 == 0 {
+            if seq.is_multiple_of(20) {
                 info!(target: "rapid", "sent {} (delivered={} other={})", seq, ok, fail);
             }
             seq = seq.wrapping_add(1);
@@ -84,7 +84,7 @@ async fn run(b: Board) {
                     error!(target: "rapid", "ORDER VIOLATION: counter {} after {} ✗", rx.counter, p);
                 }
                 last = Some(rx.counter);
-                if accepted % 20 == 0 {
+                if accepted.is_multiple_of(20) {
                     info!(
                         target: "rapid",
                         "accepted={} last_cnt={} violations={} {}",

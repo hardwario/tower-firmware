@@ -134,7 +134,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
             // Random payload size 9..=74, edges (9, 74) emphasized.
             let pick = (r >> 5) % 10;
             let size = match pick {
-                0 | 1 | 2 => 9,
+                0..=2 => 9,
                 3 | 4 => 74,
                 _ => 9 + ((r >> 9) % 66) as usize,
             };
@@ -142,8 +142,8 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
             let reps = 1 + ((r >> 20) % 10) as u8;
             payload[0..4].copy_from_slice(&seq.to_le_bytes());
             payload[4] = size as u8;
-            for i in 9..size {
-                payload[i] = (seq as u8).wrapping_add(i as u8);
+            for (i, slot) in payload.iter_mut().enumerate().take(size).skip(9) {
+                *slot = (seq as u8).wrapping_add(i as u8);
             }
             let crc = crc32(&payload[9..size]);
             payload[5..9].copy_from_slice(&crc.to_le_bytes());
@@ -163,7 +163,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
         } else {
             led.set_high(); // latched FAIL
         }
-        if iters % 50 == 0 {
+        if iters.is_multiple_of(50) {
             let _ = net.kv().set_bytes(KV_COUNT, &(cum_ok + ok).to_le_bytes());
             let _ = net.kv().set_bytes(KV_FAIL, &fails.to_le_bytes());
             info!(
@@ -220,7 +220,7 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
             } else {
                 led.set_high();
             }
-            if accepted % 25 == 0 {
+            if accepted.is_multiple_of(25) {
                 let _ = net.kv().set_bytes(KV_COUNT, &(cum_acc + accepted).to_le_bytes());
                 let _ = net.kv().set_bytes(KV_FAIL, &fails.to_le_bytes());
                 info!(

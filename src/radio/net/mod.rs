@@ -1,7 +1,7 @@
 //! Network layer: confirmed delivery, ACK, retransmit and replay protection
 //! over the secured frame codec (docs/radio.md).
 //!
-//! `Net` owns the radio + CCM and serializes one transfer at a time (§4). A
+//! `Net` owns the radio + CCM and serializes one transfer at a time (docs/radio.md). A
 //! *node* `send(confirmed)` transmits a DATA frame then opens a 200 ms ACK
 //! window, retransmitting the byte-identical frame on timeout (random 0–100 ms
 //! backoff, 1–10 reps). A *receiver* `recv()` authenticates the frame, applies
@@ -9,13 +9,13 @@
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
 //! Keys are per-peer: [`Net::add_peer`] binds an `id` to its own AES key and
-//! replay lane (star ≤64 / P2P ≤8, §7.2); any unregistered peer falls back to the
+//! replay lane (star ≤64 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
-//! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, §7.4).
+//! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, docs/radio.md).
 //!
 //! This module holds the core (peer table + confirmed unicast). The two larger
 //! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
-//! transfer, §7.5) and [`pairing`] (OTA 3-way JOIN, §7.6).
+//! transfer, docs/radio.md) and [`pairing`] (OTA 3-way JOIN, docs/radio.md).
 
 mod afa;
 mod bulk;
@@ -36,7 +36,7 @@ use super::duty::{self, DutyGovernor};
 use super::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
 use crate::storage::Kv;
 
-/// ACK window the sender waits for an acknowledgement (§7.3). The measured ACK
+/// ACK window the sender waits for an acknowledgement (docs/radio.md). The measured ACK
 /// round-trip is ~35 ms (turnaround + ACK ToA + RX set-up), so 200 ms is ample.
 const ACK_WINDOW: Duration = Duration::from_millis(200);
 /// Turnaround the receiver waits before sending the ACK, so the sender has
@@ -54,10 +54,10 @@ const MAX_BACKOFF_MS: u32 = 100;
 
 /// TX-counter reserve block: persist the watermark only once per `RESERVE`
 /// transfers, and on boot resume *at* the watermark (> any value actually sent,
-/// so a counter is never reused; ≤ one block is skipped per reboot, §7.4).
+/// so a counter is never reused; ≤ one block is skipped per reboot, docs/radio.md).
 const RESERVE: u32 = 1024;
 /// Receiver last-seen lazy-persist period: the replay window across a reboot is
-/// ≤ `P` transfers (§7.4).
+/// ≤ `P` transfers (docs/radio.md).
 const P: u32 = 32;
 /// EEPROM key-value keys for the persisted counter state.
 const KEY_WATERMARK: u16 = 0x5201;
@@ -70,7 +70,7 @@ pub const MAX_PEERS: usize = 64;
 /// Base Kv key for per-peer last-seen persistence (slot `i` → `KEY_LASTSEEN_BASE + i`).
 const KEY_LASTSEEN_BASE: u16 = 0x5300;
 
-/// A registered peer: its ID, per-peer AES key, and replay state (§7.2/§7.4).
+/// A registered peer: its ID, per-peer AES key, and replay state (docs/radio.md).
 #[derive(Clone, Copy)]
 struct Peer {
     id: u32,
@@ -157,13 +157,13 @@ pub struct Net {
     /// Default key for unregistered peers (see [`NetConfig::key`]).
     default_key: [u8; 16],
     /// Per-peer (id, key, last-seen) table; a registered peer overrides the
-    /// default key and gets its own replay lane (§7.2/§7.4).
+    /// default key and gets its own replay lane (docs/radio.md).
     peers: [Option<Peer>; MAX_PEERS],
     /// Replay last-seen for senders not in the peer table (the single-link lane).
     default_last_seen: u32,
     /// Accepted-transfer count on the default lane since its last persist.
     default_accepts: u32,
-    /// Monotonic TX counter, advanced by one per transfer (§6).
+    /// Monotonic TX counter, advanced by one per transfer (docs/radio.md).
     tx_counter: u32,
     /// Highest reserved (persisted) counter value; `tx_counter < reserve_limit`.
     reserve_limit: u32,
@@ -172,7 +172,7 @@ pub struct Net {
     /// EU duty-cycle governor (airtime budget for all TX).
     duty: DutyGovernor,
     /// Cached ACK bytes for the most recent confirmed RX, to re-send on a
-    /// byte-identical retransmit (§7.3).
+    /// byte-identical retransmit (docs/radio.md).
     cached_ack: [u8; MAX_FRAME],
     cached_ack_len: usize,
     /// The (src, acked counter) the cached ACK corresponds to (0 = none cached).
@@ -219,7 +219,7 @@ impl Net {
         let _ = kv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes());
         let last_seen = read_u32(&kv, KEY_LASTSEEN).unwrap_or(0);
 
-        // Duty policy follows the band: EU 1 %, US 915 unrestricted (§2.2).
+        // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/radio.md).
         let duty = match cfg.band {
             Band::Eu868 => DutyGovernor::eu(),
             Band::Us915 => DutyGovernor::us915(),
@@ -317,7 +317,7 @@ impl Net {
     /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
     /// its own replay lane. The peer's persisted last-seen is restored. Returns
     /// `false` only if the table is full (and the id is new) — check the return in
-    /// production code. Up to [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, §7.2).
+    /// production code. Up to [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, docs/radio.md).
     pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
         if let Some(i) = self.peer_slot(id) {
             self.peers[i].as_mut().unwrap().key = *key; // re-key in place
@@ -378,7 +378,7 @@ impl Net {
     }
 
     /// Record acceptance of `counter` from `src`: advance that lane's last-seen
-    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, §7.4).
+    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/radio.md).
     fn lane_accept(&mut self, src: u32, counter: u32) {
         match self.peer_slot(src) {
             Some(i) => {
@@ -401,17 +401,26 @@ impl Net {
 
     /// Advance the TX counter, re-reserving + persisting the next block when the
     /// current reserve is exhausted (the only TX-counter persistence path).
+    ///
+    /// **Saturating, not wrapping** — the counter is the CCM nonce input, so it must never
+    /// wrap back to a reused value. At the 2³²−1 ceiling (≈136 yr at 1 Hz — practically
+    /// unreachable) it sticks at `u32::MAX`; the strict `counter > last_seen` replay rule then
+    /// makes a peer reject every further frame as a replay, so the link fails **closed**
+    /// rather than silently reusing a low nonce. Re-key well before then.
     fn advance_tx_counter(&mut self) {
-        self.tx_counter = self.tx_counter.wrapping_add(1);
+        self.tx_counter = self.tx_counter.saturating_add(1);
+        if self.tx_counter == u32::MAX {
+            return; // ceiling reached: stop churning the reserve watermark (see above)
+        }
         if self.tx_counter >= self.reserve_limit {
-            self.reserve_limit = self.reserve_limit.wrapping_add(RESERVE);
+            self.reserve_limit = self.reserve_limit.saturating_add(RESERVE);
             let _ = self.kv.set_bytes(KEY_WATERMARK, &self.reserve_limit.to_le_bytes());
         }
     }
 
     /// Send `data` to `dest`. Confirmed sends open an ACK window and retransmit
     /// the byte-identical frame up to `reps` times; unconfirmed sends transmit
-    /// once. The transfer consumes exactly one TX counter value (§6).
+    /// once. The transfer consumes exactly one TX counter value (docs/radio.md).
     pub async fn send(
         &mut self,
         dest: u32,
@@ -425,7 +434,7 @@ impl Net {
             return SendResult::WrongMode;
         }
         if data.len() > MAX_PAYLOAD {
-            return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (§3)
+            return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/radio.md)
         }
         let counter = self.tx_counter;
         let hdr = Header {
@@ -448,10 +457,10 @@ impl Net {
         let mut result = SendResult::NotDelivered;
         for attempt in 0..reps {
             if attempt > 0 {
-                // Random 0–100 ms backoff before a retransmit (§7.3).
+                // Random 0–100 ms backoff before a retransmit (docs/radio.md).
                 Timer::after(Duration::from_millis(self.backoff_ms() as u64)).await;
             }
-            // Duty governor: every TX (incl. retransmits) counts (§2.2).
+            // Duty governor: every TX (incl. retransmits) counts (docs/radio.md).
             if !self.duty.try_tx(toa) {
                 result = SendResult::DutyLimited;
                 break;
@@ -565,7 +574,7 @@ impl Net {
         if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
             return false;
         }
-        // A valid ACK may advertise a pending downlink (FOTA "update available", §Phase 4).
+        // A valid ACK may advertise a pending downlink (FOTA "update available", docs/fota.md).
         if hdr.flags & flags::DOWNLINK_PENDING != 0 {
             self.downlink_pending_rx = true;
         }
@@ -575,7 +584,7 @@ impl Net {
     }
 
     /// Build, cache and transmit an ACK for a received confirmed frame. The ACK
-    /// uses the ACKer's *own* fresh counter (§6); the acknowledged counter rides
+    /// uses the ACKer's *own* fresh counter (docs/radio.md); the acknowledged counter rides
     /// in the payload.
     async fn send_ack(&mut self, dest: u32, acked: u32, rssi_dbm: i16) {
         // Let the sender finish its TX→RX turnaround before we transmit.
@@ -596,9 +605,9 @@ impl Net {
         let key = self.key_for(dest);
         let mut ack = [0u8; MAX_FRAME];
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &payload, &mut ack) {
-            // ACK airtime is governed too (§2.2); skip it if over budget — the
+            // ACK airtime is governed too (docs/radio.md); skip it if over budget — the
             // sender will retransmit. Cache it regardless for retransmit dedup.
-            self.advance_tx_counter(); // ACK consumes a counter (its own, §6)
+            self.advance_tx_counter(); // ACK consumes a counter (its own, docs/radio.md)
             self.cached_ack[..n].copy_from_slice(&ack[..n]);
             self.cached_ack_len = n;
             self.cached_ack_for = acked;

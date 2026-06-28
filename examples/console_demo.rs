@@ -1,4 +1,4 @@
-//! console_demo — Phase 1 framed-console test.
+//! console_demo — framed-console test.
 //!
 //! Logs at every level + a `println!`, every 2 s, after a boot burst that
 //! deliberately overflows the TX queue so the host shows a `Dropped` marker.

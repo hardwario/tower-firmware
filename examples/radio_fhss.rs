@@ -82,7 +82,7 @@ async fn run(b: Board) {
                     seq_of(rx.data()), s.channel, s.slot, rx.src, rx.rssi_dbm,
                     if rx.confirmed { " (ACKed)" } else { "" }
                 );
-            } else if s.slot % 30 == 0 {
+            } else if s.slot.is_multiple_of(30) {
                 info!(target: "fhss", "beaconing slot={} ch={} (no uplink)", s.slot, s.channel);
             }
         }

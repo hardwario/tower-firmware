@@ -1,4 +1,4 @@
-//! console_panic — Phase 1 panic-path test. Counts down, then panics: the panic
+//! console_panic — panic-path test. Counts down, then panics: the panic
 //! handler must emit one framed error record via the PAC (the executor is dead) so it
 //! still renders in `tower logs`. The countdown gives the host time to attach.
 
@@ -14,7 +14,7 @@ async fn run(_b: Board) {
         info!("alive — deliberate panic in {}s", i);
         Timer::after_secs(1).await;
     }
-    panic!("deliberate Phase-1 panic test");
+    panic!("deliberate panic-path test");
 }
 
 app!(run);

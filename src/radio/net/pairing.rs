@@ -1,4 +1,4 @@
-//! OTA pairing: 3-way JOIN under the fixed public PAIRING_KEY (§7.6). `impl Net`
+//! OTA pairing: 3-way JOIN under the fixed public PAIRING_KEY (docs/radio.md). `impl Net`
 //! block over [`super::Net`].
 //!
 //! The **joiner chooses its own ID** and keeps it; the host only hands out the
