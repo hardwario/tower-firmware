@@ -112,7 +112,7 @@ Little-endian frame, fits the 96-byte FIFO:
 ```
 
 - `ver_type`: bits[7:5] protocol version (=1), bits[4:0] frame type
-  (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`).
+  (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`).
 - `flags`: `CONFIRMED`, `DOWNLINK_PENDING`, `LAST_CHUNK`, `BULK_ANNOUNCE`.
 - The whole cleartext header is the CCM **AAD**; the payload is encrypted.
 - **Nonce** (13 B, not transmitted, reconstructed from the header):
@@ -161,6 +161,11 @@ if let Some(rx) = net.recv(Duration::from_secs(10)).await {
 }
 ```
 
+The auto-ACK cache holds only the **most recent** confirmed RX. In a busy star, a
+confirmed frame from another node between a node's original send and its retransmit
+evicts that node's cached ACK, so its retransmit isn't deduplicated and triggers a full
+re-send (still correct — never a re-delivery or nonce reuse, just extra airtime).
+
 **Counters, replay & persistence.** Every transfer consumes one
 monotonic TX counter; the counter feeds the nonce, so it must never repeat. The
 watermark is persisted *ahead* in blocks of `RESERVE=1024`, so after a reboot the
@@ -189,8 +194,10 @@ net.peer_count();  net.remove_peer(NODE_A);  net.peer_last_seen(NODE_B);
 
 **Bulk transfer / downlink pull.** Large blobs are *pulled*: the sender
 announces `(length, session)`, the requester pulls each ≤64 B chunk with a
-`BULK_REQ(index)` and reassembles. The session counter + 24-bit chunk index keep
-every chunk's nonce unique; the sender frees an idle session after 30 s.
+`BULK_REQ(index)` and reassembles. The sender reserves **two** TX counters — one for the
+announce frame and a separate `session` for every chunk — so the announce's nonce can
+never collide with chunk 0's; the `session` counter + 24-bit chunk index then keep each
+chunk's nonce unique. The sender frees an idle session after 30 s.
 
 ```rust
 net.bulk_serve(NODE_ID, &blob).await;              // sender (in-RAM slice)
@@ -214,8 +221,11 @@ net.bulk_fetch_into(GW_ID, &mut flash_writer).await;     // BulkSink: chunk → 
 ```
 
 **OTA pairing.** A 3-way JOIN under a fixed, **publicly-known** pairing key
-(`PAIRING_KEY`): `JOIN_REQ`(node id) → `JOIN_RESP`(per-node key) →
-`JOIN_CONFIRM`(node id), both sides committing only on the confirm. The **joining
+(`PAIRING_KEY`): `JOIN_REQ`(node id) → `JOIN_RESP`(per-node key ‖ challenge) →
+`JOIN_CONFIRM`(node id ‖ challenge), both sides committing only on the confirm. The host
+mints a fresh per-session **challenge** in the response that the joiner must echo in the
+confirm, so a confirm replayed from a prior session is rejected (anti-replay within the
+window — on top of CCM integrity; still no confidentiality or mutual auth). The **joining
 node chooses its own ID** and keeps it; the host only hands out the key (it does
 not assign the ID) and learns the node's ID to install the peer. The default
 window is one minute (`PAIRING_WINDOW`). The pairing key gives the JOIN frames

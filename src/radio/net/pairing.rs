@@ -3,9 +3,15 @@
 //!
 //! The **joiner chooses its own ID** and keeps it; the host only hands out the
 //! per-node key — it does NOT assign or override the ID. JOIN_REQ(node_id) →
-//! JOIN_RESP(key) → JOIN_CONFIRM(node_id). Both sides commit only after the
-//! confirm; a lost confirm leaves the host's window to time out (the entry is
-//! never installed) and the joiner retries within its window.
+//! JOIN_RESP(key ‖ challenge) → JOIN_CONFIRM(node_id ‖ challenge). Both sides commit
+//! only after the confirm; a lost confirm leaves the host's window to time out (the
+//! entry is never installed) and the joiner retries within its window.
+//!
+//! The host mints a fresh per-session **challenge** in the JOIN_RESP that the joiner
+//! must echo in the JOIN_CONFIRM. This is anti-*replay* within the window (a confirm
+//! captured from a prior session carries a stale challenge and is rejected) on top of
+//! CCM integrity — it does NOT add confidentiality or mutual auth (the challenge rides
+//! the public-key frames in the clear-after-decrypt payload).
 
 use embassy_time::{Duration, Instant, Timer};
 
@@ -47,8 +53,12 @@ impl Net {
                 continue;
             }
             let node_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let challenge = self.rand_u32(); // fresh per session; the confirm must echo it
 
-            // JOIN_RESP: the per-node key only (the joiner keeps its own ID).
+            // JOIN_RESP: the per-node key ‖ a fresh challenge (the joiner keeps its own ID).
+            let mut resp = [0u8; 20];
+            resp[..16].copy_from_slice(key);
+            resp[16..20].copy_from_slice(&challenge.to_le_bytes());
             let resp_hdr = Header {
                 frame_type: FrameType::JoinResp,
                 flags: 0,
@@ -58,15 +68,17 @@ impl Net {
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
-            self.tx_pair(&resp_hdr, key).await;
+            self.tx_pair(&resp_hdr, &resp).await;
             self.advance_tx_counter();
 
-            // Wait for the JOIN_CONFIRM (echoes node_id) — commit only on receipt.
+            // Wait for the JOIN_CONFIRM (echoes node_id ‖ challenge) — commit only when both
+            // match, so a confirm replayed from a prior session (stale challenge) is rejected.
             let mut cbuf = [0u8; 8];
             if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
                 && chdr.frame_type == FrameType::JoinConfirm
-                && cplen >= 4
+                && cplen >= 8
                 && u32::from_le_bytes([cbuf[0], cbuf[1], cbuf[2], cbuf[3]]) == node_id
+                && u32::from_le_bytes([cbuf[4], cbuf[5], cbuf[6], cbuf[7]]) == challenge
             {
                 return Some(node_id);
             }
@@ -96,11 +108,14 @@ impl Net {
             let mut buf = [0u8; 24];
             if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await
                 && hdr.frame_type == FrameType::JoinResp
-                && plen >= 16
+                && plen >= 20
             {
                 let mut key = [0u8; 16];
                 key.copy_from_slice(&buf[..16]);
-                // Confirm (echo my_id), then commit.
+                // Confirm: echo my_id ‖ the host's challenge, then commit.
+                let mut conf = [0u8; 8];
+                conf[..4].copy_from_slice(&my_id.to_le_bytes());
+                conf[4..8].copy_from_slice(&buf[16..20]);
                 let conf_hdr = Header {
                     frame_type: FrameType::JoinConfirm,
                     flags: 0,
@@ -110,7 +125,7 @@ impl Net {
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
-                self.tx_pair(&conf_hdr, &my_id.to_le_bytes()).await;
+                self.tx_pair(&conf_hdr, &conf).await;
                 self.advance_tx_counter();
                 return Some(key);
             }

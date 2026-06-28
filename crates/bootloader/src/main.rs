@@ -40,7 +40,18 @@ use tower_protocol::fota::{SIGNED_LEN, VENDOR_PUBKEY, split_signed, verify_signe
 const MANIFEST_OFFSET: u32 = 0x0_B000;
 const MANIFEST_SIZE: u32 = 2 * 1024;
 const DFU_OFFSET: u32 = 0x1_D000;
-const DFU_SIZE: u32 = 72 * 1024;
+// The image is *staged* in DFU (72 KB, deliberately one page larger than ACTIVE for the
+// embassy-boot swap) but *runs* from ACTIVE after the swap, so the real bound on image size is
+// the ACTIVE slot, not the DFU slot. Verifying against ACTIVE_SIZE rejects an image in the
+// (ACTIVE_SIZE, DFU_SIZE] gap that would pass the hash yet be truncated when copied to ACTIVE.
+const ACTIVE_SIZE: u32 = 70 * 1024;
+
+/// Per-product hardware id this loader accepts images for. `0` (the default) accepts an image
+/// with **any** `manifest.hw_id` — the single-product case (the Core Module). Set this to a
+/// product-specific id in a *multi-product* deployment that shares one vendor key: then only a
+/// generic image (`hw_id == 0`) or one targeting this product (`hw_id == DEVICE_HW_ID`) installs,
+/// so an image signed for a *different* product is rejected even though its signature is valid.
+const DEVICE_HW_ID: u32 = 0;
 
 #[entry]
 fn main() -> ! {
@@ -73,7 +84,10 @@ fn main() -> ! {
             // Clear the request BEFORE arming: a power loss after this (but before/at
             // mark_updated) then leaves no manifest → the app re-stages; it never
             // re-installs a stale image.
-            let _ = flash.lock(|c| c.borrow_mut().erase(MANIFEST_OFFSET, MANIFEST_OFFSET + MANIFEST_SIZE));
+            let _ = flash.lock(|c| {
+                c.borrow_mut()
+                    .erase(MANIFEST_OFFSET, MANIFEST_OFFSET + MANIFEST_SIZE)
+            });
             if valid {
                 let cfg = BootLoaderConfig::from_linkerfile_blocking(&flash, &flash, &flash);
                 let mut fw = BlockingFirmwareState::new(cfg.state, &mut aligned.0);
@@ -93,6 +107,11 @@ fn main() -> ! {
 /// Authenticate a staged image: the signed manifest must verify against [`VENDOR_PUBKEY`]
 /// (Ed25519) **and** the SHA-256 of the first `manifest.size` DFU bytes must equal the
 /// manifest's `sha256`. Returns `false` on any mismatch or read error.
+///
+/// Scope of the gate: **authenticity + integrity + post-swap fit + (opt-in) cross-product**.
+/// The `manifest.hw_id` check is gated on [`DEVICE_HW_ID`] (default `0` = accept any, the
+/// single-product case). Rollback (version) is **out of scope** — it is app-side EEPROM policy
+/// (see `tower::fota::installed_version`), since the loader holds no version state.
 fn verify_staged<F: NorFlash + ReadNorFlash, M: RawMutex>(
     flash: &Mutex<M, RefCell<F>>,
     signed: &[u8; SIGNED_LEN],
@@ -100,7 +119,13 @@ fn verify_staged<F: NorFlash + ReadNorFlash, M: RawMutex>(
     let Some(manifest) = verify_signed(&VENDOR_PUBKEY, signed) else {
         return false; // bad / forged signature
     };
-    if manifest.size > DFU_SIZE {
+    // Cross-product gate (opt-in; see DEVICE_HW_ID): reject an image signed for a *different*
+    // product. A generic image (hw_id 0) is always accepted.
+    if DEVICE_HW_ID != 0 && manifest.hw_id != 0 && manifest.hw_id != DEVICE_HW_ID {
+        return false;
+    }
+    // Bound by ACTIVE (where the image runs after swap), not DFU (where it is staged).
+    if manifest.size > ACTIVE_SIZE {
         return false;
     }
     let mut hasher = Sha256::new();
@@ -108,7 +133,10 @@ fn verify_staged<F: NorFlash + ReadNorFlash, M: RawMutex>(
     let mut off = 0u32;
     while off < manifest.size {
         let n = ((manifest.size - off) as usize).min(buf.len());
-        if flash.lock(|c| c.borrow_mut().read(DFU_OFFSET + off, &mut buf[..n])).is_err() {
+        if flash
+            .lock(|c| c.borrow_mut().read(DFU_OFFSET + off, &mut buf[..n]))
+            .is_err()
+        {
             return false;
         }
         hasher.update(&buf[..n]);

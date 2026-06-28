@@ -1,0 +1,9 @@
+# House style. Slightly wider than rustfmt's 100-col default to match the existing dense,
+# heavily-commented code (the de-facto p99 was ~102 cols). With this committed, `cargo fmt`
+# is idempotent over the tree, so it can be a CI check.
+#
+# STABLE options only — the toolchain is `stable` (rust-toolchain.toml), and nightly-only keys
+# (wrap_comments, imports_granularity, group_imports, …) would be ignored with a warning. In
+# particular comment *content* is never reflowed, so the design-rationale comments and the
+# regulatory citations the project asks to preserve are left untouched.
+max_width = 110

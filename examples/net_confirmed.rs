@@ -18,10 +18,10 @@ use tower::radio::net::{Net, NetConfig};
 use tower::storage::Kv;
 use tower::{app, board::Board};
 
-#[cfg(feature = "role-node")]
-use {embassy_time::Instant, log::warn, tower::radio::net::SendResult};
 #[cfg(not(feature = "role-node"))]
 use embassy_time::Duration;
+#[cfg(feature = "role-node")]
+use {embassy_time::Instant, log::warn, tower::radio::net::SendResult};
 
 #[cfg(feature = "role-node")]
 const NODE_ID: u32 = 0x1111_1111;
@@ -32,8 +32,13 @@ const KEY: [u8; 16] = [
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
 
     #[cfg(feature = "role-node")]
@@ -42,7 +47,18 @@ async fn run(b: Board) {
     let my_id = GW_ID;
 
     let kv = Kv::new(b.storage);
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::DEFAULT, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "confirmed", "net init: {:?}", e);

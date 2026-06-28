@@ -13,7 +13,6 @@
 //! via the CW carrier + partner RSSI; Step 4 proves the digital-domain values
 //! (data rate / deviation / filter) via a real modulated link.
 
-
 use super::device::{RadioError, Spirit1};
 use super::regs;
 use super::spi::Spirit1Spi;
@@ -131,9 +130,9 @@ fn synt_value(fbase_hz: u64, b_div: u64) -> u32 {
 fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
     let synt = synt_value(f_hz, b_div);
     [
-        ((synt >> 21) & 0x1F) as u8, // SYNT3: WCP[7:5]=0 | SYNT[25:21]
-        ((synt >> 13) & 0xFF) as u8, // SYNT2: SYNT[20:13]
-        ((synt >> 5) & 0xFF) as u8,  // SYNT1: SYNT[12:5]
+        ((synt >> 21) & 0x1F) as u8,                // SYNT3: WCP[7:5]=0 | SYNT[25:21]
+        ((synt >> 13) & 0xFF) as u8,                // SYNT2: SYNT[20:13]
+        ((synt >> 5) & 0xFF) as u8,                 // SYNT1: SYNT[12:5]
         (((synt & 0x1F) as u8) << 3) | (bs & 0x07), // SYNT0: SYNT[4:0] | BS
     ]
 }
@@ -143,7 +142,10 @@ fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
 /// band-independent. Shared by [`apply`] and [`set_band`].
 fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), RadioError> {
     // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
-    spi.write_regs(regs::SYNT3, &synt_bytes(band.base_hz(), band.b_div(), band.bs_field()))?;
+    spi.write_regs(
+        regs::SYNT3,
+        &synt_bytes(band.base_hz(), band.b_div(), band.bs_field()),
+    )?;
     // Channel spacing (steps of f_XO/2^15) and channel number.
     let chspace = ((band.spacing_hz() * (1u64 << 15) + F_XO / 2) / F_XO) as u8;
     spi.write_reg(regs::CHSPACE, chspace)?;
@@ -234,111 +236,111 @@ const _: () = assert!(FHSS_RENDEZVOUS_CH < FHSS_N);
 pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError> {
     radio.to_ready().await?;
     {
-    let spi = radio.spi();
+        let spi = radio.spi();
 
-    // Route the active-low nIRQ to GPIO0 (PA7) so tx()/rx() can wait on it.
-    spi.write_reg(regs::GPIO0_CONF, regs::GPIO_CONF_IRQ)?;
+        // Route the active-low nIRQ to GPIO0 (PA7) so tx()/rx() can wait on it.
+        spi.write_reg(regs::GPIO0_CONF, regs::GPIO_CONF_IRQ)?;
 
-    // Xtal flag: the digital clock is 25 MHz (50 MHz / 2), so select 24 MHz mode
-    // (ST XTAL_FLAG: <26 MHz → 24 MHz) — clears 24_26MHZ_SELECT in ANA_FUNC_CONF0.
-    // This tunes the synth loop filter + RCO reference; the reset value (26 MHz)
-    // mistunes the loop filter for a 25 MHz clock. Reset 0xC0, clear bit6 → 0x80.
-    spi.write_reg(regs::ANA_FUNC_CONF0, 0x80)?;
+        // Xtal flag: the digital clock is 25 MHz (50 MHz / 2), so select 24 MHz mode
+        // (ST XTAL_FLAG: <26 MHz → 24 MHz) — clears 24_26MHZ_SELECT in ANA_FUNC_CONF0.
+        // This tunes the synth loop filter + RCO reference; the reset value (26 MHz)
+        // mistunes the loop filter for a 25 MHz clock. Reset 0xC0, clear bit6 → 0x80.
+        spi.write_reg(regs::ANA_FUNC_CONF0, 0x80)?;
 
-    // Demodulator order = 0 during radio init (datasheet, DEM_CONFIG).
-    spi.write_reg(regs::DEM_CONFIG, 0x35)?;
+        // Demodulator order = 0 during radio init (datasheet, DEM_CONFIG).
+        spi.write_reg(regs::DEM_CONFIG, 0x35)?;
 
-    // Set the REFDIV bit (reference divider D=2) for the 50 MHz crystal: the PLL
-    // reference becomes 25 MHz. SYNTH_CONFIG1 reset 0x5B (VCO_H selected) | 0x80.
-    spi.write_reg(regs::SYNTH_CONFIG1, 0xDB)?;
-    // Longest T-split (3.47 ns) to help the VCO calibrator (datasheet §8.5):
-    // SYNTH_CONFIG0 (0x9F) reset 0x20, set SEL_TSPLIT bit7 -> 0xA0.
-    spi.write_reg(regs::SYNTH_CONFIG0, 0xA0)?;
+        // Set the REFDIV bit (reference divider D=2) for the 50 MHz crystal: the PLL
+        // reference becomes 25 MHz. SYNTH_CONFIG1 reset 0x5B (VCO_H selected) | 0x80.
+        spi.write_reg(regs::SYNTH_CONFIG1, 0xDB)?;
+        // Longest T-split (3.47 ns) to help the VCO calibrator (datasheet §8.5):
+        // SYNTH_CONFIG0 (0x9F) reset 0x20, set SEL_TSPLIT bit7 -> 0xA0.
+        spi.write_reg(regs::SYNTH_CONFIG0, 0xA0)?;
 
-    // IF offsets for f_XO = 50 MHz (Table 31).
-    spi.write_reg(regs::IF_OFFSET_ANA, 0x36)?;
-    spi.write_reg(regs::IF_OFFSET_DIG, 0xAC)?;
+        // IF offsets for f_XO = 50 MHz (Table 31).
+        spi.write_reg(regs::IF_OFFSET_ANA, 0x36)?;
+        spi.write_reg(regs::IF_OFFSET_DIG, 0xAC)?;
 
-    // Base frequency + channel (the only band-dependent registers).
-    write_band_regs(spi, cfg.band, cfg.channel)?;
+        // Base frequency + channel (the only band-dependent registers).
+        write_band_regs(spi, cfg.band, cfg.channel)?;
 
-    // Modulation / data rate / deviation / channel filter — M/E values computed
-    // with the ST library's exact search algorithms for f_XO=50 MHz, divider on:
-    //   MOD1 = DATARATE_M = 147 (0x93), MOD0 = GFSK|DATARATE_E(9) = 0x19  -> 19.2 kbps
-    //   FDEV0 = FDEV_E(4)<<4 | FDEV_M(5) = 0x45                           -> ~20 kHz
-    //   CHFLT = 0x02 -> ~216 kHz (docs/radio.md, covers ±40 ppm crystal tolerance).
-    spi.write_reg(regs::MOD1, 147)?;
-    spi.write_reg(regs::MOD0, 0x19)?;
-    spi.write_reg(regs::FDEV0, 0x45)?;
-    spi.write_reg(regs::CHFLT, 0x02)?;
+        // Modulation / data rate / deviation / channel filter — M/E values computed
+        // with the ST library's exact search algorithms for f_XO=50 MHz, divider on:
+        //   MOD1 = DATARATE_M = 147 (0x93), MOD0 = GFSK|DATARATE_E(9) = 0x19  -> 19.2 kbps
+        //   FDEV0 = FDEV_E(4)<<4 | FDEV_M(5) = 0x45                           -> ~20 kHz
+        //   CHFLT = 0x02 -> ~216 kHz (docs/radio.md, covers ±40 ppm crystal tolerance).
+        spi.write_reg(regs::MOD1, 147)?;
+        spi.write_reg(regs::MOD0, 0x19)?;
+        spi.write_reg(regs::FDEV0, 0x45)?;
+        spi.write_reg(regs::CHFLT, 0x02)?;
 
-    // IQC correction "optimal values" written by ST's SpiritRadioInit (undocumented
-    // demodulator I/Q-correction registers): 0x99=0x80, 0x9A=0xE3, 0xBC=0x22.
-    spi.write_regs(0x99, &[0x80, 0xE3])?;
-    spi.write_reg(0xBC, 0x22)?;
+        // IQC correction "optimal values" written by ST's SpiritRadioInit (undocumented
+        // demodulator I/Q-correction registers): 0x99=0x80, 0x9A=0xE3, 0xBC=0x22.
+        spi.write_regs(0x99, &[0x80, 0xE3])?;
+        spi.write_reg(0xBC, 0x22)?;
 
-    // VCO current bump for the 50 MHz crystal (ST WaVcoCalibration) — needed to
-    // lock; the reset VCO_GEN_CURR is too low. Auto VCO calibration (PROTOCOL2.
-    // VCO_CALIBRATION, on by default) then recalibrates on each TX/RX entry.
-    spi.write_reg(regs::VCO_CONFIG, 0x25)?;
-    // ST extra-current work-around (SpiritManagementWaExtraCurrent): standby current.
-    spi.write_reg(0xB2, 0xCA)?;
-    spi.write_reg(0xA8, 0x04)?;
-    let _ = spi.read_reg(0xA8)?;
-    spi.write_reg(0xA8, 0x00)?;
+        // VCO current bump for the 50 MHz crystal (ST WaVcoCalibration) — needed to
+        // lock; the reset VCO_GEN_CURR is too low. Auto VCO calibration (PROTOCOL2.
+        // VCO_CALIBRATION, on by default) then recalibrates on each TX/RX entry.
+        spi.write_reg(regs::VCO_CONFIG, 0x25)?;
+        // ST extra-current work-around (SpiritManagementWaExtraCurrent): standby current.
+        spi.write_reg(0xB2, 0xCA)?;
+        spi.write_reg(0xA8, 0x04)?;
+        let _ = spi.read_reg(0xA8)?;
+        spi.write_reg(0xA8, 0x00)?;
 
-    // AFC on, freeze-on-sync. AFC2 = FREEZE_ON_SYNC|AFC_ENABLE|leakage(reset).
-    spi.write_reg(regs::AFC2, 0xC8)?;
+        // AFC on, freeze-on-sync. AFC2 = FREEZE_ON_SYNC|AFC_ENABLE|leakage(reset).
+        spi.write_reg(regs::AFC2, 0xC8)?;
 
-    // RSSI threshold for CCA (-90 dBm = 0x50 with the datasheet mapping). The
-    // CSMA engine compares this against the channel RSSI before TX.
-    spi.write_reg(regs::RSSI_TH, 0x50)?;
+        // RSSI threshold for CCA (-90 dBm = 0x50 with the datasheet mapping). The
+        // CSMA engine compares this against the channel RSSI before TX.
+        spi.write_reg(regs::RSSI_TH, 0x50)?;
 
-    // CSMA/CCA timing (the engine is gated per-TX by PROTOCOL1.CSMA_ON; the radio
-    // measures RSSI for CCA_LENGTH × CCA_PERIOD, then backs off up to MAX_NB times
-    // before raising MAX_BO_CCA_REACHED). Layout per ST's SpiritCsmaInit:
-    //   CSMA_CONFIG3:2 = BU_COUNTER_SEED (must be non-zero; reset value is 0)
-    //   CSMA_CONFIG1   = (BU_PRESCALER << 2) | CCA_PERIOD(00 = 64·Tbit ≈ 3.3 ms)
-    //   CSMA_CONFIG0   = CCA_LENGTH(7:4) | MAX_NB(2:0)
-    // Non-persistent (PROTOCOL1.CSMA_PERS_ON = 0) so a busy channel gives up after
-    // MAX_NB back-offs instead of stalling forever.
-    spi.write_reg(regs::CSMA_CONFIG3, 0xFA)?; // seed MSB
-    spi.write_reg(regs::CSMA_CONFIG2, 0x21)?; // seed LSB (0xFA21, non-zero)
-    spi.write_reg(regs::CSMA_CONFIG1, 32 << 2)?; // BU_PRESCALER=32, CCA_PERIOD=00 (64·Tbit)
-    spi.write_reg(regs::CSMA_CONFIG0, (3 << 4) | 5)?; // CCA_LENGTH=3, NBACKOFF_MAX=5
-    let (p1c, _) = spi.read_reg(regs::PROTOCOL1)?;
-    spi.write_reg(regs::PROTOCOL1, p1c & !0x02)?; // CSMA_PERS_ON = 0 (non-persistent)
+        // CSMA/CCA timing (the engine is gated per-TX by PROTOCOL1.CSMA_ON; the radio
+        // measures RSSI for CCA_LENGTH × CCA_PERIOD, then backs off up to MAX_NB times
+        // before raising MAX_BO_CCA_REACHED). Layout per ST's SpiritCsmaInit:
+        //   CSMA_CONFIG3:2 = BU_COUNTER_SEED (must be non-zero; reset value is 0)
+        //   CSMA_CONFIG1   = (BU_PRESCALER << 2) | CCA_PERIOD(00 = 64·Tbit ≈ 3.3 ms)
+        //   CSMA_CONFIG0   = CCA_LENGTH(7:4) | MAX_NB(2:0)
+        // Non-persistent (PROTOCOL1.CSMA_PERS_ON = 0) so a busy channel gives up after
+        // MAX_NB back-offs instead of stalling forever.
+        spi.write_reg(regs::CSMA_CONFIG3, 0xFA)?; // seed MSB
+        spi.write_reg(regs::CSMA_CONFIG2, 0x21)?; // seed LSB (0xFA21, non-zero)
+        spi.write_reg(regs::CSMA_CONFIG1, 32 << 2)?; // BU_PRESCALER=32, CCA_PERIOD=00 (64·Tbit)
+        spi.write_reg(regs::CSMA_CONFIG0, (3 << 4) | 5)?; // CCA_LENGTH=3, NBACKOFF_MAX=5
+        let (p1c, _) = spi.read_reg(regs::PROTOCOL1)?;
+        spi.write_reg(regs::PROTOCOL1, p1c & !0x02)?; // CSMA_PERS_ON = 0 (non-persistent)
 
-    // Packet: basic format, variable length (8-bit len field), 4-byte preamble,
-    // 4-byte sync, 16-bit CRC (0x1021), whitening on, no address/control/FEC.
-    //   PCKTCTRL4 = 0x00          : no address, no control field
-    //   PCKTCTRL3 = 0x07          : basic format, normal RX, LEN_WID=7 (8-bit length)
-    //   PCKTCTRL2 = PREAMBLE(3=4B)<<3 | SYNC(3=4B)<<1 | FIX_VAR_LEN(1) = 0x1F
-    //   PCKTCTRL1 = CRC_MODE(3)<<5 | WHIT_EN(1)<<4 = 0x70
-    spi.write_reg(regs::PCKTCTRL4, 0x00)?;
-    spi.write_reg(regs::PCKTCTRL3, 0x07)?;
-    spi.write_reg(regs::PCKTCTRL2, 0x1F)?;
-    spi.write_reg(regs::PCKTCTRL1, 0x70)?;
+        // Packet: basic format, variable length (8-bit len field), 4-byte preamble,
+        // 4-byte sync, 16-bit CRC (0x1021), whitening on, no address/control/FEC.
+        //   PCKTCTRL4 = 0x00          : no address, no control field
+        //   PCKTCTRL3 = 0x07          : basic format, normal RX, LEN_WID=7 (8-bit length)
+        //   PCKTCTRL2 = PREAMBLE(3=4B)<<3 | SYNC(3=4B)<<1 | FIX_VAR_LEN(1) = 0x1F
+        //   PCKTCTRL1 = CRC_MODE(3)<<5 | WHIT_EN(1)<<4 = 0x70
+        spi.write_reg(regs::PCKTCTRL4, 0x00)?;
+        spi.write_reg(regs::PCKTCTRL3, 0x07)?;
+        spi.write_reg(regs::PCKTCTRL2, 0x1F)?;
+        spi.write_reg(regs::PCKTCTRL1, 0x70)?;
 
-    // Enable the automatic packet-filtering engine (PROTOCOL1.AUTO_PCKT_FLT,
-    // bit0) and clear the reserved bit0x20 — exactly as ST's SpiritPktBasicInit.
-    let (p1, _) = spi.read_reg(regs::PROTOCOL1)?;
-    spi.write_reg(regs::PROTOCOL1, (p1 & !0x20) | 0x01)?;
+        // Enable the automatic packet-filtering engine (PROTOCOL1.AUTO_PCKT_FLT,
+        // bit0) and clear the reserved bit0x20 — exactly as ST's SpiritPktBasicInit.
+        let (p1, _) = spi.read_reg(regs::PROTOCOL1)?;
+        spi.write_reg(regs::PROTOCOL1, (p1 & !0x20) | 0x01)?;
 
-    // PCKT_FLT_OPTIONS = 0x01: the critical RX-completion setting. Clearing
-    // RX_TIMEOUT_AND_OR_SELECT (bit6) + no timeout masks selects Table 30 row 1,
-    // "the RX timeout never expires and the reception ends at the reception of the
-    // packet" — so RX_DATA_READY fires on a good packet. The reset value (bit6=1)
-    // instead leaves the part stuck in RX with the packet in the FIFO (§9.3). bit0
-    // = CRC_CHECK (drop bad-CRC frames); source/control filters (bits 4/5) cleared.
-    spi.write_reg(regs::PCKT_FLT_OPTIONS, 0x01)?;
+        // PCKT_FLT_OPTIONS = 0x01: the critical RX-completion setting. Clearing
+        // RX_TIMEOUT_AND_OR_SELECT (bit6) + no timeout masks selects Table 30 row 1,
+        // "the RX timeout never expires and the reception ends at the reception of the
+        // packet" — so RX_DATA_READY fires on a good packet. The reset value (bit6=1)
+        // instead leaves the part stuck in RX with the packet in the FIFO (§9.3). bit0
+        // = CRC_CHECK (drop bad-CRC frames); source/control filters (bits 4/5) cleared.
+        spi.write_reg(regs::PCKT_FLT_OPTIONS, 0x01)?;
 
-    // Sync word 0xDB624715 (SYNC4=MSB .. SYNC1=LSB).
-    spi.write_regs(regs::SYNC4, &[0xDB, 0x62, 0x47, 0x15])?;
+        // Sync word 0xDB624715 (SYNC4=MSB .. SYNC1=LSB).
+        spi.write_regs(regs::SYNC4, &[0xDB, 0x62, 0x47, 0x15])?;
 
-    // PA: enable ramping, max index 7 (the reset PA table is already a monotonic
-    // ramp -30..+12 dBm across the 8 slots, so this ramps to ~+12 dBm).
-    spi.write_reg(regs::PA_POWER0, 0x27)?;
+        // PA: enable ramping, max index 7 (the reset PA table is already a monotonic
+        // ramp -30..+12 dBm across the 8 slots, so this ramps to ~+12 dBm).
+        spi.write_reg(regs::PA_POWER0, 0x27)?;
     } // end of the SPI register block (releases the borrow)
 
     // VCO calibration: rely on the SPIRIT1's automatic VCO calibration

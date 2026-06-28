@@ -1,7 +1,8 @@
 //! HARDWARIO TOWER Core Module board support.
 //!
 //! Most apps use [`Board::take`] via the [`app!`](crate::app) macro and never
-//! touch the lower-level [`init`]/[`init_console`]. `take` performs the *always
+//! touch the lower-level [`init`]/[`console::init`](crate::console::init). `take`
+//! performs the *always
 //! on* setup — clocks, the serial console, and putting the TMP112 into shutdown
 //! (one-shot) mode so it does not free-run and waste power — then hands the app
 //! a [`Board`] of ready-to-use resources.

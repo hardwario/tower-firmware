@@ -30,10 +30,10 @@ use tower::radio::net::{Net, NetConfig};
 use tower::storage::Kv;
 use tower::{app, board::Board};
 
-#[cfg(feature = "role-node")]
-use {embassy_time::Instant, log::warn};
 #[cfg(not(feature = "role-node"))]
 use embassy_time::Timer;
+#[cfg(feature = "role-node")]
+use {embassy_time::Instant, log::warn};
 
 const NODE_ID: u32 = 0x1111_1111;
 const GW_ID: u32 = 0x2222_2222;
@@ -98,7 +98,12 @@ struct CrcCheckSink {
 #[cfg(feature = "role-node")]
 impl CrcCheckSink {
     const fn new() -> Self {
-        Self { total: 0, received: 0, byte_errors: 0, crc: 0xFFFF_FFFF }
+        Self {
+            total: 0,
+            received: 0,
+            byte_errors: 0,
+            crc: 0xFFFF_FFFF,
+        }
     }
     fn final_crc(&self) -> u32 {
         !self.crc
@@ -132,8 +137,13 @@ impl tower::radio::net::BulkSink for CrcCheckSink {
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -142,7 +152,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::Us915, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::Us915,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "stream", "net init: {:?}", e);

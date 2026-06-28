@@ -48,10 +48,19 @@ impl<'r> HostProxySource<'r> {
     /// (serve that to the node as the first bulk transfer, the image as the second). `None`
     /// if the host doesn't answer or the manifest is malformed.
     pub async fn connect(rx: &'r mut BufferedUartRx<'static>) -> Option<(Self, [u8; SIGNED_LEN])> {
-        let mut s = Self { rx, dec: FrameDecoder::new(), image_len: 0 };
+        let mut s = Self {
+            rx,
+            dec: FrameDecoder::new(),
+            image_len: 0,
+        };
         let mut manifest = [0u8; SIGNED_LEN];
         let n = s
-            .fetch(FOTA_MANIFEST_OFFSET, &mut manifest, MANIFEST_REPS, MANIFEST_WINDOW)
+            .fetch(
+                FOTA_MANIFEST_OFFSET,
+                &mut manifest,
+                MANIFEST_REPS,
+                MANIFEST_WINDOW,
+            )
             .await?;
         if n < SIGNED_LEN {
             return None;
@@ -81,7 +90,9 @@ impl<'r> HostProxySource<'r> {
             let n = with_timeout(window, self.rx.read(&mut buf)).await.ok()?.ok()?;
             for &b in &buf[..n] {
                 let Some(inner) = self.dec.push(b) else { continue };
-                let Ok((MsgType::FotaData, _seq, p)) = decode_frame(inner) else { continue };
+                let Ok((MsgType::FotaData, _seq, p)) = decode_frame(inner) else {
+                    continue;
+                };
                 if p.len() < 4 {
                     continue;
                 }
@@ -105,6 +116,8 @@ impl BulkSource for HostProxySource<'_> {
     async fn read(&mut self, offset: usize, out: &mut [u8]) -> usize {
         // 0 on failure → the bulk fetcher's length check rejects the short chunk and the
         // node retransmits its BULK_REQ, driving another fetch (never a corrupt image).
-        self.fetch(offset as u32, out, CHUNK_REPS, RESP_WINDOW).await.unwrap_or(0)
+        self.fetch(offset as u32, out, CHUNK_REPS, RESP_WINDOW)
+            .await
+            .unwrap_or(0)
     }
 }

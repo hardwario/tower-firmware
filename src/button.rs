@@ -141,15 +141,7 @@ pub fn init_exti(
     config: Config,
     channel: &'static ButtonChannel,
 ) -> Button {
-    spawner.spawn(
-        scan_task(
-            Source::Exti(input),
-            polarity.is_active_high(),
-            config,
-            channel,
-        )
-        .unwrap(),
-    );
+    spawner.spawn(scan_task(Source::Exti(input), polarity.is_active_high(), config, channel).unwrap());
     Button { ch: channel }
 }
 
@@ -165,15 +157,7 @@ pub fn init_polled(
     config: Config,
     channel: &'static ButtonChannel,
 ) -> Button {
-    spawner.spawn(
-        scan_task(
-            Source::Polled(input),
-            polarity.is_active_high(),
-            config,
-            channel,
-        )
-        .unwrap(),
-    );
+    spawner.spawn(scan_task(Source::Polled(input), polarity.is_active_high(), config, channel).unwrap());
     Button { ch: channel }
 }
 
@@ -210,12 +194,7 @@ impl Source {
 
 /// Up to this many buttons (EXTI + polled combined) can run concurrently.
 #[embassy_executor::task(pool_size = 2)]
-async fn scan_task(
-    mut input: Source,
-    active_high: bool,
-    config: Config,
-    ch: &'static ButtonChannel,
-) {
+async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'static ButtonChannel) {
     let mut pressed = false; // debounced state
     let mut candidate_since: Option<Instant> = None; // when raw first differed
     let mut press_instant = Instant::now(); // start of the debounced press
@@ -242,9 +221,7 @@ async fn scan_task(
                     let _ = ch.inner.try_send(Event::Press);
                 } else {
                     let _ = ch.inner.try_send(Event::Release);
-                    if !hold_fired
-                        && now.saturating_duration_since(press_instant) <= config.click_timeout
-                    {
+                    if !hold_fired && now.saturating_duration_since(press_instant) <= config.click_timeout {
                         let _ = ch.inner.try_send(Event::Click);
                     }
                 }
@@ -252,10 +229,7 @@ async fn scan_task(
         } else {
             // Stable: drop any pending candidate, and check the hold threshold.
             candidate_since = None;
-            if pressed
-                && !hold_fired
-                && now.saturating_duration_since(press_instant) >= config.hold_time
-            {
+            if pressed && !hold_fired && now.saturating_duration_since(press_instant) >= config.hold_time {
                 hold_fired = true;
                 let _ = ch.inner.try_send(Event::Hold);
             }

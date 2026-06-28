@@ -47,8 +47,13 @@ fn seq_of(d: &[u8]) -> u32 {
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -57,7 +62,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::Us915, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::Us915,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "fhss", "net init: {:?}", e);
@@ -114,8 +130,12 @@ async fn run(b: Board) {
                     }
                     if slot.got_beacon {
                         match net.fhss_send(GW_ID, &seq.to_le_bytes(), true).await {
-                            SendResult::Delivered => info!(target: "fhss", "seq={} ch={} Delivered", seq, net.fhss_current_channel()),
-                            SendResult::NotDelivered => warn!(target: "fhss", "seq={} ch={} no-ack", seq, net.fhss_current_channel()),
+                            SendResult::Delivered => {
+                                info!(target: "fhss", "seq={} ch={} Delivered", seq, net.fhss_current_channel())
+                            }
+                            SendResult::NotDelivered => {
+                                warn!(target: "fhss", "seq={} ch={} no-ack", seq, net.fhss_current_channel())
+                            }
                             _ => {}
                         }
                         seq = seq.wrapping_add(1);

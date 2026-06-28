@@ -34,8 +34,13 @@ const HANDED_KEY: [u8; 16] = [
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -45,7 +50,18 @@ async fn run(b: Board) {
     let my_id = HOST_ID;
 
     // The Net's own key is unused during pairing (JOIN frames use PAIRING_KEY).
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: PAIRING_KEY, band: Band::DEFAULT, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: PAIRING_KEY,
+            band: Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "pair", "net init: {:?}", e);

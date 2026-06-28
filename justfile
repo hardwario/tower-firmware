@@ -32,11 +32,14 @@ host := `rustc -vV | sed -n 's/^host: //p'`
 default:
     @just --list
 
-# Run the firmware's host-side tests: the `fota-sign` signer (host↔device Ed25519 interop
-# via dalek↔salty, and the DEV_SEED↔VENDOR_PUBKEY pin). Runs on the host triple because the
-# firmware itself is no_std. The shared wire-protocol codec/manifest tests live in their own
-# repo now — github.com/hardwario/tower-protocol (`cargo test --features verify` there).
+# Run the firmware's host-side tests on the host triple (the firmware itself is no_std):
+#   - `tower-kv`    : the EEPROM key-value codec (record format / scan / in-place update /
+#                     compaction + power-loss edges), extracted so it CAN be unit-tested.
+#   - `fota-sign`   : host↔device Ed25519 interop (dalek↔salty) + the DEV_SEED↔VENDOR_PUBKEY pin.
+# The shared wire-protocol codec/manifest tests live in their own repo —
+# github.com/hardwario/tower-protocol (`cargo test --features verify` there).
 test *ARGS:
+    cargo test -p tower-kv --target {{host}} {{ARGS}}
     cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{ARGS}}
 
 # Sign a firmware image into a signed FOTA manifest (docs/fota.md) with the host tool

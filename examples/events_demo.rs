@@ -25,7 +25,11 @@ async fn run(_b: Board) {
 
         console::event(
             "measurement",
-            &[("count", count.as_str()), ("temp_c", temp.as_str()), ("unit", "cdeg")],
+            &[
+                ("count", count.as_str()),
+                ("temp_c", temp.as_str()),
+                ("unit", "cdeg"),
+            ],
         )
         .await;
 

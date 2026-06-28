@@ -10,7 +10,6 @@
 //! CBC-MAC and CTR (and thus AES-CCM) on top of it in firmware, which keeps this
 //! driver tiny and avoids the engine's chaining-mode state machine.
 
-
 use embassy_stm32::pac;
 use embassy_stm32::pac::aes::vals::{Datatype, Mode};
 
@@ -44,12 +43,7 @@ impl Aes {
     pub fn set_key(&mut self, key: &[u8; 16]) {
         let aes = pac::AES;
         for i in 0..4 {
-            let word = u32::from_be_bytes([
-                key[4 * i],
-                key[4 * i + 1],
-                key[4 * i + 2],
-                key[4 * i + 3],
-            ]);
+            let word = u32::from_be_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
             // KEYR3 = MSB word .. KEYR0 = LSB word.
             aes.keyr(3 - i).write_value(pac::aes::regs::Keyr(word));
         }
@@ -68,12 +62,8 @@ impl Aes {
         // Feed the 4 input words. With datatype=BYTE the engine byte-swaps each
         // word, so assemble little-endian here → AES sees block[0] as the MSB.
         for i in 0..4 {
-            let word = u32::from_le_bytes([
-                block[4 * i],
-                block[4 * i + 1],
-                block[4 * i + 2],
-                block[4 * i + 3],
-            ]);
+            let word =
+                u32::from_le_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
             aes.dinr().write_value(pac::aes::regs::Dinr(word));
         }
         // Wait for computation-complete.

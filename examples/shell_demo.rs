@@ -65,10 +65,30 @@ static APP_COMMANDS: &[Entry] = &[
 /// App settings — one of each kind. Keys are above the console base (`0x5500`);
 /// `identity` (SDK) stays at `0x5500`.
 static APP_SETTINGS: &[Setting] = &[
-    Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
-    Setting { key: 0x5511, name: "verbose", kind: Kind::Bool, default: "false" },
-    Setting { key: 0x5512, name: "mode", kind: Kind::Enum(&["p2p", "star", "mesh"]), default: "star" },
-    Setting { key: 0x5513, name: "tx_power", kind: Kind::Int { min: -30, max: 20 }, default: "14" },
+    Setting {
+        key: 0x5510,
+        name: "interval",
+        kind: Kind::Uint { min: 1, max: 3600 },
+        default: "30",
+    },
+    Setting {
+        key: 0x5511,
+        name: "verbose",
+        kind: Kind::Bool,
+        default: "false",
+    },
+    Setting {
+        key: 0x5512,
+        name: "mode",
+        kind: Kind::Enum(&["p2p", "star", "mesh"]),
+        default: "star",
+    },
+    Setting {
+        key: 0x5513,
+        name: "tx_power",
+        kind: Kind::Int { min: -30, max: 20 },
+        default: "14",
+    },
 ];
 
 async fn run(b: Board) {

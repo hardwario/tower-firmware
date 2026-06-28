@@ -19,14 +19,27 @@ use tower::{app, board::Board};
 
 async fn run(b: Board) {
     let mut radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
         error!(target: "edge", "exit_shutdown: {:?}", e);
     }
     let id_before = radio.read_device_id();
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: 0 }).await {
+    if let Err(e) = config::apply(
+        &mut radio,
+        &RfConfig {
+            band: config::Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         error!(target: "edge", "config: {:?}", e);
     }
 

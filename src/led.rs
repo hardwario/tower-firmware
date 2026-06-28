@@ -138,12 +138,7 @@ impl Polarity {
 }
 
 /// Spawn the dispatcher for `pin` and return a handle to drive it.
-pub fn init(
-    spawner: Spawner,
-    pin: Output<'static>,
-    channel: &'static LedChannel,
-    polarity: Polarity,
-) -> Led {
+pub fn init(spawner: Spawner, pin: Output<'static>, channel: &'static LedChannel, polarity: Polarity) -> Led {
     // The size-bounded task pool is allocated here; see `dispatcher`'s pool_size.
     spawner.spawn(dispatcher(pin, channel, polarity.is_active_high()).unwrap());
     Led { ch: channel }

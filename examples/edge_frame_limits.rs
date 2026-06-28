@@ -22,10 +22,24 @@ const KEY: [u8; 16] = [
 const KEY2: [u8; 16] = [0xA5; 16];
 
 fn data_hdr(counter: u32) -> Header {
-    Header { frame_type: FrameType::Data, flags: flags::CONFIRMED, src: 0x1111_1111, dest: 0x2222_2222, counter, bulk_index: None }
+    Header {
+        frame_type: FrameType::Data,
+        flags: flags::CONFIRMED,
+        src: 0x1111_1111,
+        dest: 0x2222_2222,
+        counter,
+        bulk_index: None,
+    }
 }
 fn bulk_hdr(counter: u32, idx: u32) -> Header {
-    Header { frame_type: FrameType::BulkData, flags: 0, src: 0x1111_1111, dest: 0x2222_2222, counter, bulk_index: Some(idx) }
+    Header {
+        frame_type: FrameType::BulkData,
+        flags: 0,
+        src: 0x1111_1111,
+        dest: 0x2222_2222,
+        counter,
+        bulk_index: Some(idx),
+    }
 }
 
 async fn run(_b: Board) {
@@ -43,16 +57,25 @@ async fn run(_b: Board) {
     let mut buf = [0u8; MAX_FRAME];
 
     // --- MTU accept/reject (seal side) ---
-    check("seal 1 B accepted", frame::seal_frame(&mut ccm, &KEY, &data_hdr(1), &[0x5A], &mut buf).is_ok());
+    check(
+        "seal 1 B accepted",
+        frame::seal_frame(&mut ccm, &KEY, &data_hdr(1), &[0x5A], &mut buf).is_ok(),
+    );
     let p74 = [0xA5u8; 74];
-    check("seal 74 B accepted", frame::seal_frame(&mut ccm, &KEY, &data_hdr(2), &p74, &mut buf).is_ok());
+    check(
+        "seal 74 B accepted",
+        frame::seal_frame(&mut ccm, &KEY, &data_hdr(2), &p74, &mut buf).is_ok(),
+    );
     let p75 = [0xA5u8; 75];
     check(
         "seal 75 B rejected (PayloadTooLong)",
         frame::seal_frame(&mut ccm, &KEY, &data_hdr(3), &p75, &mut buf) == Err(FrameError::PayloadTooLong),
     );
     let c64 = [0x33u8; 64];
-    check("bulk seal 64 B accepted", frame::seal_frame(&mut ccm, &KEY, &bulk_hdr(4, 0), &c64, &mut buf).is_ok());
+    check(
+        "bulk seal 64 B accepted",
+        frame::seal_frame(&mut ccm, &KEY, &bulk_hdr(4, 0), &c64, &mut buf).is_ok(),
+    );
     let c65 = [0x33u8; 65];
     check(
         "bulk seal 65 B rejected (PayloadTooLong)",
@@ -74,35 +97,53 @@ async fn run(_b: Board) {
     {
         let mut b = buf;
         b[0] ^= 0x20;
-        check("bad version → BadVersion", frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadVersion));
+        check(
+            "bad version → BadVersion",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadVersion),
+        );
     }
     // Unknown type: set type field (bits[4:0]) to 7 (JoinConfirm=6 is the max valid).
     {
         let mut b = buf;
         b[0] = (b[0] & 0xE0) | 0x07;
-        check("unknown type → BadType", frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadType));
+        check(
+            "unknown type → BadType",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadType),
+        );
     }
     // Truncated below header+tag.
     {
         let mut b = buf;
-        check("truncated → TooShort", frame::open_frame(&mut ccm, &KEY, &mut b[..8]) == Err(FrameError::TooShort));
+        check(
+            "truncated → TooShort",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..8]) == Err(FrameError::TooShort),
+        );
     }
     // Tampered ciphertext byte (a payload byte after the 14-byte header).
     {
         let mut b = buf;
         b[16] ^= 0x01;
-        check("tampered ciphertext → AuthFail", frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail));
+        check(
+            "tampered ciphertext → AuthFail",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail),
+        );
     }
     // Tampered tag (last byte).
     {
         let mut b = buf;
         b[good_len - 1] ^= 0x80;
-        check("tampered tag → AuthFail", frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail));
+        check(
+            "tampered tag → AuthFail",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail),
+        );
     }
     // Wrong key.
     {
         let mut b = buf;
-        check("wrong key → AuthFail", frame::open_frame(&mut ccm, &KEY2, &mut b[..good_len]) == Err(FrameError::AuthFail));
+        check(
+            "wrong key → AuthFail",
+            frame::open_frame(&mut ccm, &KEY2, &mut b[..good_len]) == Err(FrameError::AuthFail),
+        );
     }
 
     if pass {

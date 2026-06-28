@@ -10,7 +10,7 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/bootloader"]
+members = ["crates/bootloader", "crates/tower-kv"]
 # The FOTA host signing tool is a std host binary — excluded so workspace builds (which
 # target thumbv6m via .cargo/config.toml) don't try to cross-compile it. Run it with an
 # explicit host target: `just fota-sign ...` (see the justfile).
@@ -82,6 +82,12 @@ log = "0.4"
 # no_std, no-alloc (fixed-buffer (de)serialization).
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.0", default-features = false }
+
+# The EEPROM key-value codec (record format / scan / in-place update / compaction). Extracted
+# into its own no_std crate so the firmware can keep using it on thumbv6m AND the logic can be
+# unit-tested on the host (`just test`) — the firmware itself can't `cargo test`. `storage.rs`
+# is the thin adapter that implements `tower_kv::Eeprom` over the L0 data EEPROM.
+tower-kv = { path = "crates/tower-kv" }
 
 # Shared console wire protocol (framing + CRC + message schema) + the shared FOTA `Manifest`
 # (`tower_protocol::fota`) so the host signer and the device cannot drift on the signed bytes.

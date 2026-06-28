@@ -1078,6 +1078,7 @@ dependencies = [
  "postcard",
  "serde",
  "sha2",
+ "tower-kv",
  "tower-protocol",
 ]
 
@@ -1093,6 +1094,13 @@ dependencies = [
  "embassy-sync",
  "embedded-storage",
  "sha2",
+ "tower-protocol",
+]
+
+[[package]]
+name = "tower-kv"
+version = "0.1.0"
+dependencies = [
  "tower-protocol",
 ]
 

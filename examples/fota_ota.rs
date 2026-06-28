@@ -41,7 +41,7 @@ use {
     embassy_sync::blocking_mutex::raw::NoopRawMutex,
     embassy_time::Timer,
     log::warn,
-    tower::fota::{KEY_INSTALLED_VERSION, PullOutcome, pull_update},
+    tower::fota::{PullOutcome, pull_update, set_installed_version},
     tower::radio::net::SendResult,
     tower::storage::{Kv, Storage},
 };
@@ -94,16 +94,35 @@ async fn node(b: Board) -> ! {
     // Kv + whether this is a fresh boot (vs a just-confirmed swap / revert).
     let (fresh, mut kv) = check_boot_state(b.storage);
     if !fresh {
-        // We just confirmed (or reverted) — record the running version so a later equal/older
-        // image is refused by the bootloader's rollback floor, then idle (no self-update loop).
-        let _ = kv.set_bytes(KEY_INSTALLED_VERSION, &VERSION.to_le_bytes());
+        // We just confirmed (or reverted) — record the running version (the rollback floor an
+        // offered image must strictly supersede) via the typed helper, then idle (no
+        // self-update loop). `set_installed_version` takes the reclaimed `Kv` directly, since
+        // `Net` does not exist yet on this path.
+        let _ = set_installed_version(&mut kv, VERSION);
         idle().await;
     }
 
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
-    let mut net = match Net::new(radio, kv, NetConfig { my_id: NODE_ID, key: KEY, band: BAND, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id: NODE_ID,
+            key: KEY,
+            band: BAND,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "fota-ota", "net init: {e:?}");
@@ -137,14 +156,19 @@ async fn node(b: Board) -> ! {
                     Timer::after_millis(80).await; // let the console drain
                     SCB::sys_reset();
                 }
-                PullOutcome::InProgress { staged, total } =>
-                    info!(target: "fota-ota", "staged {staged}/{total} B — resuming next cycle"),
-                PullOutcome::NotNewer { version, installed } =>
-                    info!(target: "fota-ota", "v{version} not newer than v{installed} — up to date"),
+                PullOutcome::InProgress { staged, total } => {
+                    info!(target: "fota-ota", "staged {staged}/{total} B — resuming next cycle")
+                }
+                PullOutcome::NotNewer { version, installed } => {
+                    info!(target: "fota-ota", "v{version} not newer than v{installed} — up to date")
+                }
                 PullOutcome::Malformed => error!(target: "fota-ota", "manifest malformed — rejected"),
-                PullOutcome::TooLarge { size } => error!(target: "fota-ota", "image {size} B too large for ACTIVE"),
-                PullOutcome::NoManifest | PullOutcome::ImageFailed =>
-                    warn!(target: "fota-ota", "pull failed (host serving?) — retry"),
+                PullOutcome::TooLarge { size } => {
+                    error!(target: "fota-ota", "image {size} B too large for ACTIVE")
+                }
+                PullOutcome::NoManifest | PullOutcome::ImageFailed => {
+                    warn!(target: "fota-ota", "pull failed (host serving?) — retry")
+                }
             }
         }
         Timer::after_secs(5).await;
@@ -193,7 +217,10 @@ fn check_boot_state(storage: Storage<'static>) -> (bool, Kv<'static>) {
         }
     };
     // Reclaim the Flash (fw + its borrow are dropped) for the radio's Kv.
-    (fresh, Kv::new(Storage::new(flash_mutex.into_inner().into_inner())))
+    (
+        fresh,
+        Kv::new(Storage::new(flash_mutex.into_inner().into_inner())),
+    )
 }
 
 /// Heartbeat idle so the monitor shows the live version between cycles. Diverges.
@@ -212,10 +239,27 @@ async fn idle() -> ! {
 #[cfg(not(feature = "role-node"))]
 async fn gateway(b: Board) -> ! {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
-    let mut net = match Net::new(radio, kv, NetConfig { my_id: GW_ID, key: KEY, band: BAND, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id: GW_ID,
+            key: KEY,
+            band: BAND,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "fota-ota", "net init: {e:?}");
@@ -230,7 +274,9 @@ async fn gateway(b: Board) -> ! {
     let mut rx = console::take_rx().expect("console RX");
 
     loop {
-        let Some(rx_msg) = net.recv(embassy_time::Duration::from_secs(10)).await else { continue };
+        let Some(rx_msg) = net.recv(embassy_time::Duration::from_secs(10)).await else {
+            continue;
+        };
         if rx_msg.data() != b"PULL" {
             continue;
         }

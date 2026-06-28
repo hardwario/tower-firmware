@@ -12,9 +12,9 @@
 #![no_main]
 
 use embassy_time::Timer;
-use log::{error, info};
 #[cfg(feature = "role-node")]
 use log::warn;
+use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
@@ -31,8 +31,13 @@ const BLOB_LEN: usize = 200;
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -41,7 +46,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::DEFAULT, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "bulk", "net init: {:?}", e);

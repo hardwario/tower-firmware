@@ -146,7 +146,13 @@ mod tests {
         let mut h = Sha256::new();
         h.update(image);
         let sha256: [u8; 32] = h.finalize().into();
-        let m = Manifest { flags: 0, hw_id: 0, version: 7, size: image.len() as u32, sha256 };
+        let m = Manifest {
+            flags: 0,
+            hw_id: 0,
+            version: 7,
+            size: image.len() as u32,
+            sha256,
+        };
 
         let sig = key.sign(&m.encode());
         let signed = m.encode_signed(&sig.to_bytes());

@@ -37,6 +37,7 @@ impl<'f, 'd> Stage<'f, 'd> {
     }
 
     /// The slot size in bytes.
+    #[must_use]
     pub const fn size(&self) -> u32 {
         self.size
     }

@@ -20,16 +20,21 @@
 use embassy_time::Duration;
 use log::{error, info};
 use tower::radio::{RfConfig, Spirit1, config};
+use tower::{app, board::Board};
 #[cfg(feature = "role-node")]
 use {embassy_time::Instant, embassy_time::Timer, log::warn};
-use tower::{app, board::Board};
 
 const CHANNEL: u8 = 0;
 
 async fn run(b: Board) {
     let mut radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
         error!(target: "sleep", "exit_shutdown: {:?}", e);
@@ -37,7 +42,10 @@ async fn run(b: Board) {
     if let Err(e) = radio.read_device_id() {
         error!(target: "sleep", "device id: {:?}", e);
     }
-    let cfg = RfConfig { band: config::Band::DEFAULT, channel: CHANNEL };
+    let cfg = RfConfig {
+        band: config::Band::DEFAULT,
+        channel: CHANNEL,
+    };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
         error!(target: "sleep", "config: {:?}", e);
     }

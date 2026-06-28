@@ -15,17 +15,22 @@
 
 use embassy_time::Timer;
 use log::{error, info};
-#[cfg(feature = "role-node")]
-use {embassy_time::Duration, log::warn, tower::radio::RadioError};
 use tower::radio::{RfConfig, Spirit1, config};
 use tower::{app, board::Board};
+#[cfg(feature = "role-node")]
+use {embassy_time::Duration, log::warn, tower::radio::RadioError};
 
 const CHANNEL: u8 = 0;
 
 async fn run(b: Board) {
     let mut radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
         error!(target: "csma", "exit_shutdown: {:?}", e);
@@ -33,7 +38,15 @@ async fn run(b: Board) {
     if let Err(e) = radio.read_device_id() {
         error!(target: "csma", "device id: {:?}", e);
     }
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: CHANNEL }).await {
+    if let Err(e) = config::apply(
+        &mut radio,
+        &RfConfig {
+            band: config::Band::DEFAULT,
+            channel: CHANNEL,
+        },
+    )
+    .await
+    {
         error!(target: "csma", "config: {:?}", e);
     }
 
@@ -51,7 +64,10 @@ async fn sender(radio: &mut Spirit1) -> ! {
     loop {
         let mut frame = [0xC5u8; 16];
         frame[..4].copy_from_slice(&seq.to_le_bytes());
-        match radio.tx(&frame, /*use_csma=*/ true, Duration::from_millis(400)).await {
+        match radio
+            .tx(&frame, /*use_csma=*/ true, Duration::from_millis(400))
+            .await
+        {
             Ok(()) => {
                 ok += 1;
                 info!(target: "csma", "seq={} ok (channel clear) [ok={} busy={}]", seq, ok, busy);

@@ -28,6 +28,7 @@ use super::{
     MANIFEST_LEN, MANIFEST_OFFSET, MANIFEST_SIZE, Manifest, SIGNED_LEN, Stage,
 };
 use crate::radio::net::Net;
+use crate::storage::Kv;
 
 /// Bench diagnostics (`fota-diag` feature): log a pull stage, then drain the console so the
 /// line reaches the UART before the next step (the task-based console can't flush after a
@@ -45,6 +46,7 @@ macro_rules! diag {
 /// Why [`pull_update`] stopped — or that an image is staged + the manifest stashed (the
 /// bootloader will verify + swap on the next reset).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub enum PullOutcome {
     /// No signed manifest arrived (the announce/transfer failed, or it was too short).
     NoManifest,
@@ -76,7 +78,7 @@ pub enum PullOutcome {
 /// needed — **call again to resume**. Touches flash only via the DFU + MANIFEST regions + the
 /// EEPROM resume keys; the caller still owns `net`.
 pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
-    let installed = installed_version(net);
+    let installed = installed_version(net.kv());
     diag!("start: installed=v{installed}, fetching manifest");
 
     // 1) Pull the signed manifest (116 B) — kept verbatim for the bootloader to verify.
@@ -91,7 +93,10 @@ pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
         None => return PullOutcome::Malformed,
     };
     if !manifest.supersedes(installed) {
-        return PullOutcome::NotNewer { version: manifest.version, installed };
+        return PullOutcome::NotNewer {
+            version: manifest.version,
+            installed,
+        };
     }
     if manifest.size > ACTIVE_SIZE {
         return PullOutcome::TooLarge { size: manifest.size };
@@ -100,7 +105,11 @@ pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
     // 3) Decide the resume point: continue this image if the persisted download identity
     //    matches, else start fresh (which re-erases DFU on the first chunk).
     let start = resume_offset(net, manifest.version, manifest.size);
-    diag!("manifest v{} size={}, resume from {start}", manifest.version, manifest.size);
+    diag!(
+        "manifest v{} size={}, resume from {start}",
+        manifest.version,
+        manifest.size
+    );
 
     // 4) Stream into DFU from `start`, persisting the high-water mark as it goes.
     let staged = net
@@ -108,7 +117,10 @@ pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
         .await as u32;
     if staged < manifest.size {
         diag!("partial: {staged}/{} B staged — resume next cycle", manifest.size);
-        return PullOutcome::InProgress { staged, total: manifest.size };
+        return PullOutcome::InProgress {
+            staged,
+            total: manifest.size,
+        };
     }
 
     // 5) Complete: clear the resume state, then stash the manifest LAST (a crash before this
@@ -160,13 +172,23 @@ fn stash_manifest(net: &mut Net, signed: &[u8; SIGNED_LEN]) -> bool {
 
 /// The installed firmware version from EEPROM (`KEY_INSTALLED_VERSION`, u32 LE), or `0` if
 /// never written — the rollback floor (an image must be strictly newer than this to install).
-pub fn installed_version(net: &mut Net) -> u32 {
-    get_u32(net, KEY_INSTALLED_VERSION).unwrap_or(0)
+///
+/// Takes the [`Kv`] directly rather than `Net`, so it is callable at **confirm time** — in the
+/// synchronous boot-state path where only the reclaimed `Kv` is in hand and the radio `Net`
+/// does not exist yet. While transceiving, pass `net.kv()`.
+pub fn installed_version(kv: &Kv<'_>) -> u32 {
+    let mut buf = [0u8; 4];
+    match kv.get_bytes(KEY_INSTALLED_VERSION, &mut buf) {
+        Ok(Some(n)) if n >= 4 => u32::from_le_bytes(buf),
+        _ => 0,
+    }
 }
 
 /// Persist the installed firmware version (`KEY_INSTALLED_VERSION`). Call **after** a swapped
 /// image has booted and self-confirmed, so a later validly-signed *older* image is refused.
-/// Returns whether the write succeeded.
-pub fn set_installed_version(net: &mut Net, version: u32) -> bool {
-    net.kv().set_bytes(KEY_INSTALLED_VERSION, &version.to_le_bytes()).is_ok()
+/// Returns whether the write succeeded. Takes [`Kv`] (not `Net`) for the same reason as
+/// [`installed_version`]: the confirm happens before `Net` is constructed.
+pub fn set_installed_version(kv: &mut Kv<'_>, version: u32) -> bool {
+    kv.set_bytes(KEY_INSTALLED_VERSION, &version.to_le_bytes())
+        .is_ok()
 }

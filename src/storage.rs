@@ -5,13 +5,15 @@
 //!
 //!   * [`Storage`] — the raw area: [`read`](Storage::read) / [`write`](Storage::write)
 //!     at any byte offset, [`len`](Storage::len) the total size. You own the layout.
-//!   * [`Kv`] — a small **key-value store** over that area. Each value lives under a
-//!     `u16` key as a `{tag, len, crc}`-framed record. Updates of the same size are
-//!     rewritten **in place** (EEPROM is byte-writable, so no log churn); a new key
-//!     just appends and never disturbs existing keys — which is how you *evolve*
-//!     stored data: add a key rather than growing a struct. Values can be stored as
-//!     **raw bytes** ([`set_bytes`](Kv::set_bytes)) for scalars, or **postcard**
-//!     ([`set`](Kv::set)) for any `#[derive(Serialize, Deserialize)]` type.
+//!   * [`Kv`] — a small **key-value store** over that area, **power-loss-safe**: it survives a
+//!     reset mid-write (the codec is double-buffered — see [`tower_kv`]). Each value lives under
+//!     a `u16` key as a `{tag, len, crc}`-framed record; updates **append** (a torn write only
+//!     ever loses the in-flight record, never committed data) and compaction reclaims superseded
+//!     records via an atomic half-flip. Add a key to *evolve* stored data rather than growing a
+//!     struct. Values can be stored as **raw bytes** ([`set_bytes`](Kv::set_bytes)) for scalars,
+//!     or **postcard** ([`set`](Kv::set)) for any `#[derive(Serialize, Deserialize)]` type.
+//!     Double-buffering halves usable space (~3 KB of the 6 KB region; the rest is the flip
+//!     buffer) — ample for the SDK's counter/peer/settings state.
 //!
 //! ```ignore
 //! let mut kv = Kv::new(b.storage);
@@ -32,6 +34,11 @@
 use embassy_stm32::flash::{Blocking, EEPROM_SIZE, Flash};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tower_kv::{Eeprom, KvError};
+
+/// Re-exported from the codec crate ([`tower_kv`]): the largest value a [`Kv`] record holds
+/// ([`MAX_VALUE`]) and the most distinct keys [`Kv::compact`] tracks in one pass ([`MAX_KEYS`]).
+pub use tower_kv::{MAX_KEYS, MAX_VALUE};
 
 /// A non-volatile storage error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -46,6 +53,18 @@ pub enum Error {
     InvalidKey,
     /// More distinct keys than [`MAX_KEYS`] (only hit during compaction).
     TooManyKeys,
+}
+
+impl From<KvError<embassy_stm32::flash::Error>> for Error {
+    fn from(e: KvError<embassy_stm32::flash::Error>) -> Self {
+        match e {
+            KvError::Backend(f) => Error::Flash(f),
+            KvError::ValueTooLarge => Error::ValueTooLarge,
+            KvError::Full => Error::Full,
+            KvError::InvalidKey => Error::InvalidKey,
+            KvError::TooManyKeys => Error::TooManyKeys,
+        }
+    }
 }
 
 /// Non-volatile storage over the L0 data EEPROM (the raw byte area).
@@ -90,44 +109,60 @@ impl<'d> Storage<'d> {
 
     /// Read `buf.len()` bytes from `offset` (a bounds-checked, memory-mapped copy).
     pub fn read(&self, offset: u32, buf: &mut [u8]) -> Result<(), Error> {
-        self.flash
-            .eeprom_read_slice(offset, buf)
-            .map_err(Error::Flash)
+        self.flash.eeprom_read_slice(offset, buf).map_err(Error::Flash)
     }
 
     /// Write `data` at `offset` (bounds-checked; the HAL handles unlock/relock).
     pub fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Error> {
-        self.flash
-            .eeprom_write_slice(offset, data)
-            .map_err(Error::Flash)
+        self.flash.eeprom_write_slice(offset, data).map_err(Error::Flash)
     }
 }
 
-/// Largest value (bytes) a [`Kv`] record can hold. Scalars and small configs fit
-/// comfortably; for anything larger use the raw [`Storage`] API.
-pub const MAX_VALUE: usize = 256;
-/// Maximum number of distinct keys [`Kv::compact`] can track in one pass.
-pub const MAX_KEYS: usize = 64;
+/// The [`Kv`] codec ([`tower_kv`]) drives the EEPROM through this trait. The raw flash error is
+/// surfaced verbatim so [`Kv`] maps it back to [`Error::Flash`]. (Distinct from `Storage`'s
+/// inherent `read`/`write`, which already wrap the error in [`Error`].)
+impl Eeprom for Storage<'_> {
+    type Error = embassy_stm32::flash::Error;
+    fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
+        self.flash.eeprom_read_slice(off, buf)
+    }
+    fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Self::Error> {
+        self.flash.eeprom_write_slice(off, data)
+    }
+}
+
 /// KV key range reserved for console/shell settings (e.g. `/system identity`).
-/// FOTA reserves `0x5400+`; the console uses `0x5500+`.
+///
+/// Authoritative SDK EEPROM key map — apps must pick keys clear of **all** of these:
+///   - `0x5201`, `0x5202`, `0x5300..=0x533F` — radio [`net`](crate::radio::net) layer
+///     (TX-counter watermark, default-lane last-seen, and per-peer last-seen lanes).
+///   - `0x5400..=0x5403` — [`fota`](crate::fota) (download high-water mark + ident,
+///     installed-version rollback floor).
+///   - `0x5500+` — console/shell settings, allocated upward from this base (one key per
+///     declared [`Setting`](crate::shell)).
+///
+/// Apps owning their own state should use **`0x6000+`** to stay clear of the SDK ranges.
 pub const CONSOLE_SETTINGS_BASE: u16 = 0x5500;
-/// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
-const KV_HEADER: usize = 8;
 
 /// A key-value store over the EEPROM. Keys are `u16` (1..=65535; `0` is reserved).
 ///
-/// Records are laid out sequentially as `[tag | len | crc | value]`. Setting a key
-/// to a same-length value overwrites it in place; a different length (or a brand
-/// new key) appends. [`get`](Self::get) returns the latest valid record for a key.
+/// **Power-loss-safe**, double-buffered (see [`tower_kv`]): every `set` appends and compaction
+/// commits via a single superblock write, so a reset mid-write never corrupts committed data.
+/// [`get`](Self::get) returns the latest valid record for a key. Usable capacity is ~half the
+/// EEPROM region (the other half is the compaction buffer).
 pub struct Kv<'d> {
     storage: Storage<'d>,
     capacity: u32,
 }
 
 impl<'d> Kv<'d> {
-    /// Build a key-value store over the whole EEPROM region of `storage`.
-    pub fn new(storage: Storage<'d>) -> Self {
+    /// Build a key-value store over the whole EEPROM region of `storage`, initializing the
+    /// double-buffered layout (and migrating legacy single-region data, once) if needed. The
+    /// init is best-effort: a flash fault leaves the store empty rather than failing `new`, the
+    /// same fallback as a blank/corrupt key.
+    pub fn new(mut storage: Storage<'d>) -> Self {
         let capacity = storage.len() as u32;
+        let _ = tower_kv::init(&mut storage, capacity);
         Self { storage, capacity }
     }
 
@@ -145,67 +180,16 @@ impl<'d> Kv<'d> {
     }
 
     /// Store raw bytes under `key`. Use this for scalars (`&x.to_le_bytes()`) or
-    /// any pre-encoded blob — no serializer involved.
+    /// any pre-encoded blob — no serializer involved. (Codec in [`tower_kv`].)
     pub fn set_bytes(&mut self, key: u16, value: &[u8]) -> Result<(), Error> {
-        if key == 0 {
-            return Err(Error::InvalidKey);
-        }
-        if value.len() > MAX_VALUE {
-            return Err(Error::ValueTooLarge);
-        }
-        let len = value.len() as u16;
-        let mut hdr4 = [0u8; 4];
-        hdr4[0..2].copy_from_slice(&key.to_le_bytes());
-        hdr4[2..4].copy_from_slice(&len.to_le_bytes());
-        let crc = entry_crc(&hdr4, value);
-
-        let (free, existing) = self.scan(key)?;
-        // Same-size update: rewrite crc+value in place (tag/len unchanged).
-        if let Some((off, elen)) = existing
-            && elen == len
-        {
-            let mut tail = [0u8; 4 + MAX_VALUE];
-            tail[0..4].copy_from_slice(&crc.to_le_bytes());
-            tail[4..4 + value.len()].copy_from_slice(value);
-            return self.storage.write(off + 4, &tail[..4 + value.len()]);
-        }
-
-        // Otherwise append; compact and retry once if it doesn't fit.
-        let needed = KV_HEADER as u32 + len as u32;
-        let free = if free + needed > self.capacity {
-            self.compact()?;
-            let (f, _) = self.scan(key)?;
-            if f + needed > self.capacity {
-                return Err(Error::Full);
-            }
-            f
-        } else {
-            free
-        };
-
-        let mut buf = [0u8; KV_HEADER + MAX_VALUE];
-        buf[0..2].copy_from_slice(&key.to_le_bytes());
-        buf[2..4].copy_from_slice(&len.to_le_bytes());
-        buf[4..8].copy_from_slice(&crc.to_le_bytes());
-        buf[8..8 + value.len()].copy_from_slice(value);
-        self.storage.write(free, &buf[..KV_HEADER + value.len()])
+        tower_kv::set_bytes(&mut self.storage, self.capacity, key, value).map_err(Error::from)
     }
 
     /// Read the raw bytes stored under `key` into `out`; returns the value's true
     /// length (which may exceed `out.len()` — only `out.len()` bytes are copied),
     /// or `None` if the key is absent.
     pub fn get_bytes(&self, key: u16, out: &mut [u8]) -> Result<Option<usize>, Error> {
-        if key == 0 {
-            return Ok(None);
-        }
-        match self.scan(key)?.1 {
-            Some((off, len)) => {
-                let n = (len as usize).min(out.len());
-                self.storage.read(off + KV_HEADER as u32, &mut out[..n])?;
-                Ok(Some(len as usize))
-            }
-            None => Ok(None),
-        }
+        tower_kv::get_bytes(&self.storage, self.capacity, key, out).map_err(Error::from)
     }
 
     /// Store any serde value under `key`, serialized with postcard.
@@ -226,126 +210,10 @@ impl<'d> Kv<'d> {
         }
     }
 
-    /// Scan the log: returns `(free_offset, latest_valid_record_for_target)`. Stops
-    /// at the first blank (`tag == 0`) or corrupt record — which is exactly the end
-    /// of a clean log, and also where a power-loss-truncated write would sit.
-    fn scan(&self, target: u16) -> Result<(u32, Option<(u32, u16)>), Error> {
-        let mut o = 0u32;
-        let mut found = None;
-        let mut val = [0u8; MAX_VALUE];
-        loop {
-            if o + KV_HEADER as u32 > self.capacity {
-                break;
-            }
-            let mut hdr = [0u8; KV_HEADER];
-            self.storage.read(o, &mut hdr)?;
-            let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
-            if tag == 0 {
-                break; // blank -> end of log
-            }
-            let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-            let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-            if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > self.capacity {
-                break; // implausible -> treat as end
-            }
-            self.storage
-                .read(o + KV_HEADER as u32, &mut val[..len as usize])?;
-            if entry_crc(&hdr[0..4], &val[..len as usize]) != crc {
-                break; // corrupt -> end
-            }
-            if tag == target {
-                found = Some((o, len)); // keep the latest occurrence
-            }
-            o += KV_HEADER as u32 + len as u32;
-        }
-        Ok((o, found))
-    }
-
     /// Reclaim space taken by superseded records: keep only the latest record per
     /// key, packed from the start. Called automatically when an append won't fit.
+    /// (Codec in [`tower_kv`].)
     pub fn compact(&mut self) -> Result<(), Error> {
-        // Pass 1: latest offset per tag, and the end of the live log.
-        let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
-        let mut nkeys = 0usize;
-        let mut val = [0u8; MAX_VALUE];
-        let mut o = 0u32;
-        loop {
-            if o + KV_HEADER as u32 > self.capacity {
-                break;
-            }
-            let mut hdr = [0u8; KV_HEADER];
-            self.storage.read(o, &mut hdr)?;
-            let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
-            if tag == 0 {
-                break;
-            }
-            let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-            let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-            if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > self.capacity {
-                break;
-            }
-            self.storage
-                .read(o + KV_HEADER as u32, &mut val[..len as usize])?;
-            if entry_crc(&hdr[0..4], &val[..len as usize]) != crc {
-                break;
-            }
-            match latest[..nkeys].iter().position(|&(t, _)| t == tag) {
-                Some(i) => latest[i].1 = o,
-                None => {
-                    if nkeys >= MAX_KEYS {
-                        return Err(Error::TooManyKeys);
-                    }
-                    latest[nkeys] = (tag, o);
-                    nkeys += 1;
-                }
-            }
-            o += KV_HEADER as u32 + len as u32;
-        }
-        let old_free = o;
-
-        // Pass 2: copy only the latest record of each key forward (dest <= src,
-        // so the moves never clobber a not-yet-read source).
-        let mut write = 0u32;
-        let mut o = 0u32;
-        let mut temp = [0u8; KV_HEADER + MAX_VALUE];
-        while o < old_free {
-            let mut hdr = [0u8; KV_HEADER];
-            self.storage.read(o, &mut hdr)?;
-            let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
-            if tag == 0 {
-                break;
-            }
-            let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-            let size = KV_HEADER as u32 + len as u32;
-            let is_latest = latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o);
-            if is_latest {
-                if write != o {
-                    self.storage.read(o, &mut temp[..size as usize])?;
-                    self.storage.write(write, &temp[..size as usize])?;
-                }
-                write += size;
-            }
-            o += size;
-        }
-
-        // Pass 3: blank the freed tail so the scan terminates at the new end.
-        let zeros = [0u8; 64];
-        let mut z = write;
-        while z < old_free {
-            let chunk = ((old_free - z) as usize).min(zeros.len());
-            self.storage.write(z, &zeros[..chunk])?;
-            z += chunk as u32;
-        }
-        Ok(())
+        tower_kv::compact(&mut self.storage, self.capacity).map_err(Error::from)
     }
-}
-
-/// CRC-32 (IEEE 802.3) over the record header bytes followed by the value.
-///
-/// Delegates to the shared [`tower_protocol::crc`] primitive — byte-for-byte the
-/// same init / poly / final-XOR as the firmware's previous private copy, so EEPROM
-/// records written before the move still verify.
-fn entry_crc(hdr4: &[u8], value: &[u8]) -> u32 {
-    let crc = tower_protocol::crc::crc32_update(0xFFFF_FFFF, hdr4);
-    !tower_protocol::crc::crc32_update(crc, value)
 }

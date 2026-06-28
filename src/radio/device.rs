@@ -6,7 +6,6 @@
 //! line (PA7 `ExtiInput`) are owned here. RF configuration is applied separately
 //! (see [`config`](super::config)).
 
-
 use embassy_futures::select::{Either, select};
 use embassy_stm32::Peri;
 use embassy_stm32::exti::ExtiInput;
@@ -63,11 +62,13 @@ pub struct DeviceId {
 impl DeviceId {
     /// The ST library's combined 16-bit part number `(partnum << 8) | version`,
     /// which equals 304 for a genuine SPIRIT1.
+    #[must_use]
     pub fn part_number(&self) -> u16 {
         ((self.partnum as u16) << 8) | self.version as u16
     }
 
     /// Whether this matches the expected SPIRIT1 (304 / 48).
+    #[must_use]
     pub fn is_supported(&self) -> bool {
         self.partnum == regs::EXPECT_PARTNUM && self.version == regs::EXPECT_VERSION
     }
@@ -280,7 +281,8 @@ impl Spirit1 {
     /// PM_CONFIG1 = 0x98 for RX, 0x20 for TX. Running RX with the TX value (the
     /// reset default) injects SMPS spurs into the RX band and breaks demodulation.
     fn smps_for(&mut self, rx: bool) -> Result<(), RadioError> {
-        self.spi.write_reg(regs::PM_CONFIG1, if rx { 0x98 } else { 0x20 })?;
+        self.spi
+            .write_reg(regs::PM_CONFIG1, if rx { 0x98 } else { 0x20 })?;
         if !rx {
             self.spi.write_reg(0xA9, 0x11)?; // enable VCO_L buffer for TX
         }
@@ -321,6 +323,7 @@ impl Spirit1 {
     }
 
     /// Whether the nIRQ line is currently asserted (active-low → reads low).
+    #[must_use]
     pub fn irq_asserted(&self) -> bool {
         self.irq.is_low()
     }
@@ -390,19 +393,12 @@ impl Spirit1 {
     /// Transmit one frame (≤96 B), optionally preceded by CSMA/CCA. Loads the
     /// FIFO, strobes TX, and waits on nIRQ for TX-done (or CCA-busy / FIFO-error /
     /// `timeout`). The variable-length packet's length field is set automatically.
-    pub async fn tx(
-        &mut self,
-        data: &[u8],
-        use_csma: bool,
-        timeout: Duration,
-    ) -> Result<(), RadioError> {
+    pub async fn tx(&mut self, data: &[u8], use_csma: bool, timeout: Duration) -> Result<(), RadioError> {
         if data.len() > MAX_FRAME {
             return Err(RadioError::TooLong);
         }
         self.to_ready().await?;
-        self.set_irq_mask(
-            regs::IRQ_TX_DATA_SENT | regs::IRQ_MAX_BO_CCA_REACH | regs::IRQ_TX_FIFO_ERROR,
-        )?;
+        self.set_irq_mask(regs::IRQ_TX_DATA_SENT | regs::IRQ_MAX_BO_CCA_REACH | regs::IRQ_TX_FIFO_ERROR)?;
         self.set_csma(use_csma)?;
         self.smps_for(false)?;
         self.spi.command(regs::CMD_FLUSHTXFIFO)?;
@@ -448,10 +444,7 @@ impl Spirit1 {
         self.smps_for(true)?;
         self.spi.command(regs::CMD_FLUSHRXFIFO)?;
         self.set_irq_mask(
-            regs::IRQ_RX_DATA_READY
-                | regs::IRQ_RX_DATA_DISC
-                | regs::IRQ_CRC_ERROR
-                | regs::IRQ_RX_FIFO_ERROR,
+            regs::IRQ_RX_DATA_READY | regs::IRQ_RX_DATA_DISC | regs::IRQ_CRC_ERROR | regs::IRQ_RX_FIFO_ERROR,
         )?;
         let _ = self.irq_status();
         self.spi.command(regs::CMD_RX)?;

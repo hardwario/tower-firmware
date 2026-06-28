@@ -1,0 +1,729 @@
+//! Power-loss-safe key-value codec over a byte-addressable EEPROM — the storage engine that
+//! backs [`tower::storage::Kv`] in the firmware.
+//!
+//! It lives in its own crate for one reason: the firmware is `no_std` and targets thumbv6m, so
+//! it cannot `cargo test`. The codec, by contrast, is pure logic over a tiny [`Eeprom`] byte-store
+//! trait — the firmware implements it over the L0 data EEPROM ([`tower::storage::Storage`]); the
+//! tests here implement it over a RAM array — so the layout, the compaction commit, the
+//! power-loss edges, and the legacy migration can all be exercised on the host.
+//!
+//! # Why double-buffered
+//!
+//! The catastrophic failure for this SDK is losing (or lowering) the radio TX-counter watermark:
+//! the counter feeds the AES-CCM nonce, so a reset/rollback of it reuses a nonce. A single-region
+//! append-log cannot survive a power-loss mid-write without risking exactly that (a torn in-place
+//! update or a torn in-place compaction can orphan or resurface a record). So the region is split
+//! into **two halves** plus two **superblocks** (`magic ‖ generation ‖ crc`):
+//!
+//! ```text
+//!   [ half 0 records ][ half 1 records ][ super0 ][ super1 ]
+//!    0              H  H             2H   top-24    top-12
+//! ```
+//!
+//! - The **active** half is the one whose superblock is valid and has the highest generation.
+//! - **Updates are append-only** within the active half — a torn write only ever corrupts the
+//!   *tail* record, so `scan` stops there and every committed record before it survives.
+//! - **Compaction is a flip:** blank the inactive half, write the live set packed into it, then
+//!   write *its* superblock at `generation + 1`. That single CRC'd superblock write is the atomic
+//!   commit — torn before it, the old half is still active (no data lost); torn during it, the
+//!   superblock fails its CRC and the old half still wins.
+//!
+//! The record format inside a half is unchanged from the firmware's original single-region store
+//! (`[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over `tag‖len‖value`), so legacy data
+//! migrates without reserialization — see [`init`].
+
+#![cfg_attr(not(test), no_std)]
+
+/// Largest value (bytes) one record can hold.
+pub const MAX_VALUE: usize = 256;
+/// Maximum number of distinct keys [`compact`] / migration can track in one pass.
+pub const MAX_KEYS: usize = 64;
+/// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
+pub const KV_HEADER: usize = 8;
+
+/// Superblock magic — also distinguishes a double-buffered region from legacy single-region data
+/// (a legacy record's first bytes are a `u16` key, never this magic).
+const SUPER_MAGIC: [u8; 4] = *b"TKV1";
+/// Superblock size: magic(4) + generation(4 LE) + crc(4 LE, over magic‖generation).
+const SUPER_LEN: u32 = 12;
+
+/// A byte-addressable store the codec reads and writes. The firmware implements it over the
+/// STM32L0 data EEPROM; host tests implement it over a RAM array. All offsets are bounded by the
+/// `capacity` passed to the codec functions (the codec never addresses past it).
+pub trait Eeprom {
+    /// Backend error (e.g. the HAL flash error in the firmware; `()` in tests).
+    type Error;
+    /// Read `buf.len()` bytes starting at `off`.
+    fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), Self::Error>;
+    /// Write `data` starting at `off`.
+    fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Self::Error>;
+}
+
+/// A key-value codec error. `Backend` wraps the [`Eeprom`] error so the firmware can preserve its
+/// HAL flash error; the rest are codec-level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvError<E> {
+    /// The underlying EEPROM read/write failed (e.g. out of bounds).
+    Backend(E),
+    /// A value exceeded [`MAX_VALUE`] bytes.
+    ValueTooLarge,
+    /// The store (one half) is full even after a compaction flip — or the legacy live set being
+    /// migrated does not fit one half.
+    Full,
+    /// Key `0` is reserved (it marks the end of the record log).
+    InvalidKey,
+    /// More distinct keys than [`MAX_KEYS`] (only hit during compaction / migration).
+    TooManyKeys,
+}
+
+/// CRC-32 (IEEE 802.3) over the record header bytes (`tag ‖ len`) followed by the value — the
+/// `crc` field itself is excluded. Byte-for-byte the firmware's framing, via the shared primitive.
+#[must_use]
+pub fn entry_crc(hdr4: &[u8], value: &[u8]) -> u32 {
+    let crc = tower_protocol::crc::crc32_update(0xFFFF_FFFF, hdr4);
+    !tower_protocol::crc::crc32_update(crc, value)
+}
+
+// --- layout -------------------------------------------------------------------------------------
+
+/// Record-area size of one half, given the total region `capacity`. The two superblocks sit in the
+/// top `2 * SUPER_LEN` bytes; the rest splits evenly into the two halves.
+fn half_len(capacity: u32) -> u32 {
+    capacity.saturating_sub(2 * SUPER_LEN) / 2
+}
+
+/// Record-area base offset of half `h` (0 or 1).
+fn half_base(capacity: u32, h: u8) -> u32 {
+    h as u32 * half_len(capacity)
+}
+
+/// Offset of half `h`'s superblock (top of the region).
+fn super_off(capacity: u32, h: u8) -> u32 {
+    capacity - 2 * SUPER_LEN + h as u32 * SUPER_LEN
+}
+
+/// Read half `h`'s superblock generation, or `None` if it is absent / corrupt (bad magic or CRC).
+fn read_gen<S: Eeprom>(store: &S, capacity: u32, h: u8) -> Result<Option<u32>, KvError<S::Error>> {
+    let mut b = [0u8; SUPER_LEN as usize];
+    store
+        .read(super_off(capacity, h), &mut b)
+        .map_err(KvError::Backend)?;
+    if b[0..4] != SUPER_MAGIC {
+        return Ok(None);
+    }
+    let g = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    let crc = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+    if super_crc(&b[0..8]) != crc {
+        return Ok(None);
+    }
+    Ok(Some(g))
+}
+
+/// Write half `h`'s superblock with `generation` — the atomic commit point of a flip. The CRC
+/// makes even a torn superblock write fail closed (it won't validate, so the other half wins).
+fn write_gen<S: Eeprom>(
+    store: &mut S,
+    capacity: u32,
+    h: u8,
+    generation: u32,
+) -> Result<(), KvError<S::Error>> {
+    let mut b = [0u8; SUPER_LEN as usize];
+    b[0..4].copy_from_slice(&SUPER_MAGIC);
+    b[4..8].copy_from_slice(&generation.to_le_bytes());
+    let crc = super_crc(&b[0..8]);
+    b[8..12].copy_from_slice(&crc.to_le_bytes());
+    store.write(super_off(capacity, h), &b).map_err(KvError::Backend)
+}
+
+fn super_crc(b: &[u8]) -> u32 {
+    !tower_protocol::crc::crc32_update(0xFFFF_FFFF, b)
+}
+
+/// The active half `(h, generation)`: the valid superblock with the highest generation, or `None`
+/// if neither half is initialized yet (a fresh, un-migrated region).
+fn active<S: Eeprom>(store: &S, capacity: u32) -> Result<Option<(u8, u32)>, KvError<S::Error>> {
+    let g0 = read_gen(store, capacity, 0)?;
+    let g1 = read_gen(store, capacity, 1)?;
+    Ok(match (g0, g1) {
+        (Some(a), Some(b)) => Some(if a >= b { (0, a) } else { (1, b) }),
+        (Some(a), None) => Some((0, a)),
+        (None, Some(b)) => Some((1, b)),
+        (None, None) => None,
+    })
+}
+
+// --- record scan within a half ------------------------------------------------------------------
+
+/// Result of a [`scan_half`]: `(free_rel, latest_record_for_target)`, offsets **relative** to the
+/// half's record base, where a record is `(rel_offset, value_len)`.
+type HalfScan = (u32, Option<(u32, u16)>);
+
+/// Scan one half's record area `[base, base + area)`: returns `(free_rel, latest(rel,len))`. Stops
+/// at the first blank (`tag == 0`) or corrupt record — the end of a clean log, and where a torn
+/// (tail) append would sit.
+fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<HalfScan, KvError<S::Error>> {
+    let mut o = 0u32;
+    let mut found = None;
+    let mut val = [0u8; MAX_VALUE];
+    loop {
+        if o + KV_HEADER as u32 > area {
+            break;
+        }
+        let mut hdr = [0u8; KV_HEADER];
+        store.read(base + o, &mut hdr).map_err(KvError::Backend)?;
+        let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
+        if tag == 0 {
+            break;
+        }
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > area {
+            break;
+        }
+        store
+            .read(base + o + KV_HEADER as u32, &mut val[..len as usize])
+            .map_err(KvError::Backend)?;
+        if entry_crc(&hdr[0..4], &val[..len as usize]) != crc {
+            break;
+        }
+        if tag == target {
+            found = Some((o, len));
+        }
+        o += KV_HEADER as u32 + len as u32;
+    }
+    Ok((o, found))
+}
+
+/// Append one `[tag|len|crc|value]` record at absolute offset `at`.
+fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(), KvError<S::Error>> {
+    let len = value.len() as u16;
+    let mut buf = [0u8; KV_HEADER + MAX_VALUE];
+    buf[0..2].copy_from_slice(&key.to_le_bytes());
+    buf[2..4].copy_from_slice(&len.to_le_bytes());
+    let crc = entry_crc(&buf[0..4], value);
+    buf[4..8].copy_from_slice(&crc.to_le_bytes());
+    buf[8..8 + value.len()].copy_from_slice(value);
+    store
+        .write(at, &buf[..KV_HEADER + value.len()])
+        .map_err(KvError::Backend)
+}
+
+/// Blank `len` bytes from `at` (so a half's record scan terminates at a clean end).
+fn blank<S: Eeprom>(store: &mut S, at: u32, len: u32) -> Result<(), KvError<S::Error>> {
+    let zeros = [0u8; 64];
+    let mut z = 0u32;
+    while z < len {
+        let chunk = ((len - z) as usize).min(zeros.len());
+        store.write(at + z, &zeros[..chunk]).map_err(KvError::Backend)?;
+        z += chunk as u32;
+    }
+    Ok(())
+}
+
+// --- public API ---------------------------------------------------------------------------------
+
+/// Initialize / migrate the region into the double-buffered layout. Idempotent: returns
+/// immediately if a valid superblock already exists. Call once before first use (the firmware's
+/// `Kv::new` does, best-effort).
+///
+/// Migration of legacy single-region data is non-destructive in the common case: legacy records
+/// already live in half 0's record area, so if they fit one half this just commits half 0's
+/// superblock (zero data movement — fully power-safe). A legacy log larger than one half is first
+/// packed by a one-time legacy compaction (the only place the old non-atomic pack still runs; if
+/// interrupted, no superblock was written, so the next boot re-migrates).
+pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
+    if active(store, capacity)?.is_some() {
+        return Ok(()); // already double-buffered
+    }
+    let half = half_len(capacity);
+    let oldfree = legacy_free(store, capacity)?;
+    if oldfree > half {
+        // Legacy log spilled past one half — pack its live set to the front so it fits half 0.
+        let live = legacy_compact(store, capacity)?;
+        if live > half {
+            return Err(KvError::Full); // live set genuinely too big for a half
+        }
+    }
+    // Legacy records (if any) now occupy `[0, min(oldfree, half))` ⊂ half 0's record area, in the
+    // same record format — so committing half 0's superblock adopts them verbatim. A fresh region
+    // (oldfree == 0) commits an empty half 0. Half 1's superblock is left blank → invalid.
+    write_gen(store, capacity, 0, 1)
+}
+
+/// Store raw `value` bytes under `key`. Append-only within the active half (a torn write only ever
+/// corrupts the tail); when the half is full, a compaction flip frees space and the append retries
+/// in the freshly-packed other half.
+pub fn set_bytes<S: Eeprom>(
+    store: &mut S,
+    capacity: u32,
+    key: u16,
+    value: &[u8],
+) -> Result<(), KvError<S::Error>> {
+    if key == 0 {
+        return Err(KvError::InvalidKey);
+    }
+    if value.len() > MAX_VALUE {
+        return Err(KvError::ValueTooLarge);
+    }
+    let (h, g) = match active(store, capacity)? {
+        Some(x) => x,
+        None => {
+            init(store, capacity)?;
+            (0, 1)
+        }
+    };
+    let half = half_len(capacity);
+    let needed = KV_HEADER as u32 + value.len() as u32;
+
+    let base = half_base(capacity, h);
+    let (free, _) = scan_half(store, base, half, key)?;
+    if free + needed <= half {
+        return append(store, base + free, key, value);
+    }
+
+    // Active half full → flip-compact into the other half, then append there.
+    flip(store, capacity, h, g)?;
+    let (h2, _) = active(store, capacity)?.ok_or(KvError::Full)?;
+    let base2 = half_base(capacity, h2);
+    let (free2, _) = scan_half(store, base2, half, key)?;
+    if free2 + needed > half {
+        return Err(KvError::Full);
+    }
+    append(store, base2 + free2, key, value)
+}
+
+/// Read the raw bytes stored under `key` into `out`; returns the value's true length (which may
+/// exceed `out.len()` — only `out.len()` bytes are copied), or `None` if the key is absent.
+pub fn get_bytes<S: Eeprom>(
+    store: &S,
+    capacity: u32,
+    key: u16,
+    out: &mut [u8],
+) -> Result<Option<usize>, KvError<S::Error>> {
+    if key == 0 {
+        return Ok(None);
+    }
+    let Some((h, _)) = active(store, capacity)? else {
+        return Ok(None); // un-initialized region → empty
+    };
+    let base = half_base(capacity, h);
+    match scan_half(store, base, half_len(capacity), key)?.1 {
+        Some((off, len)) => {
+            let n = (len as usize).min(out.len());
+            store
+                .read(base + off + KV_HEADER as u32, &mut out[..n])
+                .map_err(KvError::Backend)?;
+            Ok(Some(len as usize))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Reclaim space taken by superseded records via a power-safe **flip**: the live set is packed
+/// into the inactive half and committed by one superblock write. A no-op on an un-initialized
+/// region.
+pub fn compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
+    if let Some((h, g)) = active(store, capacity)? {
+        flip(store, capacity, h, g)?;
+    }
+    Ok(())
+}
+
+/// Flip: pack the live set of the active half `src_h` (generation `src_gen`) into the inactive
+/// half, then commit by writing the inactive half's superblock at `src_gen + 1`.
+fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Result<(), KvError<S::Error>> {
+    let half = half_len(capacity);
+    let src_base = half_base(capacity, src_h);
+    let dst_h = 1 - src_h;
+    let dst_base = half_base(capacity, dst_h);
+
+    // Pass 1: latest offset per tag in the source half (+ the source log's end).
+    let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
+    let mut nkeys = 0usize;
+    let src_free = walk_latest(store, src_base, half, &mut latest, &mut nkeys)?;
+
+    // Blank the destination half so its scan will terminate cleanly (it may hold stale records
+    // from when it was active two generations ago). Its superblock is untouched here, so the
+    // source half stays active throughout — the blank/copy are not yet committed.
+    blank(store, dst_base, half)?;
+
+    // Pass 2: copy each latest record forward into the destination, packed.
+    let mut wr = 0u32;
+    let mut o = 0u32;
+    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    while o < src_free {
+        let mut hdr = [0u8; KV_HEADER];
+        store.read(src_base + o, &mut hdr).map_err(KvError::Backend)?;
+        let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
+        if tag == 0 {
+            break;
+        }
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        let size = KV_HEADER as u32 + len as u32;
+        if latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o) {
+            if wr + size > half {
+                return Err(KvError::Full); // live set doesn't fit a half
+            }
+            store
+                .read(src_base + o, &mut tmp[..size as usize])
+                .map_err(KvError::Backend)?;
+            store
+                .write(dst_base + wr, &tmp[..size as usize])
+                .map_err(KvError::Backend)?;
+            wr += size;
+        }
+        o += size;
+    }
+
+    // Commit: the destination becomes active the instant this CRC'd superblock lands.
+    write_gen(store, capacity, dst_h, src_gen.wrapping_add(1))
+}
+
+/// Walk a half's records recording the latest offset per tag; returns the log's end offset (rel).
+fn walk_latest<S: Eeprom>(
+    store: &S,
+    base: u32,
+    area: u32,
+    latest: &mut [(u16, u32); MAX_KEYS],
+    nkeys: &mut usize,
+) -> Result<u32, KvError<S::Error>> {
+    let mut o = 0u32;
+    let mut val = [0u8; MAX_VALUE];
+    loop {
+        if o + KV_HEADER as u32 > area {
+            break;
+        }
+        let mut hdr = [0u8; KV_HEADER];
+        store.read(base + o, &mut hdr).map_err(KvError::Backend)?;
+        let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
+        if tag == 0 {
+            break;
+        }
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > area {
+            break;
+        }
+        store
+            .read(base + o + KV_HEADER as u32, &mut val[..len as usize])
+            .map_err(KvError::Backend)?;
+        if entry_crc(&hdr[0..4], &val[..len as usize]) != crc {
+            break;
+        }
+        match latest[..*nkeys].iter().position(|&(t, _)| t == tag) {
+            Some(i) => latest[i].1 = o,
+            None => {
+                if *nkeys >= MAX_KEYS {
+                    return Err(KvError::TooManyKeys);
+                }
+                latest[*nkeys] = (tag, o);
+                *nkeys += 1;
+            }
+        }
+        o += KV_HEADER as u32 + len as u32;
+    }
+    Ok(o)
+}
+
+// --- legacy single-region migration -------------------------------------------------------------
+//
+// The pre-double-buffer store laid records from offset 0 over the whole region with no superblock.
+// These two helpers read/pack that layout during a one-time [`init`] migration only.
+
+/// End offset of the legacy single-region log (scanning records from offset 0 over the whole
+/// region). `0` means no legacy data (a fresh region).
+fn legacy_free<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
+    // The whole region is the legacy record area; reuse the half scanner with base 0 / area=cap.
+    Ok(scan_half(store, 0, capacity, 0)?.0)
+}
+
+/// One-time legacy in-place compaction: pack the legacy live set to `[0, live)` and return `live`.
+/// Front-packing keeps `dest <= src`, so the copy never clobbers a not-yet-read source. Used only
+/// for a legacy log too large for one half; if interrupted, [`init`] re-runs (no superblock yet).
+fn legacy_compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<u32, KvError<S::Error>> {
+    let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
+    let mut nkeys = 0usize;
+    let old_free = walk_latest(store, 0, capacity, &mut latest, &mut nkeys)?;
+
+    let mut wr = 0u32;
+    let mut o = 0u32;
+    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    while o < old_free {
+        let mut hdr = [0u8; KV_HEADER];
+        store.read(o, &mut hdr).map_err(KvError::Backend)?;
+        let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
+        if tag == 0 {
+            break;
+        }
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        let size = KV_HEADER as u32 + len as u32;
+        if latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o) {
+            if wr != o {
+                store
+                    .read(o, &mut tmp[..size as usize])
+                    .map_err(KvError::Backend)?;
+                store.write(wr, &tmp[..size as usize]).map_err(KvError::Backend)?;
+            }
+            wr += size;
+        }
+        o += size;
+    }
+    // Blank the freed tail through the old end so a later scan/migration sees a clean boundary.
+    blank(store, wr, old_free - wr)?;
+    Ok(wr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec::Vec;
+
+    const CAP: u32 = 512; // small enough to force flips quickly in tests
+
+    /// RAM-backed [`Eeprom`]; `write` programs bytes verbatim (byte-addressable, like the L0 data
+    /// EEPROM). `torn_write` simulates a power-loss mid-program (only a prefix lands).
+    struct Ram {
+        buf: Vec<u8>,
+    }
+    impl Ram {
+        fn new(cap: usize) -> Self {
+            Self { buf: vec![0u8; cap] }
+        }
+        /// Simulate a torn write: only the first `landed` bytes of `data` are programmed.
+        fn torn_write(&mut self, off: u32, data: &[u8], landed: usize) {
+            let n = landed.min(data.len());
+            self.buf[off as usize..off as usize + n].copy_from_slice(&data[..n]);
+        }
+        /// Write a legacy single-region record at `off`, returning the next offset (for building
+        /// pre-double-buffer fixtures in the migration tests).
+        fn legacy_put(&mut self, off: u32, key: u16, value: &[u8]) -> u32 {
+            append(self, off, key, value).unwrap();
+            off + KV_HEADER as u32 + value.len() as u32
+        }
+    }
+    impl Eeprom for Ram {
+        type Error = ();
+        fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), ()> {
+            buf.copy_from_slice(self.buf.get(off as usize..off as usize + buf.len()).ok_or(())?);
+            Ok(())
+        }
+        fn write(&mut self, off: u32, data: &[u8]) -> Result<(), ()> {
+            let s = off as usize;
+            self.buf
+                .get_mut(s..s + data.len())
+                .ok_or(())?
+                .copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    fn set(ram: &mut Ram, key: u16, value: &[u8]) -> Result<(), KvError<()>> {
+        set_bytes(ram, CAP, key, value)
+    }
+    fn get_vec(ram: &Ram, key: u16) -> Option<Vec<u8>> {
+        let mut out = [0u8; MAX_VALUE];
+        get_bytes(ram, CAP, key, &mut out)
+            .unwrap()
+            .map(|n| out[..n].to_vec())
+    }
+
+    #[test]
+    fn roundtrip_and_absent() {
+        let mut ram = Ram::new(CAP as usize);
+        assert_eq!(get_vec(&ram, 1), None);
+        set(&mut ram, 1, b"hello").unwrap();
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"hello"[..]));
+        assert_eq!(get_vec(&ram, 2), None);
+    }
+
+    #[test]
+    fn key_zero_reserved_and_value_too_large() {
+        let mut ram = Ram::new(CAP as usize);
+        assert_eq!(set(&mut ram, 0, b"x"), Err(KvError::InvalidKey));
+        assert_eq!(get_bytes(&ram, CAP, 0, &mut [0u8; 4]).unwrap(), None);
+        assert_eq!(
+            set(&mut ram, 1, &[0u8; MAX_VALUE + 1]),
+            Err(KvError::ValueTooLarge)
+        );
+    }
+
+    #[test]
+    fn append_only_latest_wins() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, &[1, 2, 3, 4]).unwrap();
+        set(&mut ram, 1, &[9, 9, 9, 9]).unwrap(); // same length still appends (no in-place)
+        set(&mut ram, 1, &[5, 6]).unwrap(); // different length appends
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&[5, 6][..]));
+    }
+
+    #[test]
+    fn multiple_keys_independent_across_flips() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 0x5202, b"keepme").unwrap();
+        // Churn key 0x5201 enough to force several compaction flips; 0x5202 must survive each.
+        for i in 0..400u32 {
+            set(&mut ram, 0x5201, &i.to_le_bytes()).unwrap();
+            assert_eq!(
+                get_vec(&ram, 0x5202).as_deref(),
+                Some(&b"keepme"[..]),
+                "lost key across flip at i={i}"
+            );
+        }
+        assert_eq!(get_vec(&ram, 0x5201).unwrap(), 399u32.to_le_bytes());
+    }
+
+    #[test]
+    fn flip_alternates_active_half_and_bumps_generation() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"v").unwrap();
+        let (h0, g0) = active(&ram, CAP).unwrap().unwrap();
+        compact(&mut ram, CAP).unwrap();
+        let (h1, g1) = active(&ram, CAP).unwrap().unwrap();
+        assert_ne!(h0, h1, "flip must switch the active half");
+        assert_eq!(g1, g0 + 1, "flip must bump the generation");
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn full_when_value_cannot_fit_a_half() {
+        let mut ram = Ram::new(CAP as usize);
+        let half = half_len(CAP) as usize;
+        // A value larger than a half (minus header) can never fit, even after a flip.
+        assert_eq!(set(&mut ram, 1, &vec![7u8; half]), Err(KvError::Full));
+    }
+
+    #[test]
+    fn torn_append_preserves_prior_keys() {
+        // A torn append corrupts only the tail record; scan stops there and prior keys survive.
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"alpha").unwrap();
+        set(&mut ram, 2, b"bravo").unwrap();
+        let (h, _) = active(&ram, CAP).unwrap().unwrap();
+        let base = half_base(CAP, h);
+        let (free, _) = scan_half(&ram, base, half_len(CAP), 1).unwrap();
+        let mut rec = [0u8; KV_HEADER + 4];
+        rec[0..2].copy_from_slice(&3u16.to_le_bytes());
+        rec[2..4].copy_from_slice(&4u16.to_le_bytes());
+        let crc = entry_crc(&rec[0..4], &[7, 7, 7, 7]);
+        rec[4..8].copy_from_slice(&crc.to_le_bytes());
+        rec[8..12].copy_from_slice(&[7, 7, 7, 7]);
+        ram.torn_write(base + free, &rec, 6); // only 6 of 12 bytes land
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"alpha"[..]));
+        assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"bravo"[..]));
+        assert_eq!(get_vec(&ram, 3), None, "the torn in-flight record is dropped");
+    }
+
+    #[test]
+    fn torn_flip_keeps_old_half_active() {
+        // Power-safety of compaction: a flip that writes the destination half but loses power
+        // before the superblock commit must leave the OLD half active with the last good values —
+        // and the next successful set must still see them.
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"committed-1").unwrap();
+        set(&mut ram, 2, b"committed-2").unwrap();
+        let (src_h, src_gen) = active(&ram, CAP).unwrap().unwrap();
+
+        // Mimic flip()'s body but DROP the final superblock commit (the power-loss point).
+        let half = half_len(CAP);
+        let dst_h = 1 - src_h;
+        let dst_base = half_base(CAP, dst_h);
+        blank(&mut ram, dst_base, half).unwrap();
+        // (write some plausible-but-uncommitted records into the destination half)
+        append(&mut ram, dst_base, 1, b"GARBAGE").unwrap();
+        // ... no write_gen() — power lost here.
+
+        // The old half is still active and intact.
+        let (now_h, now_gen) = active(&ram, CAP).unwrap().unwrap();
+        assert_eq!(
+            (now_h, now_gen),
+            (src_h, src_gen),
+            "old half must remain active after a torn flip"
+        );
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"committed-1"[..]));
+        assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"committed-2"[..]));
+    }
+
+    #[test]
+    fn torn_superblock_commit_fails_closed() {
+        // If the superblock write itself tears (CRC won't match), that half is treated as invalid
+        // and the other half wins — never a half-committed generation.
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"good").unwrap();
+        let (src_h, src_gen) = active(&ram, CAP).unwrap().unwrap();
+        let dst_h = 1 - src_h;
+        // Build a valid superblock for dst at gen+1, then tear it (only the magic + 2 bytes land).
+        let mut sb = [0u8; SUPER_LEN as usize];
+        sb[0..4].copy_from_slice(&SUPER_MAGIC);
+        sb[4..8].copy_from_slice(&(src_gen + 1).to_le_bytes());
+        let crc = super_crc(&sb[0..8]);
+        sb[8..12].copy_from_slice(&crc.to_le_bytes());
+        ram.torn_write(super_off(CAP, dst_h), &sb, 6);
+        assert_eq!(
+            active(&ram, CAP).unwrap(),
+            Some((src_h, src_gen)),
+            "torn superblock must not win"
+        );
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"good"[..]));
+    }
+
+    #[test]
+    fn migrate_legacy_fast_path() {
+        // Legacy single-region data that fits one half migrates with zero data movement.
+        let mut ram = Ram::new(CAP as usize);
+        let mut o = 0u32;
+        o = ram.legacy_put(o, 0x5201, &7u32.to_le_bytes()); // e.g. the TX-counter watermark
+        o = ram.legacy_put(o, 0x5202, &3u32.to_le_bytes());
+        let _ = ram.legacy_put(o, 0x5300, b"peer");
+        assert!(
+            active(&ram, CAP).unwrap().is_none(),
+            "legacy data must look un-initialized"
+        );
+        init(&mut ram, CAP).unwrap();
+        assert!(
+            active(&ram, CAP).unwrap().is_some(),
+            "init must commit a superblock"
+        );
+        assert_eq!(get_vec(&ram, 0x5201).unwrap(), 7u32.to_le_bytes());
+        assert_eq!(get_vec(&ram, 0x5202).unwrap(), 3u32.to_le_bytes());
+        assert_eq!(get_vec(&ram, 0x5300).as_deref(), Some(&b"peer"[..]));
+        // And the store keeps working (and stays consistent) after migration.
+        set(&mut ram, 0x5201, &8u32.to_le_bytes()).unwrap();
+        assert_eq!(get_vec(&ram, 0x5201).unwrap(), 8u32.to_le_bytes());
+    }
+
+    #[test]
+    fn migrate_fresh_region_is_empty_then_usable() {
+        let mut ram = Ram::new(CAP as usize);
+        init(&mut ram, CAP).unwrap();
+        assert_eq!(get_vec(&ram, 1), None);
+        set(&mut ram, 1, b"x").unwrap();
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn migrate_legacy_slow_path_preserves_live_set() {
+        // A legacy log larger than one half: many superseded versions of one key plus a couple of
+        // others. After migration only the latest survive, and the watermark is intact.
+        let mut ram = Ram::new(CAP as usize);
+        let half = half_len(CAP);
+        let mut o = 0u32;
+        o = ram.legacy_put(o, 0x5201, &1u32.to_le_bytes()); // watermark (early in the log)
+        o = ram.legacy_put(o, 0x5202, b"keep");
+        let mut last = 0u32;
+        while o + (KV_HEADER as u32 + 4) <= CAP - 2 * SUPER_LEN {
+            last += 1;
+            o = ram.legacy_put(o, 0x5300, &last.to_le_bytes()); // churn key, growing the log
+        }
+        assert!(o > half, "fixture must exceed one half to exercise the slow path");
+        // Update the watermark to a higher value late in the log (its latest must win post-migrate).
+        let _ = ram.legacy_put(o, 0x5201, &42u32.to_le_bytes());
+        init(&mut ram, CAP).unwrap();
+        assert_eq!(
+            get_vec(&ram, 0x5201).unwrap(),
+            42u32.to_le_bytes(),
+            "latest watermark must survive"
+        );
+        assert_eq!(get_vec(&ram, 0x5202).as_deref(), Some(&b"keep"[..]));
+        assert_eq!(get_vec(&ram, 0x5300).unwrap(), last.to_le_bytes());
+    }
+}

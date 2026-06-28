@@ -1,8 +1,9 @@
 //! TMP112 I²C temperature sensor driver.
 //!
-//! HAL-independent: generic over [`embedded_hal::i2c::I2c`], so the same driver
-//! works with the embassy-stm32 blocking I²C used on the Core Module, with a
-//! shared-bus device (`embedded-hal-bus`), or with a mock in host tests.
+//! HAL-independent: the register-level methods are generic over [`embedded_hal::i2c::I2c`], so
+//! they work with the embassy-stm32 blocking I²C used on the Core Module, a shared-bus device
+//! (`embedded-hal-bus`), or a mock in host tests. (The async [`oneshot`](Tmp112::oneshot)
+//! convenience additionally depends on `embassy-time` for its conversion wait.)
 //!
 //! One-shot oriented: the sensor is told to perform a single conversion on
 //! demand and otherwise stays in shutdown (~1 µA), matching the low-power
@@ -112,6 +113,9 @@ impl<I2C: I2c> Tmp112<I2C> {
     /// the executor can run other tasks (or the core can sleep) meanwhile.
     pub async fn oneshot(&mut self) -> Result<i16, I2C::Error> {
         self.trigger_oneshot()?;
+        // Wait *before* the first ready-check: OS reads 1 immediately after the trigger write and
+        // only drops to 0 once the conversion is under way, so polling without this lead could see
+        // the stale "ready" and return the previous sample. Keep the wait ahead of the check.
         for _ in 0..POLL_TRIES {
             Timer::after_millis(POLL_MS).await;
             if self.conversion_ready()? {

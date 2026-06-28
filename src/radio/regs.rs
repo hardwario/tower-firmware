@@ -12,7 +12,6 @@
 //! MC_STATE status bytes are returned on MISO during the header + address bytes
 //! of *every* transaction (see [`state_from_status`]).
 
-
 // --- SPI header bytes (§10.2) ---
 /// Header: write to register/FIFO (A/C=0, W/R=0).
 pub const WRITE: u8 = 0x00;

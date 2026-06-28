@@ -61,7 +61,9 @@ async fn run(_b: Board) {
     let n2 = frame::seal_frame(&mut ccm, &KEY, &hdr, payload, &mut buf).unwrap();
     buf[frame::HDR_LEN + 2] ^= 0x40; // flip a ciphertext bit
     match frame::open_frame(&mut ccm, &KEY, &mut buf[..n2]) {
-        Err(frame::FrameError::AuthFail) => info!(target: "frame", "tampered frame: correctly REJECTED (AuthFail)"),
+        Err(frame::FrameError::AuthFail) => {
+            info!(target: "frame", "tampered frame: correctly REJECTED (AuthFail)")
+        }
         other => {
             error!(target: "frame", "tampered frame: expected AuthFail, got {:?}", other);
             pass = false;

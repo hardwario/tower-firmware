@@ -7,7 +7,6 @@
 //! hour = 36 000 ms) and counts **all** TX — data, ACK, bulk, retransmits, JOIN.
 //! The gateway is governed too (regulatory, independent of mains power).
 
-
 use embassy_time::Instant;
 
 /// Nominal over-the-air bit rate.
@@ -85,6 +84,7 @@ impl DutyGovernor {
     }
 
     /// Remaining airtime budget (ms).
+    #[must_use]
     pub fn budget_ms(&self) -> u32 {
         self.budget_ms
     }

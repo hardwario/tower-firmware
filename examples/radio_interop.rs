@@ -42,9 +42,10 @@ const GW_ID: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
-/// EEPROM keys for cumulative soak tallies (clear of the net layer's 0x52xx/0x53xx).
-const KV_COUNT: u16 = 0x5410; // node: tx_ok / gateway: accepted
-const KV_FAIL: u16 = 0x5411; // either role: latched failures
+/// EEPROM keys for cumulative soak tallies. App-owned keys live at `0x6000+`, clear of all
+/// SDK reservations (net `0x52xx/0x53xx`, FOTA `0x54xx`, console `0x55xx`; see `storage`).
+const KV_COUNT: u16 = 0x6000; // node: tx_ok / gateway: accepted
+const KV_FAIL: u16 = 0x6001; // either role: latched failures
 
 #[cfg(feature = "role-node")]
 fn xorshift32(s: &mut u32) -> u32 {
@@ -79,8 +80,13 @@ fn read_u32(kv: &Kv<'static>, key: u16) -> u32 {
 async fn run(b: Board) {
     let mut led = Output::new(b.led, Level::Low, Speed::Low);
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -89,7 +95,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::DEFAULT, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "soak", "net init: {:?}", e);

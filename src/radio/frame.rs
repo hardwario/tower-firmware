@@ -11,7 +11,6 @@
 //! is pure (no I/O) and ties the layout to [`ccm`](super::ccm) via
 //! [`seal_frame`]/[`open_frame`].
 
-
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
 /// Protocol version (bits[7:5] of `ver_type`).
@@ -44,6 +43,7 @@ pub enum FrameType {
 }
 
 impl FrameType {
+    #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
             0 => Self::Data,
@@ -58,6 +58,7 @@ impl FrameType {
         })
     }
     /// Whether this frame type carries the 3-byte bulk index field.
+    #[must_use]
     pub fn has_bulk_index(self) -> bool {
         matches!(self, Self::BulkReq | Self::BulkData)
     }

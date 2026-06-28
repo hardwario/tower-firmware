@@ -23,7 +23,6 @@
 //! strip.write_rgb(&[Rgb::new(16, 0, 0); 8]).await;
 //! ```
 
-
 use embassy_stm32::Peri;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dma::InterruptHandler;

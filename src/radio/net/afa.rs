@@ -152,10 +152,17 @@ impl Net {
                 if !self.afa_channel_ready(ch, Instant::now()) {
                     continue;
                 }
-                if config::set_freq_hz(&mut self.radio, afa_freq_hz(ch)).await.is_err() {
+                if config::set_freq_hz(&mut self.radio, afa_freq_hz(ch))
+                    .await
+                    .is_err()
+                {
                     continue;
                 }
-                match self.radio.tx(&buf[..n], /*use_csma (LBT)=*/ true, TX_TIMEOUT).await {
+                match self
+                    .radio
+                    .tx(&buf[..n], /*use_csma (LBT)=*/ true, TX_TIMEOUT)
+                    .await
+                {
                     Ok(()) => {
                         self.afa.cur = ch;
                         self.afa.last_tx[ch as usize] = Some(Instant::now());
@@ -196,7 +203,10 @@ impl Net {
         while Instant::now() < deadline {
             for step in 0..AFA_N {
                 let ch = (self.afa.primary + step) % AFA_N;
-                if config::set_freq_hz(&mut self.radio, afa_freq_hz(ch)).await.is_err() {
+                if config::set_freq_hz(&mut self.radio, afa_freq_hz(ch))
+                    .await
+                    .is_err()
+                {
                     continue;
                 }
                 if let Some(rx) = self.recv(AFA_SCAN_SLICE).await {

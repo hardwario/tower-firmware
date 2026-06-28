@@ -45,7 +45,9 @@ async fn run(b: Board) {
         channel: CHANNEL,
     };
     match config::apply(&mut radio, &cfg).await {
-        Ok(()) => info!(target: "radio_cw", "RF configured: EU868 ch{} (868.{} MHz)", CHANNEL, 1 + CHANNEL * 2),
+        Ok(()) => {
+            info!(target: "radio_cw", "RF configured: EU868 ch{} (868.{} MHz)", CHANNEL, 1 + CHANNEL * 2)
+        }
         Err(e) => error!(target: "radio_cw", "config: {:?}", e),
     }
 

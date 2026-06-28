@@ -54,6 +54,13 @@ const REACQUIRE_LIMIT: u32 = 24;
 const BEACON_PL_LEN: usize = 5;
 /// Broadcast destination (beacons are network-wide).
 const BROADCAST: u32 = 0xFFFF_FFFF;
+/// Slots of slack allowed between a beacon's slot index and the node's prediction before that
+/// beacon is trusted to re-anchor the clock (while Synced). Real beacons land on the predicted
+/// slot — drift across [`REACQUIRE_LIMIT`] is ≪ one slot — so this is tight; a beacon far off
+/// prediction (e.g. a stale *replayed* capture) is ignored as a miss rather than yanking the
+/// clock. A genuinely restarted gateway (epoch reset to ~0) is still recovered the normal way:
+/// misses accrue → rescan → a fresh acquisition (no anchor held) accepts any beacon.
+const FHSS_RESYNC_SLACK: u32 = 2;
 
 // The hop cycle must exceed the 20 s compliance window (strict-occupancy margin).
 const _: () = assert!(FHSS_N as u64 * FHSS_SLOT_MS > 20_000);
@@ -179,7 +186,12 @@ impl Net {
         let seed = if cfg.seed != 0 {
             cfg.seed
         } else {
-            u32::from_le_bytes([self.default_key[0], self.default_key[1], self.default_key[2], self.default_key[3]]) | 1
+            u32::from_le_bytes([
+                self.default_key[0],
+                self.default_key[1],
+                self.default_key[2],
+                self.default_key[3],
+            ]) | 1
         };
         self.fhss.role = role;
         self.fhss.seed = seed;
@@ -268,7 +280,11 @@ impl Net {
         } else {
             None
         };
-        MasterSlot { channel: ch, slot, received }
+        MasterSlot {
+            channel: ch,
+            slot,
+            received,
+        }
     }
 
     /// **Node:** run one slot. Whenever a clock anchor is held (Synced, or riding
@@ -299,21 +315,42 @@ impl Net {
             // transmits (covers rx() setup latency).
             Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
 
-            if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await {
+            // Re-anchor only to a beacon consistent with our prediction (anti-replay): a stale
+            // replayed capture is far behind `slot` and is ignored (falls to the miss path), so
+            // it can't yank our clock. A real beacon lands on `slot` (± a slot of timing slack).
+            if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
+                && slot_abs.abs_diff(slot) <= FHSS_RESYNC_SLACK
+            {
                 self.fhss_lock(slot_abs, t_rx); // → Synced, miss = 0, re-anchored
-                return NodeSlot { state: FhssState::Synced, channel: ch, slot, got_beacon: true };
+                return NodeSlot {
+                    state: FhssState::Synced,
+                    channel: ch,
+                    slot,
+                    got_beacon: true,
+                };
             }
 
-            // Missed this slot's beacon — keep predicting on the (drift-tracked)
+            // Missed this slot's beacon (or it failed the prediction-consistency check above) —
+            // keep predicting on the (drift-tracked)
             // anchor. Stay Synced through a fade; only give up the anchor once it's
             // too stale to trust, then re-scan from the rendezvous channel.
             self.fhss.miss += 1;
             if self.fhss.miss >= REACQUIRE_LIMIT {
                 self.fhss.anchor = None;
                 self.fhss.state = FhssState::Scanning;
-                return NodeSlot { state: FhssState::Scanning, channel: ch, slot, got_beacon: false };
+                return NodeSlot {
+                    state: FhssState::Scanning,
+                    channel: ch,
+                    slot,
+                    got_beacon: false,
+                };
             }
-            return NodeSlot { state: FhssState::Synced, channel: ch, slot, got_beacon: false };
+            return NodeSlot {
+                state: FhssState::Synced,
+                channel: ch,
+                slot,
+                got_beacon: false,
+            };
         }
 
         // No anchor: initial acquisition or post-restart — park on the rendezvous
@@ -322,9 +359,19 @@ impl Net {
         self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
         if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(RENDEZVOUS_RX_MS)).await {
             self.fhss_lock(slot_abs, t_rx);
-            NodeSlot { state: FhssState::Synced, channel: FHSS_RENDEZVOUS_CH, slot: slot_abs, got_beacon: true }
+            NodeSlot {
+                state: FhssState::Synced,
+                channel: FHSS_RENDEZVOUS_CH,
+                slot: slot_abs,
+                got_beacon: true,
+            }
         } else {
-            NodeSlot { state: FhssState::Scanning, channel: FHSS_RENDEZVOUS_CH, slot: 0, got_beacon: false }
+            NodeSlot {
+                state: FhssState::Scanning,
+                channel: FHSS_RENDEZVOUS_CH,
+                slot: 0,
+                got_beacon: false,
+            }
         }
     }
 
@@ -374,7 +421,11 @@ impl Net {
         let slot_end = Self::fhss_slot_start(anchor, cur + 1);
         let room = slot_end.saturating_duration_since(now);
         let data_toa = duty::frame_toa_ms(n) as u64;
-        let need = if confirmed { data_toa + 20 + beacon_toa_ms() } else { data_toa } + GUARD.as_millis();
+        let need = if confirmed {
+            data_toa + 20 + beacon_toa_ms()
+        } else {
+            data_toa
+        } + GUARD.as_millis();
         if room.as_millis() < need {
             return SendResult::DutyLimited; // no room this slot; caller retries next slot
         }

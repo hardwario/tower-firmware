@@ -146,11 +146,17 @@ pub struct Outcome {
 impl Outcome {
     /// Success, no reboot.
     pub fn ok() -> Self {
-        Self { result: R_OK, reboot: false }
+        Self {
+            result: R_OK,
+            reboot: false,
+        }
     }
     /// A non-zero result code, no reboot.
     pub fn code(result: u8) -> Self {
-        Self { result, reboot: false }
+        Self {
+            result,
+            reboot: false,
+        }
     }
 }
 
@@ -316,7 +322,10 @@ async fn shell_task(
     app_commands: &'static [Entry],
     app_settings: &'static [Setting],
 ) {
-    let settings = SettingsTable { base: BASE_SETTINGS, app: app_settings };
+    let settings = SettingsTable {
+        base: BASE_SETTINGS,
+        app: app_settings,
+    };
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 64];
     loop {
@@ -371,7 +380,11 @@ async fn dispatch(
         Resolved::Cmd(cmd, arg_start) => {
             let mut out = String::<RESP_CAP>::new();
             let outcome = {
-                let mut ctx = Ctx { kv, settings, out: &mut out };
+                let mut ctx = Ctx {
+                    kv,
+                    settings,
+                    out: &mut out,
+                };
                 (cmd.run)(&mut ctx, &toks[arg_start..])
             };
             console::shell_response(cmd_id, outcome.result, out.as_str()).await;
@@ -388,7 +401,10 @@ async fn dispatch(
 
 fn cmd_reboot(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let _ = write!(ctx, "rebooting");
-    Outcome { result: R_OK, reboot: true }
+    Outcome {
+        result: R_OK,
+        reboot: true,
+    }
 }
 
 fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
@@ -660,7 +676,12 @@ fn complete(
             Args::Names(names) => {
                 for a in names {
                     if a.starts_with(partial)
-                        && candidates.push(Candidate { text: a, kind: CandidateKind::Arg }).is_err()
+                        && candidates
+                            .push(Candidate {
+                                text: a,
+                                kind: CandidateKind::Arg,
+                            })
+                            .is_err()
                     {
                         more = true;
                         break;
@@ -680,7 +701,12 @@ fn complete(
                     };
                     for &v in vals {
                         if v.starts_with(vpart)
-                            && candidates.push(Candidate { text: v, kind: CandidateKind::Value }).is_err()
+                            && candidates
+                                .push(Candidate {
+                                    text: v,
+                                    kind: CandidateKind::Value,
+                                })
+                                .is_err()
                         {
                             more = true;
                             break;
@@ -689,7 +715,11 @@ fn complete(
                 }
             }
             Args::Settings { assign } => {
-                let kind = if assign { CandidateKind::Arg } else { CandidateKind::Value };
+                let kind = if assign {
+                    CandidateKind::Arg
+                } else {
+                    CandidateKind::Value
+                };
                 for s in settings.iter() {
                     if s.name.starts_with(partial)
                         && candidates.push(Candidate { text: s.name, kind }).is_err()

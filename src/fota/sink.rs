@@ -46,17 +46,20 @@ impl<'f, 'd> FlashSink<'f, 'd> {
     }
 
     /// Bytes received and programmed so far (the staged image length once complete).
+    #[must_use]
     pub fn received(&self) -> u32 {
         self.written
     }
 
     /// Whether a flash error or protocol misuse aborted the transfer.
+    #[must_use]
     pub fn failed(&self) -> bool {
         self.failed
     }
 
     /// Finalize and return the SHA-256 of the bytes consumed (the staged image hash).
     /// Consumes the sink — call [`received`](Self::received) first if you need the size.
+    #[must_use]
     pub fn finish(self) -> [u8; 32] {
         let digest = self.hasher.finalize();
         let mut out = [0u8; 32];
@@ -66,16 +69,16 @@ impl<'f, 'd> FlashSink<'f, 'd> {
 
     /// Program one chunk at `off`, padding a partial tail word so the write is word-aligned.
     /// The pad bytes lie **beyond** the image's real length, so they are never hashed (the
-    /// digest folds only the real `chunk` bytes) nor read back — their value is don't-care
-    /// (`0xFF` here; note the L0 actually *erases* to `0x00`). Separated from the trait method
-    /// so the `?`-style flow reads cleanly.
+    /// digest folds only the real `chunk` bytes) nor read back — their value is don't-care.
+    /// Padded with `0x00` (the L0's erased value, matching `Net::bulk_fetch_to_flash`).
+    /// Separated from the trait method so the `?`-style flow reads cleanly.
     fn program_chunk(&mut self, off: u32, chunk: &[u8]) -> Result<(), Error> {
         if (chunk.len() as u32).is_multiple_of(WRITE_SIZE) {
             self.stage.program(off, chunk)
         } else {
             // Only the last chunk can be non-word-multiple, and it is < BULK_CHUNK,
             // so the padded length never exceeds one chunk buffer.
-            let mut buf = [0xFFu8; BULK_CHUNK];
+            let mut buf = [0u8; BULK_CHUNK];
             buf[..chunk.len()].copy_from_slice(chunk);
             let padded = round_up(chunk.len() as u32, WRITE_SIZE) as usize;
             self.stage.program(off, &buf[..padded])

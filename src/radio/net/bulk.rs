@@ -84,6 +84,15 @@ impl Net {
         let announce_counter = self.tx_counter;
         self.advance_tx_counter();
         let session = self.tx_counter; // reserved for all chunks; consumed at the end
+        // Nonce-reuse guard: the announce frame rides `announce_counter` (bulk_index 0) and
+        // chunk 0 rides `session` (also bulk_index 0) — their CCM nonces differ only while the
+        // TX counter still advances. At the u32::MAX ceiling `advance_tx_counter` is a no-op, so
+        // the two would collide into one nonce with different plaintext. Refuse to serve there
+        // (the link is already failing closed at saturation — re-key long before; see
+        // `advance_tx_counter`).
+        if announce_counter == session {
+            return false;
+        }
 
         let mut ann = [0u8; 8];
         ann[..4].copy_from_slice(&(total_len as u32).to_le_bytes());
@@ -104,7 +113,11 @@ impl Net {
         let mut chunk = [0u8; BULK_CHUNK];
         loop {
             if Instant::now().saturating_duration_since(last_progress)
-                >= if served_last { Duration::from_secs(2) } else { BULK_IDLE }
+                >= if served_last {
+                    Duration::from_secs(2)
+                } else {
+                    BULK_IDLE
+                }
             {
                 break;
             }
@@ -271,8 +284,7 @@ impl Net {
         // Wait for the bulk-announce (identical handshake to bulk_fetch_into).
         let mut abuf = [0u8; 8];
         let (total_len, session) = loop {
-            let Some((hdr, plen)) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await
-            else {
+            let Some((hdr, plen)) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await else {
                 return start as usize; // no announce — no progress, resume next time
             };
             if hdr.frame_type == FrameType::Data
@@ -385,7 +397,12 @@ impl Net {
 
     /// Receive one frame and CCM-open it under `key`; copy the plaintext into
     /// `out`. Returns the header and plaintext length.
-    async fn rx_frame(&mut self, key: &[u8; 16], timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
+    async fn rx_frame(
+        &mut self,
+        key: &[u8; 16],
+        timeout: Duration,
+        out: &mut [u8],
+    ) -> Option<(Header, usize)> {
         let mut buf = [0u8; MAX_FRAME];
         let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
         let (hdr, range) = frame::open_frame(&mut self.ccm, key, &mut buf[..len]).ok()?;

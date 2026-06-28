@@ -55,9 +55,8 @@ async fn tx_trace(radio: &mut Spirit1) -> ! {
         payload[..4].copy_from_slice(&seq.to_le_bytes());
 
         let _ = radio.to_ready().await;
-        let _ = radio.set_irq_mask(
-            regs::IRQ_TX_DATA_SENT | regs::IRQ_MAX_BO_CCA_REACH | regs::IRQ_TX_FIFO_ERROR,
-        );
+        let _ =
+            radio.set_irq_mask(regs::IRQ_TX_DATA_SENT | regs::IRQ_MAX_BO_CCA_REACH | regs::IRQ_TX_FIFO_ERROR);
         // TX-mode SMPS + VCO_L buffer (the per-strobe WA).
         let _ = radio.spi().write_reg(regs::PM_CONFIG1, 0x20);
         let _ = radio.spi().write_reg(0xA9, 0x11);

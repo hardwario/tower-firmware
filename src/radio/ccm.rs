@@ -7,7 +7,6 @@
 //! single-block AES encryption. The nonce is derived from the clear header (see
 //! [`frame`](super::frame)); the AAD is the whole cleartext header.
 
-
 use super::aes::Aes;
 
 /// CCM length-field size (bytes used for the message length / counter).

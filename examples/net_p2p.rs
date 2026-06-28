@@ -31,8 +31,13 @@ const LINK_KEY: [u8; 16] = [
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -41,7 +46,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-peer-b"))]
     let (my_id, peer_id) = (PEER_A, PEER_B);
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: LINK_KEY, band: Band::DEFAULT, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: LINK_KEY,
+            band: Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "p2p", "net init: {:?}", e);

@@ -28,14 +28,27 @@ const KEY: [u8; 16] = [
 
 async fn run(b: Board) {
     let mut radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let _ = radio.exit_shutdown().await;
     if radio.read_device_id().is_err() {
         error!(target: "secping", "device id mismatch");
     }
-    if let Err(e) = config::apply(&mut radio, &RfConfig { band: config::Band::DEFAULT, channel: 0 }).await {
+    if let Err(e) = config::apply(
+        &mut radio,
+        &RfConfig {
+            band: config::Band::DEFAULT,
+            channel: 0,
+        },
+    )
+    .await
+    {
         error!(target: "secping", "config: {:?}", e);
     }
     let mut ccm = Ccm::new();

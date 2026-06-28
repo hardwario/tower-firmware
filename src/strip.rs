@@ -35,7 +35,6 @@
 //! Scope: the framebuffer is RGB; on an RGBW strip the white channel is left
 //! off (use the [`ws2812`] driver directly for white-channel control).
 
-
 use embassy_stm32::Peri;
 use embassy_stm32::peripherals::{DMA1_CH3, PA1, TIM2};
 
@@ -118,11 +117,7 @@ impl Rng {
     }
     /// Random value in `0..n`.
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 {
-            0
-        } else {
-            (self.next_u32() as usize) % n
-        }
+        if n == 0 { 0 } else { (self.next_u32() as usize) % n }
     }
 }
 
@@ -138,6 +133,12 @@ pub struct Strip<'d, const NUM: usize, const BUF: usize> {
 }
 
 impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
+    /// Compile-time guard: `BUF` must hold the full RGBW encoding of `NUM` pixels, so either
+    /// wire format fits. A wrong `BUF` (anything but `{ ws2812::rgbw_buf_len(NUM) }`) fails the
+    /// **build** — unlike a `debug_assert!`, which would be compiled out in release and only trap
+    /// (or silently overflow) on hardware.
+    const _BUF_FITS: () = assert!(BUF >= rgbw_buf_len(NUM), "Strip: BUF must be rgbw_buf_len(NUM)");
+
     /// Create a strip on PA1 (TIM2_CH2 + DMA1_CH3). `brightness` is 0–100 %.
     pub fn new(
         tim: Peri<'d, TIM2>,
@@ -146,11 +147,7 @@ impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
         kind: LedKind,
         brightness: u8,
     ) -> Self {
-        // BUF must hold the full RGBW encoding so either wire format fits.
-        debug_assert!(
-            BUF >= rgbw_buf_len(NUM),
-            "strip: BUF too small; use rgbw_buf_len(NUM)"
-        );
+        let () = Self::_BUF_FITS; // force the compile-time BUF check for this (NUM, BUF)
         Self {
             ws: Ws2812::new(tim, data, dma),
             fb: [OFF; NUM],

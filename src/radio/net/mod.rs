@@ -79,8 +79,10 @@ struct Peer {
     accepts: u32,
 }
 
-/// Outcome of a [`Net::send`].
+/// Outcome of a [`Net::send`]. Inspect it — a `NotDelivered`/`Busy`/`DutyLimited`
+/// result is a delivery failure the caller must handle, not silently drop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 pub enum SendResult {
     /// Confirmed and ACKed (or unconfirmed and transmitted).
     Delivered,
@@ -326,7 +328,12 @@ impl Net {
         for i in 0..MAX_PEERS {
             if self.peers[i].is_none() {
                 let last_seen = read_u32(&self.kv, KEY_LASTSEEN_BASE + i as u16).unwrap_or(0);
-                self.peers[i] = Some(Peer { id, key: *key, last_seen, accepts: 0 });
+                self.peers[i] = Some(Peer {
+                    id,
+                    key: *key,
+                    last_seen,
+                    accepts: 0,
+                });
                 return true;
             }
         }
@@ -353,12 +360,15 @@ impl Net {
     /// Last-seen counter for a registered peer (`None` if not registered).
     #[must_use]
     pub fn peer_last_seen(&self, id: u32) -> Option<u32> {
-        self.peer_slot(id).map(|i| self.peers[i].as_ref().unwrap().last_seen)
+        self.peer_slot(id)
+            .map(|i| self.peers[i].as_ref().unwrap().last_seen)
     }
 
     /// Table slot holding `id`, if registered.
     fn peer_slot(&self, id: u32) -> Option<usize> {
-        self.peers.iter().position(|p| matches!(p, Some(pe) if pe.id == id))
+        self.peers
+            .iter()
+            .position(|p| matches!(p, Some(pe) if pe.id == id))
     }
 
     /// AES key for `id`: the peer's key if registered, else the default key.
@@ -386,7 +396,9 @@ impl Net {
                 p.last_seen = counter;
                 p.accepts = p.accepts.wrapping_add(1);
                 if p.accepts.is_multiple_of(P) {
-                    let _ = self.kv.set_bytes(KEY_LASTSEEN_BASE + i as u16, &counter.to_le_bytes());
+                    let _ = self
+                        .kv
+                        .set_bytes(KEY_LASTSEEN_BASE + i as u16, &counter.to_le_bytes());
                 }
             }
             None => {
@@ -414,20 +426,16 @@ impl Net {
         }
         if self.tx_counter >= self.reserve_limit {
             self.reserve_limit = self.reserve_limit.saturating_add(RESERVE);
-            let _ = self.kv.set_bytes(KEY_WATERMARK, &self.reserve_limit.to_le_bytes());
+            let _ = self
+                .kv
+                .set_bytes(KEY_WATERMARK, &self.reserve_limit.to_le_bytes());
         }
     }
 
     /// Send `data` to `dest`. Confirmed sends open an ACK window and retransmit
     /// the byte-identical frame up to `reps` times; unconfirmed sends transmit
     /// once. The transfer consumes exactly one TX counter value (docs/radio.md).
-    pub async fn send(
-        &mut self,
-        dest: u32,
-        data: &[u8],
-        confirmed: bool,
-        reps: u8,
-    ) -> SendResult {
+    pub async fn send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
         // In FHSS mode a static-channel TX would break the hopping requirement;
         // callers must use fhss_send (which hops). AFA still allows plain send.
         if self.access == Access::Fhss {
@@ -596,7 +604,11 @@ impl Net {
         let hdr = Header {
             frame_type: FrameType::Ack,
             // Advertise a pending FOTA downlink if the gateway has one (docs/fota.md).
-            flags: if self.downlink_pending { flags::DOWNLINK_PENDING } else { 0 },
+            flags: if self.downlink_pending {
+                flags::DOWNLINK_PENDING
+            } else {
+                0
+            },
             src: self.my_id,
             dest,
             counter: ack_counter,
@@ -618,14 +630,23 @@ impl Net {
         }
     }
 
-    /// xorshift32 backoff in [0, MAX_BACKOFF_MS).
-    fn backoff_ms(&mut self) -> u32 {
+    /// Advance the internal xorshift32 PRNG and return the new 32-bit state. Backs the
+    /// retransmit backoff and the pairing challenge nonce. **Not cryptographic** (seeded
+    /// deterministically from `my_id`): enough to de-correlate collided retransmits and to make
+    /// a pairing confirm from a *prior* session fail to validate (the challenge advances each
+    /// session), but not a source of secret randomness.
+    pub(crate) fn rand_u32(&mut self) -> u32 {
         let mut x = self.rng;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.rng = x;
-        x % MAX_BACKOFF_MS
+        x
+    }
+
+    /// xorshift32 backoff in [0, MAX_BACKOFF_MS).
+    fn backoff_ms(&mut self) -> u32 {
+        self.rand_u32() % MAX_BACKOFF_MS
     }
 }
 

@@ -23,10 +23,10 @@ use tower::radio::net::{AfaConfig, AfaRole, Net, NetConfig};
 use tower::storage::Kv;
 use tower::{app, board::Board};
 
-#[cfg(feature = "role-node")]
-use {embassy_time::Timer, log::warn, tower::radio::net::SendResult};
 #[cfg(not(feature = "role-node"))]
 use embassy_time::Duration;
+#[cfg(feature = "role-node")]
+use {embassy_time::Timer, log::warn, tower::radio::net::SendResult};
 
 const NODE_ID: u32 = 0x1111_1111;
 const GW_ID: u32 = 0x2222_2222;
@@ -45,8 +45,13 @@ fn seq_of(d: &[u8]) -> u32 {
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
-        b.radio_spi, b.radio_sck, b.radio_mosi, b.radio_miso,
-        b.radio_cs, b.radio_sdn, b.radio_irq,
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
     );
     let kv = Kv::new(b.storage);
 
@@ -55,7 +60,18 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let my_id = GW_ID;
 
-    let mut net = match Net::new(radio, kv, NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await {
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key: KEY,
+            band: Band::Eu868,
+            channel: 0,
+        },
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             error!(target: "afa", "net init: {:?}", e);
@@ -75,7 +91,9 @@ async fn run(b: Board) {
         loop {
             // 1) Confirmed: LBT + delivery + ACK (node camps a channel; GW scans onto it).
             match net.afa_send(GW_ID, &seq.to_le_bytes(), true, 6).await {
-                SendResult::Delivered => info!(target: "afa", "seq={} ch={} Delivered", seq, net.afa_channel()),
+                SendResult::Delivered => {
+                    info!(target: "afa", "seq={} ch={} Delivered", seq, net.afa_channel())
+                }
                 r => warn!(target: "afa", "seq={} ch={} {:?}", seq, net.afa_channel(), r),
             }
             seq = seq.wrapping_add(1);

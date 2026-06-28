@@ -74,7 +74,9 @@ async fn run(b: Board) {
         Ok(State::Swap) => {
             #[cfg(not(feature = "fota-no-confirm"))]
             match updater.mark_booted() {
-                Ok(()) => info!(target: "fota-app", "*** SWAP CONFIRMED *** booted the swapped image, marked good"),
+                Ok(()) => {
+                    info!(target: "fota-app", "*** SWAP CONFIRMED *** booted the swapped image, marked good")
+                }
                 Err(e) => warn!(target: "fota-app", "mark_booted failed: {e:?}"),
             }
             #[cfg(feature = "fota-no-confirm")]

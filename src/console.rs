@@ -28,15 +28,13 @@ use embassy_executor::Spawner;
 use embassy_stm32::rcc::{StopMode, WakeGuard};
 use embassy_stm32::usart::{BufferedUartRx, BufferedUartTx};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embedded_io_async::Write as _; // brings write_all/flush into scope for BufferedUartTx
 use embassy_sync::channel::Channel;
 use embassy_time::Instant;
+use embedded_io_async::Write as _; // brings write_all/flush into scope for BufferedUartTx
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
-use tower_protocol::msg::{
-    Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse,
-};
+use tower_protocol::msg::{Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse};
 use tower_protocol::{MAX_WIRE, MsgType, PROTOCOL_VERSION, encode_frame, encode_frame_raw};
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
@@ -87,7 +85,10 @@ enum Outgoing {
     Completions(ShellCompletions<'static>),
     /// FOTA host-proxy request (a gateway asks the host for image/manifest bytes). Sent as
     /// a **raw** frame; the reply arrives as a `FotaData` frame on RX. See `docs/fota.md`.
-    FotaReq { offset: u32, len: u16 },
+    FotaReq {
+        offset: u32,
+        len: u16,
+    },
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
@@ -177,11 +178,7 @@ impl log::Log for ConsoleLogger {
     fn log(&self, record: &Record) {
         let mut message = Clipper::<MAX_MSG>(String::new());
         let _ = write!(message, "{}", record.args()); // truncates past MAX_MSG (never empties)
-        let module = record
-            .target()
-            .rsplit("::")
-            .next()
-            .unwrap_or(record.target());
+        let module = record.target().rsplit("::").next().unwrap_or(record.target());
         try_enqueue(Outgoing::Log {
             level: map_level(record.level()),
             uptime_us: Instant::now().as_micros(),
@@ -254,11 +251,19 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                     &mut tx,
                     &mut seq,
                     MsgType::Hello,
-                    &Hello { protocol_version: PROTOCOL_VERSION, firmware_version: fw },
+                    &Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        firmware_version: fw,
+                    },
                 )
                 .await
             }
-            Outgoing::Log { level, uptime_us, module, message } => {
+            Outgoing::Log {
+                level,
+                uptime_us,
+                module,
+                message,
+            } => {
                 send(
                     &mut tx,
                     &mut seq,
@@ -282,15 +287,21 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                 for (k, v) in fields {
                     let _ = wire.push((k.as_str(), v.as_str()));
                 }
-                send(&mut tx, &mut seq, MsgType::Event, &Event { name: name.as_str(), fields: wire })
-                    .await
+                send(
+                    &mut tx,
+                    &mut seq,
+                    MsgType::Event,
+                    &Event {
+                        name: name.as_str(),
+                        fields: wire,
+                    },
+                )
+                .await
             }
             Outgoing::ShellResponse { cmd_id, result, text } => {
                 send_shell_response(&mut tx, &mut seq, *cmd_id, *result, text.as_str()).await
             }
-            Outgoing::Completions(c) => {
-                send(&mut tx, &mut seq, MsgType::ShellCompletions, c).await
-            }
+            Outgoing::Completions(c) => send(&mut tx, &mut seq, MsgType::ShellCompletions, c).await,
             Outgoing::FotaReq { offset, len } => {
                 let mut payload = [0u8; 6];
                 payload[0..4].copy_from_slice(&offset.to_le_bytes());
@@ -307,12 +318,7 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
 /// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
 /// holds a `WakeGuard` for the burst). An encode failure (payload over budget) is
 /// counted as a drop rather than silently lost.
-async fn send<T: Serialize>(
-    tx: &mut BufferedUartTx<'static>,
-    seq: &mut u16,
-    msg_type: MsgType,
-    payload: &T,
-) {
+async fn send<T: Serialize>(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg_type: MsgType, payload: &T) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
@@ -325,12 +331,7 @@ async fn send<T: Serialize>(
 
 /// Like [`send`] but for a **raw** (non-postcard) payload — used by `FotaReq`, whose
 /// payload is a fixed binary layout the host parses without postcard.
-async fn send_raw(
-    tx: &mut BufferedUartTx<'static>,
-    seq: &mut u16,
-    msg_type: MsgType,
-    payload: &[u8],
-) {
+async fn send_raw(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg_type: MsgType, payload: &[u8]) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame_raw(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
@@ -365,7 +366,13 @@ async fn send_shell_response(
             tx,
             seq,
             MsgType::ShellResponse,
-            &ShellResponse { cmd_id, result, chunk, last, text: head },
+            &ShellResponse {
+                cmd_id,
+                result,
+                chunk,
+                last,
+                text: head,
+            },
         )
         .await;
         if last {
@@ -389,7 +396,12 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
     for &(k, v) in fields.iter().take(EV_FIELDS) {
         let _ = f.push((clip(k), clip(v)));
     }
-    TX_CHANNEL.send(Outgoing::Event { name: clip(name), fields: f }).await;
+    TX_CHANNEL
+        .send(Outgoing::Event {
+            name: clip(name),
+            fields: f,
+        })
+        .await;
 }
 
 /// Send a shell command response. The writer splits `text` into `chunk`/`last` frames
@@ -397,7 +409,11 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
 /// that). Async — never dropped. Used by the shell engine ([`crate::shell`]).
 pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
     TX_CHANNEL
-        .send(Outgoing::ShellResponse { cmd_id, result, text: clip(text) })
+        .send(Outgoing::ShellResponse {
+            cmd_id,
+            result,
+            text: clip(text),
+        })
         .await;
 }
 

@@ -1,6 +1,7 @@
 //! LIS2DH12 3-axis accelerometer driver (I²C).
 //!
-//! HAL-independent: generic over [`embedded_hal::i2c::I2c`], like [`tmp112`](crate::tmp112).
+//! HAL-independent: the register-level methods are generic over [`embedded_hal::i2c::I2c`],
+//! like [`tmp112`](crate::tmp112). (The tilt-report `min_interval` throttle uses `embassy-time`.)
 //! Configured for the firmware's defaults: **normal mode (10-bit), 10 Hz ODR,
 //! ±2 g** full scale — plenty for orientation/tilt and low power.
 //!
@@ -132,9 +133,9 @@ pub struct Accel {
 
 /// 1 g, in milli-g.
 const G: i32 = 1000;
-/// Orientation tolerance (0.4 g), matching the reference firmware's
-/// `ORIENTATION_THR`. A face is accepted when each axis is within `G - THR` of
-/// the axis-aligned unit vector.
+/// Orientation slack (0.4 g), matching the reference firmware's `ORIENTATION_THR`.
+/// A face is accepted when each axis is within `G - THR` = **0.6 g** of the
+/// axis-aligned unit vector (the larger this slack, the *tighter* the window).
 const ORIENT_THR: i32 = 400;
 
 impl Accel {
