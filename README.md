@@ -58,6 +58,14 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + SHA-256 install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
 | `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
+Also in the workspace: `crates/bootloader/` (the embassy-boot A/B FOTA bootloader) and
+`tools/fota-sign/` (host signer, out-of-workspace). The shared wire-format crate
+**`tower-protocol`** lives in [its own repo](https://github.com/hardwario/tower-protocol),
+pinned here by git tag (and shared with the [`tower-cli`](https://github.com/hardwario/tower-cli)
+host). To co-develop it locally without re-tagging, add a `paths` override to your
+`~/.cargo/config.toml` (the repo's `.cargo/config.toml` is committed for the build target, so
+the override can't live there): `paths = ["/path/to/tower-protocol"]`.
+
 ### LED indication
 
 [`led`](src/led.rs) runs a dispatcher task that owns the pin (any GPIO via

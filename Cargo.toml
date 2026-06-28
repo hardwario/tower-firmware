@@ -5,10 +5,12 @@ edition = "2024"
 license = "MIT"
 description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
 
-# This package is also the workspace root. `tower-protocol` is the shared no_std
-# wire-format crate, depended on by this firmware and (out-of-tree) by `tower-cli`.
+# This package is also the workspace root. `tower-protocol` (the shared no_std wire-format
+# crate) lives in its own repo now — github.com/hardwario/tower-protocol — pinned by git tag
+# below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
+# re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/tower-protocol", "crates/bootloader"]
+members = ["crates/bootloader"]
 # The FOTA host signing tool is a std host binary — excluded so workspace builds (which
 # target thumbv6m via .cargo/config.toml) don't try to cross-compile it. Run it with an
 # explicit host target: `just fota-sign ...` (see the justfile).
@@ -83,10 +85,11 @@ postcard = { version = "1.0", default-features = false }
 
 # Shared console wire protocol (framing + CRC + message schema) + the shared FOTA `Manifest`
 # (`tower_protocol::fota`) so the host signer and the device cannot drift on the signed bytes.
-# NOTE: NO `verify` feature here — the Ed25519 signature check moved to the **bootloader**
+# Its own repo, pinned by tag (bump in lockstep with `tower-cli` on any wire change).
+# NOTE: NO `verify` feature here — the Ed25519 signature check runs in the **bootloader**
 # (crates/bootloader enables `verify` → salty), keeping salty out of the duplicated A/B app
 # slots. The app uses only the crypto-free manifest pieces (`decode`/`supersedes`).
-tower-protocol = { path = "crates/tower-protocol" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v0.2.0" }
 
 # SHA-256 for FOTA: the FlashSink folds a running hash over the staged image, and the
 # bootloader recomputes it before swap to check the staged image against the signed
