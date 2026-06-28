@@ -1,9 +1,9 @@
 [package]
 name = "tower-protocol"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Shared wire protocol (COBS framing + CRC + postcard message schema) for the HARDWARIO TOWER console link. no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
+description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema, the FOTA `FotaReq`/`FotaData` raw messages, and the signed FOTA `Manifest` (Ed25519 verify behind the `verify` feature). no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
 
 [dependencies]
 # Schema is postcard (not self-describing) — both ends MUST share these exact
