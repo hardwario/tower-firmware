@@ -4,7 +4,7 @@
 //! (FIPS-197 App. B) and reports MATCH/MISMATCH — proving the register driver's
 //! key load, byte ordering and block compute before AES-CCM is built on it.
 //!
-//!   just flash crypto_aes_kat    (watch with: jolt monitor --reset)
+//!   just flash crypto_aes_kat    (watch with: tower logs)
 
 #![no_std]
 #![no_main]

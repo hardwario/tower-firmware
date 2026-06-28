@@ -7,7 +7,7 @@
 //! starts at 1 (watermark 1025); after a reset it resumes at 1025 (watermark
 //! 2049), skipping the unused tail of the reserved block.
 //!
-//!   just flash net_persist     (then: jolt monitor --reset, repeatedly)
+//!   just flash net_persist     (then: just logs; power-cycle to watch the counter resume)
 
 #![no_std]
 #![no_main]
@@ -45,7 +45,7 @@ async fn run(b: Board) {
         "BOOT: resumed tx_counter={} reserve_watermark={} last_seen={}",
         net.tx_counter(), net.reserve_watermark(), net.last_seen()
     );
-    info!(target: "persist", "reset the board (jolt monitor --reset) to see the counter resume at the watermark");
+    info!(target: "persist", "power-cycle the board (then: just logs) to see the counter resume at the watermark");
 
     // Advance the counter with unconfirmed sends (no ACK needed).
     loop {

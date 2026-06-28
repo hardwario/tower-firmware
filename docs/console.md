@@ -45,8 +45,9 @@ It is **interrupt-driven (`BufferedUart`), not DMA** — the WS2812 LED strip ow
 `DMA1_CHANNEL2_3` IRQ group, so the console can't use DMA. See *Low power* below for
 why this matters and how it's handled.
 
-The link is **always framed** (binary COBS frames). A plain terminal (`jolt monitor`,
-`screen`, `minicom`) shows gibberish — use `tower`.
+The link is **always framed** (binary COBS frames). A plain serial terminal (`screen`,
+`minicom`, or any raw monitor) shows gibberish — use the `tower` CLI (`tower logs`),
+which decodes the frames.
 
 ## Quick start
 

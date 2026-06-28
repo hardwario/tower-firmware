@@ -3,7 +3,7 @@
 //! it, checking the header round-trips and the payload is recovered; then tamper
 //! and confirm rejection; then a bulk frame (with the 3-byte index → nonce).
 //!
-//!   just flash crypto_frame_loopback   (watch with: jolt monitor --reset)
+//!   just flash crypto_frame_loopback   (watch with: tower logs)
 
 #![no_std]
 #![no_main]
