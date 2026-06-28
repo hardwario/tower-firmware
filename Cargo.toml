@@ -89,7 +89,7 @@ postcard = { version = "1.0", default-features = false }
 # NOTE: NO `verify` feature here — the Ed25519 signature check runs in the **bootloader**
 # (crates/bootloader enables `verify` → salty), keeping salty out of the duplicated A/B app
 # slots. The app uses only the crypto-free manifest pieces (`decode`/`supersedes`).
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v0.2.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
 
 # SHA-256 for FOTA: the FlashSink folds a running hash over the staged image, and the
 # bootloader recomputes it before swap to check the staged image against the signed

@@ -27,7 +27,7 @@ cortex-m-rt = "0.7.0"
 # signature + SHA-256 before swapping (docs/fota.md). `verify` pulls salty;
 # the shared crate also gives the signed `Manifest`, `verify_signed`, and `VENDOR_PUBKEY`.
 # Keeping salty here (one copy) instead of in the duplicated A/B app slots is the flash win.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v0.2.0", features = ["verify"] }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0", features = ["verify"] }
 # SHA-256 over the staged DFU image, checked against the signed manifest's hash.
 sha2 = { version = "0.10", default-features = false }
 # NorFlash/ReadNorFlash traits for the raw manifest + DFU reads.

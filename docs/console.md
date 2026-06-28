@@ -29,7 +29,7 @@ architecture, wire protocol, the firmware + host APIs, and a worked example per 
 | **`tower-protocol`** | `github.com/hardwario/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
 
 Because `tower-protocol` is shared, the wire format cannot drift between firmware
-and host. Both ends pin it to the same git tag (currently `v0.2.0`).
+and host. Both ends pin it to the same git tag (currently `v1.0.0`).
 
 ## Hardware
 
@@ -494,6 +494,6 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
   change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
-  pin the new tag in lockstep. Today's tag is `v0.2.0`.
+  pin the new tag in lockstep. Today's tag is `v1.0.0`.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

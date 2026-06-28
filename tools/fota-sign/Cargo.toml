@@ -16,4 +16,4 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 # The shared Manifest layout (so signer + device agree byte-for-byte). The `verify`
 # feature pulls salty so the interop test can confirm dalek-signed -> salty-verified.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v0.2.0", features = ["verify"] }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0", features = ["verify"] }
