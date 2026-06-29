@@ -35,3 +35,9 @@ so the override can't live there).
 - The whole FOTA subsystem and `tower-protocol` were developed here; design rationale + hard-won
   caveats live in the `docs/*.md` guides and in code comments (don't strip them).
 - Radio is regulatory-sensitive: FCC `§15.247` / EU duty citations in code are real — keep them.
+
+## Git workflow
+
+- This repo is developed straight on `main`. **Do not create new Git branches** (or open PRs)
+  unless the user explicitly asks — work on the current branch and commit there.
+- Commit and push only when the user requests it.
