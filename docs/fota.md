@@ -85,8 +85,8 @@ mirror them.
 |---|---|---|---|---|
 | BOOTLOADER | `0x0800_0000` | `0x00000` | 20 KB | loader + **Ed25519 verify (salty) + SHA-512 digest** + swap |
 | BOOTLOADER_STATE | `0x0800_5000` | `0x05000` | 12 KB | embassy-boot swap magic + per-page progress |
-| MANIFEST | `0x0800_8000` | `0x08000` | 2 KB | the app stashes the signed manifest here for the loader |
-| ACTIVE | `0x0800_8800` | `0x08800` | 76 KB | running app (linked here) |
+| MANIFEST | `0x0800_8000` | `0x08000` | 256 B | the app stashes the signed manifest here for the loader |
+| ACTIVE | `0x0800_8100` | `0x08100` | 77.75 KB | running app (256 B-aligned for the M0+ vector table) |
 | DFU | `0x0801_B800` | `0x1B800` | 78 KB | staging slot (**must be > ACTIVE** by ≥1 page) |
 | (spare) | `0x0802_F000` | `0x2F000` | 4 KB | margin / future |
 
@@ -101,7 +101,7 @@ MANIFEST region is the only image metadata that crosses the app↔loader boundar
 
 ## Opting out: full-flash builds without FOTA
 
-FOTA is **opt-in**, and it costs flash: the 76 KB ACTIVE slot above is what's left after the
+FOTA is **opt-in**, and it costs flash: the 77.75 KB ACTIVE slot above is what's left after the
 20 KB bootloader, 12 KB swap-state, 2 KB manifest, and the 78 KB DFU staging mirror — the
 inherent price of safe A/B + rollback. A product that doesn't need over-the-air updates simply
 **doesn't enable it, and the application gets the whole chip**:
@@ -109,7 +109,7 @@ inherent price of safe A/B + rollback. A product that doesn't need over-the-air 
 | Build | Linker map | App flash |
 |---|---|---|
 | **default** (no `fota-active`) | full-chip `memory.x` @ `0x0800_0000` | **192 KB**, no bootloader, no A/B |
-| `--features fota-active` | ACTIVE slot @ `0x0800_8800`, under the bootloader | 76 KB |
+| `--features fota-active` | ACTIVE slot @ `0x0800_8100`, under the bootloader | 77.75 KB |
 
 A non-FOTA build pays **nothing** for FOTA: `tower::fota` is dead-code-eliminated when unused, and
 `salty`/`embassy-boot` are never linked (salty lives only in the bootloader crate). So `just flash
@@ -162,7 +162,7 @@ embassy-boot's swap-progress logic depends on the erased value, so the shared `e
 gets `features = ["flash-erase-zero"]` in both `crates/bootloader` and the app's dev-deps. Any
 embassy-boot use on an L0/L1 needs this.
 
-**Swap cost.** ~2.5 min for a 76 KB slot (slow L0 word-program, two copies/page), silent (the
+**Swap cost.** ~2.5 min for a 77.75 KB slot (slow L0 word-program, two copies/page), silent (the
 loader has no console). Verify adds ~20 s (salty Ed25519). Single-bank-L0 swap is HW-proven.
 
 ---
@@ -314,14 +314,14 @@ it over v1. `fota-diag` adds stage logging.
 | Constant | Value |
 |---|---|
 | Flash base / page / word | `0x0800_0000` / 128 B / 4 B |
-| BOOTLOADER / STATE / MANIFEST / ACTIVE / DFU | 20 K@0 / 12 K@0x5000 / 2 K@0x8000 / 76 K@0x8800 / 78 K@0x1B800 |
+| BOOTLOADER / STATE / MANIFEST / ACTIVE / DFU | 20 K@0 / 12 K@0x5000 / 256 B@0x8000 / 77.75 K@0x8100 / 78 K@0x1B800 |
 | Manifest / signature / signed blob | 52 B / 64 B (Ed25519) / 116 B |
 | Verify location | **bootloader** (salty); rollback (version) = app-side policy |
 | Image digest | SHA-512 truncated to 256 bits (bootloader reuses salty's hash; no separate sha2) |
 | EEPROM keys | `KEY_DOWNLOAD_HWM 0x5401`, `KEY_INSTALLED_VERSION 0x5402`, `KEY_DOWNLOAD_IDENT 0x5403` |
 | Host-proxy msgs | `FotaReq` (=7, target→host), `FotaData` (=18, host→target), raw payloads |
-| Swap time / verify time | ~2.5 min (76 KB slot) / ~20 s (Ed25519 @16 MHz) |
-| Node size (fits 76 K ACTIVE) | ~69 KB (fota_ota), ~8.5 KB headroom |
+| Swap time / verify time | ~2.5 min (77.75 KB slot) / ~20 s (Ed25519 @16 MHz) |
+| Node size (fits 77.75 K ACTIVE) | ~67 KB (fota_ota), ~10.5 KB headroom |
 | Vendor key | `tower_protocol::fota::VENDOR_PUBKEY` — **DEV key**, replace for production |
 
 ---
@@ -388,7 +388,7 @@ as-built design above.
 - **Making it fit (the hard-won part).** A radio + crypto + bootloader OTA node is ~83 KB with
   app-side verify — too big to A/B on 192 KB (`2×83 + boot + state > 192`). Two fixes, both
   applied: (1) **verify in the bootloader**, not the app → salty (~15 KB) is in the single
-  bootloader copy, not the duplicated A/B app slots → the node drops to ~69 KB and fits a 76 KB
+  bootloader copy, not the duplicated A/B app slots → the node drops to ~67 KB and fits a 77.75 KB
   ACTIVE (the bootloader, ≈16 KB after it reuses salty's SHA-512 for the image digest, only
   needs a 20 KB region with ~4 KB margin — the slack went to ACTIVE/DFU). (2) The node's boot-state check
   (embassy-boot) must run in a **synchronous

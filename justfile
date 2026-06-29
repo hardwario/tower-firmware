@@ -74,7 +74,7 @@ fota-sign *ARGS:
     cargo run --quiet --manifest-path tools/fota-sign/Cargo.toml --target {{host}} -- {{ARGS}}
 
 # --- FOTA bootloader + ACTIVE-linked app ---
-# A FOTA build links the app into the ACTIVE slot (@0x0800_8800) and merges it with the
+# A FOTA build links the app into the ACTIVE slot (@0x0800_8100) and merges it with the
 # bootloader (@0x0800_0000) into ONE image, flashed over the UART bootloader. Flash it with
 # `just flash --fota <example>` (see the `flash` recipe); read the framed console with
 # `just logs`. `fota-image` below is the build-only step if you just want the merged binary

@@ -13,7 +13,7 @@ MEMORY
 {
   BOOTLOADER       : ORIGIN = 0x08000000, LENGTH = 20K
   BOOTLOADER_STATE : ORIGIN = 0x08005000, LENGTH = 12K
-  FLASH            : ORIGIN = 0x08008800, LENGTH = 76K  /* ACTIVE — the app runs here */
+  FLASH            : ORIGIN = 0x08008100, LENGTH = 0x13700  /* ACTIVE, 77.75K — the app runs here */
   DFU              : ORIGIN = 0x0801B800, LENGTH = 78K
   RAM        (rwx) : ORIGIN = 0x20000000, LENGTH = 20K
 }

@@ -63,16 +63,17 @@ pub use tower_protocol::fota::{
 // and runs the verify on a clean stack. (It reuses salty's SHA-512 for the image digest rather
 // than linking a second hash crate; the loader binary is ≈16 KB, so 20 KB leaves ~4 KB margin —
 // guarded by `just size-check` so it can't silently erode toward the brick-on-overflow limit.)
-// The 12 KB reclaimed from the old 32 KB region went to ACTIVE/DFU. The MANIFEST region is where
-// the app stashes the signed manifest for the bootloader to read before a swap.
+// The 12 KB reclaimed from the old 32 KB region went to ACTIVE/DFU, and MANIFEST is trimmed to
+// 256 B (just over the 116-byte signed manifest) so its slack goes to ACTIVE too. The MANIFEST
+// region is where the app stashes the signed manifest for the bootloader to read before a swap.
 //
-//   region            abs addr        offset     size    purpose
-//   BOOTLOADER        0x0800_0000     0x00000    20 KB    loader + Ed25519/SHA-512 verify + swap
-//   BOOTLOADER_STATE  0x0800_5000     0x05000    12 KB    embassy-boot swap magic + progress
-//   MANIFEST          0x0800_8000     0x08000     2 KB    signed manifest staged for the loader
-//   ACTIVE            0x0800_8800     0x08800    76 KB    running app (linked here)
-//   DFU               0x0801_B800     0x1B800    78 KB    staging slot (must be > ACTIVE)
-//   (spare)           0x0802_F000     0x2F000     4 KB    margin / future
+//   region            abs addr        offset     size      purpose
+//   BOOTLOADER        0x0800_0000     0x00000    20 KB     loader + Ed25519/SHA-512 verify + swap
+//   BOOTLOADER_STATE  0x0800_5000     0x05000    12 KB     embassy-boot swap magic + progress
+//   MANIFEST          0x0800_8000     0x08000    256 B     signed manifest staged for the loader
+//   ACTIVE            0x0800_8100     0x08100    77.75 KB  running app (256 B-aligned for VTOR)
+//   DFU               0x0801_B800     0x1B800    78 KB     staging slot (must be > ACTIVE)
+//   (spare)           0x0802_F000     0x2F000    4 KB      margin / future
 // ---------------------------------------------------------------------------
 
 /// Program-flash base (absolute address of offset 0). The `blocking_*` flash API is
@@ -96,12 +97,14 @@ pub const STATE_SIZE: u32 = 12 * 1024;
 /// to read + verify before swapping (the only image metadata that crosses the app↔loader
 /// boundary). Read raw by the loader; written by the app via [`Stage`].
 pub const MANIFEST_OFFSET: u32 = 0x0_8000;
-/// MANIFEST region size (one or more pages; holds a [`SIGNED_LEN`]-byte signed manifest).
-pub const MANIFEST_SIZE: u32 = 2 * 1024;
-/// ACTIVE (running app) slot offset — the app's `memory.x` FLASH origin.
-pub const ACTIVE_OFFSET: u32 = 0x0_8800;
-/// ACTIVE (running app) slot size.
-pub const ACTIVE_SIZE: u32 = 76 * 1024;
+/// MANIFEST region size: 256 B (two L0 pages), just over the 116-byte [`SIGNED_LEN`] signed
+/// manifest. Trimmed from 2 KB so the slack goes to ACTIVE; the loader erases this whole region.
+pub const MANIFEST_SIZE: u32 = 256;
+/// ACTIVE (running app) slot offset — the app's `memory.x` FLASH origin. **256 B-aligned** so the
+/// app's vector table is a valid VTOR base on the Cortex-M0+ (the actual hardware requirement).
+pub const ACTIVE_OFFSET: u32 = 0x0_8100;
+/// ACTIVE (running app) slot size — 76 KB + the 1792 B reclaimed from the trimmed MANIFEST.
+pub const ACTIVE_SIZE: u32 = 79_616;
 /// DFU (staging) slot offset — where a downloaded image is written before swap.
 pub const DFU_OFFSET: u32 = 0x1_B800;
 /// DFU (staging) slot size — **larger** than ACTIVE (embassy-boot swap needs the slack).

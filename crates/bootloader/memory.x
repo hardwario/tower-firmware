@@ -16,7 +16,7 @@ MEMORY
 {
   FLASH            : ORIGIN = 0x08000000, LENGTH = 20K  /* BOOTLOADER (loader + verify) */
   BOOTLOADER_STATE : ORIGIN = 0x08005000, LENGTH = 12K  /* swap magic + progress */
-  ACTIVE           : ORIGIN = 0x08008800, LENGTH = 76K  /* running app (after the 2K manifest gap) */
+  ACTIVE           : ORIGIN = 0x08008100, LENGTH = 0x13700  /* running app, 77.75K (after the 256 B manifest) */
   DFU              : ORIGIN = 0x0801B800, LENGTH = 78K  /* staged image (> ACTIVE) */
   RAM        (rwx) : ORIGIN = 0x20000000, LENGTH = 20K
 }

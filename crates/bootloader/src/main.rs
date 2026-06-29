@@ -42,13 +42,13 @@ use tower_protocol::fota::{SIGNED_LEN, VENDOR_PUBKEY, split_signed, verify_signe
 // bootloader can't depend on the `tower` lib, so the layout is duplicated here, like
 // memory.x). The DFU image is read raw; the MANIFEST region holds the staged signed manifest.
 const MANIFEST_OFFSET: u32 = 0x0_8000;
-const MANIFEST_SIZE: u32 = 2 * 1024;
+const MANIFEST_SIZE: u32 = 256;
 const DFU_OFFSET: u32 = 0x1_B800;
-// The image is *staged* in DFU (72 KB, deliberately one page larger than ACTIVE for the
+// The image is *staged* in DFU (78 KB, deliberately one page larger than ACTIVE for the
 // embassy-boot swap) but *runs* from ACTIVE after the swap, so the real bound on image size is
 // the ACTIVE slot, not the DFU slot. Verifying against ACTIVE_SIZE rejects an image in the
 // (ACTIVE_SIZE, DFU_SIZE] gap that would pass the hash yet be truncated when copied to ACTIVE.
-const ACTIVE_SIZE: u32 = 76 * 1024;
+const ACTIVE_SIZE: u32 = 79_616;
 
 /// Per-product hardware id this loader accepts images for. `0` (the default) accepts an image
 /// with **any** `manifest.hw_id` — the single-product case (the Core Module). Set this to a
