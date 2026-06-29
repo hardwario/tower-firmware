@@ -76,6 +76,18 @@ pub enum KvError<E> {
     TooManyKeys,
 }
 
+impl<E: core::fmt::Display> core::fmt::Display for KvError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            KvError::Backend(e) => write!(f, "backend error: {e}"),
+            KvError::ValueTooLarge => f.write_str("value exceeds MAX_VALUE"),
+            KvError::Full => f.write_str("store full"),
+            KvError::InvalidKey => f.write_str("invalid key (0 is reserved)"),
+            KvError::TooManyKeys => f.write_str("too many distinct keys"),
+        }
+    }
+}
+
 /// CRC-32 (IEEE 802.3) over the record header bytes (`tag ‖ len`) followed by the value — the
 /// `crc` field itself is excluded. Byte-for-byte the firmware's framing, via the shared primitive.
 #[must_use]

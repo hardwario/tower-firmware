@@ -77,7 +77,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "band", "net init: {:?}", e);
+            error!(target: "band", "net init: {e}");
             return;
         }
     };
@@ -90,7 +90,7 @@ async fn run(b: Board) {
         loop {
             for &band in &BANDS {
                 if let Err(e) = net.set_band(band, 0).await {
-                    error!(target: "band", "set_band {}: {:?}", band_mhz(band), e);
+                    error!(target: "band", "set_band {}: {e}", band_mhz(band));
                     continue;
                 }
                 info!(target: "band", "NODE now on {} MHz", band_mhz(band));
@@ -100,7 +100,7 @@ async fn run(b: Board) {
                         SendResult::Delivered => {
                             info!(target: "band", "  {} MHz seq={} Delivered", band_mhz(band), seq)
                         }
-                        r => warn!(target: "band", "  {} MHz seq={} {:?}", band_mhz(band), seq, r),
+                        r => warn!(target: "band", "  {} MHz seq={} {r}", band_mhz(band), seq),
                     }
                     seq = seq.wrapping_add(1);
                     Timer::after_millis(500).await;

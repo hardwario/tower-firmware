@@ -30,7 +30,7 @@ async fn run(b: Board) {
     info!(target: "radio_id", "exiting SHUTDOWN (driving SDN low)...");
     match radio.exit_shutdown().await {
         Ok(()) => info!(target: "radio_id", "radio reached READY"),
-        Err(e) => error!(target: "radio_id", "exit_shutdown: {:?} (continuing to probe)", e),
+        Err(e) => error!(target: "radio_id", "exit_shutdown: {e} (continuing to probe)"),
     }
 
     loop {
@@ -50,7 +50,7 @@ async fn run(b: Board) {
                     );
                 }
             }
-            Err(e) => error!(target: "radio_id", "SPI read failed: {:?}", e),
+            Err(e) => error!(target: "radio_id", "SPI read failed: {e}"),
         }
         Timer::after_secs(2).await;
     }

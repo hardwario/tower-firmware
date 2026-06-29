@@ -35,7 +35,7 @@ async fn run(_b: Board) {
     let n = match frame::seal_frame(&mut ccm, &KEY, &hdr, payload, &mut buf) {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "frame", "seal: {:?}", e);
+            error!(target: "frame", "seal: {e}");
             return;
         }
     };
@@ -52,7 +52,7 @@ async fn run(_b: Board) {
             pass &= hdr_ok && pt_ok;
         }
         Err(e) => {
-            error!(target: "frame", "open (valid): unexpected {:?}", e);
+            error!(target: "frame", "open (valid): unexpected {e}");
             pass = false;
         }
     }
@@ -101,7 +101,7 @@ async fn run(_b: Board) {
             pass &= ok;
         }
         Err(e) => {
-            error!(target: "frame", "bulk open: {:?}", e);
+            error!(target: "frame", "bulk open: {e}");
             pass = false;
         }
     }

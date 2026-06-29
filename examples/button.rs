@@ -38,7 +38,7 @@ async fn run(b: Board) {
     info!("press / release / click / hold the button...");
     loop {
         let event = btn.next_event().await;
-        info!(target: "button", "{:?}", event);
+        info!(target: "button", "{event}");
         match event {
             button::Event::Click => led.play(SHORT),
             button::Event::Hold => led.play(LONG),

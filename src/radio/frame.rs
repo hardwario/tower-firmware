@@ -103,6 +103,18 @@ pub enum FrameError {
     AuthFail,
 }
 
+impl core::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            FrameError::TooShort => "frame too short",
+            FrameError::BadVersion => "unsupported protocol version",
+            FrameError::BadType => "unknown frame type",
+            FrameError::PayloadTooLong => "payload too long",
+            FrameError::AuthFail => "authentication failed",
+        })
+    }
+}
+
 impl Header {
     /// Header length on the wire (depends on bulk-ness).
     #[must_use]

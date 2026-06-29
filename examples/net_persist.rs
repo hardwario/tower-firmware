@@ -51,7 +51,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "persist", "net init: {:?}", e);
+            error!(target: "persist", "net init: {e}");
             return;
         }
     };

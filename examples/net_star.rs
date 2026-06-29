@@ -75,7 +75,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "star", "net init: {:?}", e);
+            error!(target: "star", "net init: {e}");
             return;
         }
     };
@@ -116,7 +116,7 @@ async fn run(b: Board) {
             match net.send(GW_ID, &msg, true, 3).await {
                 SendResult::Delivered => info!(target: "star", "node {} seq={} Delivered", NODE.2, seq),
                 SendResult::NotDelivered => warn!(target: "star", "node {} seq={} NotDelivered", NODE.2, seq),
-                other => warn!(target: "star", "node {} seq={} {:?}", NODE.2, seq, other),
+                other => warn!(target: "star", "node {} seq={} {other}", NODE.2, seq),
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;

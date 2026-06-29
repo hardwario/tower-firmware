@@ -50,7 +50,7 @@ async fn run(b: Board) {
         _ => 0, // absent / blank / unexpected -> start at zero
     } + 1;
     if let Err(e) = kv.set_bytes(KEY_BOOTS, &boots.to_le_bytes()) {
-        error!(target: "storage", "boot-counter save failed: {:?}", e);
+        error!(target: "storage", "boot-counter save failed: {e}");
     }
 
     // --- postcard record: a settings struct ---------------------------------
@@ -59,13 +59,13 @@ async fn run(b: Board) {
         Ok(None) => {
             let s = Settings::default();
             if let Err(e) = kv.set(KEY_SETTINGS, &s) {
-                error!(target: "storage", "settings save failed: {:?}", e);
+                error!(target: "storage", "settings save failed: {e}");
             }
             info!(target: "storage", "settings initialized to defaults");
             s
         }
         Err(e) => {
-            error!(target: "storage", "settings load failed: {:?}", e);
+            error!(target: "storage", "settings load failed: {e}");
             Settings::default()
         }
     };

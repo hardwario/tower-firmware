@@ -61,7 +61,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "rapid", "net init: {:?}", e);
+            error!(target: "rapid", "net init: {e}");
             return;
         }
     };

@@ -37,17 +37,17 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "sleep", "exit_shutdown: {:?}", e);
+        error!(target: "sleep", "exit_shutdown: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "sleep", "device id: {:?}", e);
+        error!(target: "sleep", "device id: {e}");
     }
     let cfg = RfConfig {
         band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "sleep", "config: {:?}", e);
+        error!(target: "sleep", "config: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -66,7 +66,7 @@ async fn node(radio: &mut Spirit1, cfg: &RfConfig) -> ! {
         frame[..4].copy_from_slice(&seq.to_le_bytes());
         match radio.tx(&frame, false, Duration::from_millis(200)).await {
             Ok(()) => info!(target: "sleep", "seq={} tx ok", seq),
-            Err(e) => warn!(target: "sleep", "seq={} tx {:?}", seq, e),
+            Err(e) => warn!(target: "sleep", "seq={} tx {e}", seq),
         }
 
         // Sleep between transfers, alternating the two low-power modes.
@@ -122,7 +122,7 @@ async fn gateway(radio: &mut Spirit1) -> ! {
             Err(tower::radio::RadioError::Timeout) => {
                 info!(target: "sleep", "...idle (no frame in 8 s)");
             }
-            Err(e) => info!(target: "sleep", "rx {:?}", e),
+            Err(e) => info!(target: "sleep", "rx {e}"),
         }
     }
 }

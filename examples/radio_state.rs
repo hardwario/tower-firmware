@@ -31,11 +31,11 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio_state", "exit_shutdown: {:?}", e);
+        error!(target: "radio_state", "exit_shutdown: {e}");
     }
     match radio.read_device_id() {
         Ok(id) => info!(target: "radio_state", "SPIRIT1 ok (part_number={})", id.part_number()),
-        Err(e) => error!(target: "radio_state", "device id: {:?}", e),
+        Err(e) => error!(target: "radio_state", "device id: {e}"),
     }
 
     // Route nIRQ to GPIO0 and enable the READY event; clear any pending status.
@@ -92,7 +92,7 @@ async fn transition(radio: &mut Spirit1, t: Transition) {
                 "-> {} ok (STATE=0x{:02X}, expected 0x{:02X})", name, st, expect
             );
         }
-        Err(e) => error!(target: "radio_state", "-> {} failed: {:?}", name, e),
+        Err(e) => error!(target: "radio_state", "-> {} failed: {e}", name),
     }
 }
 

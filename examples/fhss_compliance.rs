@@ -55,12 +55,12 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fhssc", "net init: {:?}", e);
+            error!(target: "fhssc", "net init: {e}");
             return;
         }
     };
     if let Err(e) = net.enable_fhss(FhssRole::Master, FhssConfig::default()).await {
-        error!(target: "fhssc", "enable_fhss: {:?}", e);
+        error!(target: "fhssc", "enable_fhss: {e}");
         return;
     }
     info!(target: "fhssc", "running hop-master for {} slots (>1 cycle of {})…", SLOTS, FHSS_N);

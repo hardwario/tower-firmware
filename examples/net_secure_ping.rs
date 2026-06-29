@@ -49,7 +49,7 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "secping", "config: {:?}", e);
+        error!(target: "secping", "config: {e}");
     }
     let mut ccm = Ccm::new();
 
@@ -84,9 +84,9 @@ async fn node(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
         match frame::seal_frame(ccm, &KEY, &hdr, &payload, &mut buf) {
             Ok(n) => match radio.tx(&buf[..n], false, Duration::from_millis(200)).await {
                 Ok(()) => info!(target: "secping", "tx cnt={} ok ({} B on air)", counter, n),
-                Err(e) => warn!(target: "secping", "tx cnt={} failed: {:?}", counter, e),
+                Err(e) => warn!(target: "secping", "tx cnt={} failed: {e}", counter),
             },
-            Err(e) => error!(target: "secping", "seal: {:?}", e),
+            Err(e) => error!(target: "secping", "seal: {e}"),
         }
         counter = counter.wrapping_add(1);
         embassy_time::Timer::after_secs(1).await;
@@ -111,12 +111,12 @@ async fn gateway(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
                     );
                 }
                 Err(frame::FrameError::AuthFail) => warn!(target: "secping", "CCM auth FAIL — dropped"),
-                Err(e) => warn!(target: "secping", "frame error: {:?} — dropped", e),
+                Err(e) => warn!(target: "secping", "frame error: {e} — dropped"),
             },
             Err(tower::radio::RadioError::Timeout) => {
                 info!(target: "secping", "...idle")
             }
-            Err(e) => warn!(target: "secping", "rx: {:?}", e),
+            Err(e) => warn!(target: "secping", "rx: {e}"),
         }
     }
 }

@@ -60,7 +60,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "p2p", "net init: {:?}", e);
+            error!(target: "p2p", "net init: {e}");
             return;
         }
     };
@@ -80,7 +80,7 @@ async fn run(b: Board) {
             msg[6] = b'0' + (seq % 10) as u8;
             match net.send(peer_id, &msg, true, 3).await {
                 SendResult::Delivered => info!(target: "p2p", "A: PING {} Delivered", seq),
-                r => warn!(target: "p2p", "A: PING {} {:?}", seq, r),
+                r => warn!(target: "p2p", "A: PING {} {r}", seq),
             }
             // Listen for B's PONG (it auto-ACKs us via recv).
             if let Some(rx) = net.recv(Duration::from_millis(1500)).await {
@@ -107,7 +107,7 @@ async fn run(b: Board) {
                 msg[6] = b'0' + (seq % 10) as u8;
                 match net.send(peer_id, &msg, true, 3).await {
                     SendResult::Delivered => info!(target: "p2p", "B: PONG {} Delivered", seq),
-                    r => warn!(target: "p2p", "B: PONG {} {:?}", seq, r),
+                    r => warn!(target: "p2p", "B: PONG {} {r}", seq),
                 }
                 seq = seq.wrapping_add(1);
             }

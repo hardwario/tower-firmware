@@ -74,7 +74,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "afa", "net init: {:?}", e);
+            error!(target: "afa", "net init: {e}");
             return;
         }
     };
@@ -83,7 +83,7 @@ async fn run(b: Board) {
     {
         net.add_peer(GW_ID, &KEY);
         if let Err(e) = net.enable_afa(AfaRole::Node, AfaConfig { primary: 0 }).await {
-            error!(target: "afa", "enable_afa: {:?}", e);
+            error!(target: "afa", "enable_afa: {e}");
             return;
         }
         info!(target: "afa", "NODE: LBT+AFA over 8 EU channels (865.2–868.0 MHz)");
@@ -94,7 +94,7 @@ async fn run(b: Board) {
                 SendResult::Delivered => {
                     info!(target: "afa", "seq={} ch={} Delivered", seq, net.afa_channel())
                 }
-                r => warn!(target: "afa", "seq={} ch={} {:?}", seq, net.afa_channel(), r),
+                r => warn!(target: "afa", "seq={} ch={} {r}", seq, net.afa_channel()),
             }
             seq = seq.wrapping_add(1);
 
@@ -112,7 +112,7 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_ID, &KEY);
         if let Err(e) = net.enable_afa(AfaRole::Gateway, AfaConfig { primary: 0 }).await {
-            error!(target: "afa", "enable_afa: {:?}", e);
+            error!(target: "afa", "enable_afa: {e}");
             return;
         }
         info!(target: "afa", "GATEWAY: scanning 8 EU AFA channels, auto-ACK");

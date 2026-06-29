@@ -33,10 +33,10 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "csma", "exit_shutdown: {:?}", e);
+        error!(target: "csma", "exit_shutdown: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "csma", "device id: {:?}", e);
+        error!(target: "csma", "device id: {e}");
     }
     if let Err(e) = config::apply(
         &mut radio,
@@ -47,7 +47,7 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "csma", "config: {:?}", e);
+        error!(target: "csma", "config: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -76,7 +76,7 @@ async fn sender(radio: &mut Spirit1) -> ! {
                 busy += 1;
                 warn!(target: "csma", "seq={} Busy — CCA backed off (channel held) [ok={} busy={}]", seq, ok, busy);
             }
-            Err(e) => warn!(target: "csma", "seq={} {:?}", seq, e),
+            Err(e) => warn!(target: "csma", "seq={} {e}", seq),
         }
         seq = seq.wrapping_add(1);
         Timer::after_millis(600).await;

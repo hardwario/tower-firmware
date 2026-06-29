@@ -123,7 +123,7 @@ async fn run(b: Board) {
             while o < size {
                 let n = (size - o).min(buf.len());
                 if let Err(e) = rstage.read(o as u32, &mut buf[..n]) {
-                    error!(target: "fota", "{} B: readback at {} failed: {:?}", size, o, e);
+                    error!(target: "fota", "{} B: readback at {} failed: {e}", size, o);
                     read_ok = false;
                     break;
                 }

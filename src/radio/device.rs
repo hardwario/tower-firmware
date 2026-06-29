@@ -50,6 +50,23 @@ impl From<SpiError> for RadioError {
     }
 }
 
+impl core::fmt::Display for RadioError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RadioError::Spi(_) => f.write_str("SPI transport error"),
+            RadioError::WrongDevice { partnum, version } => {
+                write!(f, "wrong device id (part {partnum}/{version}, expected SPIRIT1)")
+            }
+            RadioError::StuckState(code) => write!(f, "radio stuck in state 0x{code:02x}"),
+            RadioError::Busy => f.write_str("channel busy (CSMA)"),
+            RadioError::Timeout => f.write_str("timeout"),
+            RadioError::CrcError => f.write_str("CRC error"),
+            RadioError::FifoError => f.write_str("FIFO under/overflow"),
+            RadioError::TooLong => f.write_str("frame longer than the 96-byte FIFO"),
+        }
+    }
+}
+
 /// SPIRIT1 device identity (DEVICE_INFO registers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceId {

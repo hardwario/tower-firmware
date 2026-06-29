@@ -28,7 +28,7 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "edge", "exit_shutdown: {:?}", e);
+        error!(target: "edge", "exit_shutdown: {e}");
     }
     let id_before = radio.read_device_id();
     if let Err(e) = config::apply(
@@ -40,7 +40,7 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "edge", "config: {:?}", e);
+        error!(target: "edge", "config: {e}");
     }
 
     let mut pass = true;
@@ -60,7 +60,7 @@ async fn run(b: Board) {
                 error!(target: "edge", "cycle {}: state 0x{:02X} != READY after timeout ✗", i, s);
                 let _ = radio.to_ready().await; // try to recover anyway
             }
-            Err(e) => error!(target: "edge", "cycle {}: mc_state {:?}", i, e),
+            Err(e) => error!(target: "edge", "cycle {}: mc_state {e}", i),
         }
     }
     info!(target: "edge", "RX-timeout recovery: {}/10 returned to READY", recovered);

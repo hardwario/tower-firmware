@@ -25,7 +25,7 @@ async fn run(b: Board) {
         channel: 0,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "regdump", "config: {:?}", e);
+        error!(target: "regdump", "config: {e}");
     }
 
     // (addr, expected) — expected is what config::apply should have written.
@@ -69,7 +69,7 @@ async fn run(b: Board) {
                 };
                 info!(target: "regdump", "0x{:02X}  0x{:02X}  0x{:02X}    {} {}", addr, v, expect, name, mark);
             }
-            Err(e) => error!(target: "regdump", "0x{:02X} read err {:?}", addr, e),
+            Err(e) => error!(target: "regdump", "0x{:02X} read err {e}", addr),
         }
     }
     // Also dump full SYNT3..0 + PROTOCOL2..0 + VCO cal IN words.

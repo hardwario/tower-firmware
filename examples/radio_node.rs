@@ -54,7 +54,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "node", "net init: {:?}", e);
+            error!(target: "node", "net init: {e}");
             return;
         }
     };
@@ -86,7 +86,7 @@ async fn run(b: Board) {
                 lost += 1;
                 warn!(target: "node", "seq={} NotDelivered ({} ms) [ok={} lost={}]", seq, ms, delivered, lost);
             }
-            other => warn!(target: "node", "seq={} {:?}", seq, other),
+            other => warn!(target: "node", "seq={} {other}", seq),
         }
         seq = seq.wrapping_add(1);
         Timer::after(Duration::from_secs(5)).await;

@@ -49,6 +49,17 @@ pub enum Event {
     Hold,
 }
 
+impl core::fmt::Display for Event {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Event::Press => "press",
+            Event::Release => "release",
+            Event::Click => "click",
+            Event::Hold => "hold",
+        })
+    }
+}
+
 /// Button timing configuration.
 #[derive(Clone, Copy)]
 pub struct Config {

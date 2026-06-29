@@ -65,7 +65,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "chan", "net init on ch{}: {:?}", CHANNEL, e);
+            error!(target: "chan", "net init on ch{}: {e}", CHANNEL);
             return;
         }
     };
@@ -78,7 +78,7 @@ async fn run(b: Board) {
         loop {
             match net.send(GW_ID, &seq.to_le_bytes(), true, 3).await {
                 SendResult::Delivered => info!(target: "chan", "ch{} seq={} Delivered", CHANNEL, seq),
-                r => warn!(target: "chan", "ch{} seq={} {:?}", CHANNEL, seq, r),
+                r => warn!(target: "chan", "ch{} seq={} {r}", CHANNEL, seq),
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;

@@ -28,10 +28,10 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "sweep", "exit_shutdown: {:?}", e);
+        error!(target: "sweep", "exit_shutdown: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "sweep", "device id: {:?}", e);
+        error!(target: "sweep", "device id: {e}");
     }
     // Bring up the band-independent RF config (US 915 base; we override the carrier).
     if let Err(e) = config::apply(
@@ -43,7 +43,7 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "sweep", "config: {:?}", e);
+        error!(target: "sweep", "config: {e}");
     }
 
     info!(target: "sweep", "sweeping {} FHSS channels {}–{} MHz",

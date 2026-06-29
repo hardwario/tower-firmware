@@ -109,7 +109,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "soak", "net init: {:?}", e);
+            error!(target: "soak", "net init: {e}");
             return;
         }
     };
@@ -144,7 +144,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
                 SendResult::Error(_) => rej += 1,
                 other => {
                     fails += 1;
-                    error!(target: "soak", "INVARIANT: oversized send not rejected ({:?}) ✗", other);
+                    error!(target: "soak", "INVARIANT: oversized send not rejected ({other}) ✗");
                 }
             }
         } else {

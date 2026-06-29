@@ -64,7 +64,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "pair", "net init: {:?}", e);
+            error!(target: "pair", "net init: {e}");
             return;
         }
     };

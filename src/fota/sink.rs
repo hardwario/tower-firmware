@@ -97,7 +97,7 @@ impl BulkSink for FlashSink<'_, '_> {
             return false;
         }
         if let Err(e) = self.stage.erase(total) {
-            error!(target: "fota", "DFU erase for {} B failed: {:?}", total, e);
+            error!(target: "fota", "DFU erase for {} B failed: {e}", total);
             self.failed = true;
             return false;
         }
@@ -120,7 +120,7 @@ impl BulkSink for FlashSink<'_, '_> {
         // Hash the real bytes (never the pad) so the digest matches the manifest.
         self.hasher.update(chunk);
         if let Err(e) = self.program_chunk(off, chunk) {
-            error!(target: "fota", "DFU program at {} ({} B) failed: {:?}", off, chunk.len(), e);
+            error!(target: "fota", "DFU program at {} ({} B) failed: {e}", off, chunk.len());
             self.failed = true;
             return false;
         }

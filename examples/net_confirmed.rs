@@ -61,7 +61,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "confirmed", "net init: {:?}", e);
+            error!(target: "confirmed", "net init: {e}");
             return;
         }
     };
@@ -91,9 +91,9 @@ async fn node(net: &mut Net) -> ! {
             SendResult::NotDelivered => warn!(target: "confirmed", "seq={} NotDelivered ({} ms)", seq, ms),
             SendResult::Busy => warn!(target: "confirmed", "seq={} Busy", seq),
             SendResult::DutyLimited => warn!(target: "confirmed", "seq={} DutyLimited", seq),
-            SendResult::Error(e) => error!(target: "confirmed", "seq={} Error {:?}", seq, e),
+            SendResult::Error(e) => error!(target: "confirmed", "seq={} Error {e}", seq),
             // WrongMode/NotSynced only arise in AFA/FHSS modes (not plain send).
-            other => warn!(target: "confirmed", "seq={} {:?}", seq, other),
+            other => warn!(target: "confirmed", "seq={} {other}", seq),
         }
         seq = seq.wrapping_add(1);
         embassy_time::Timer::after_secs(2).await;

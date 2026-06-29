@@ -60,7 +60,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "bulk", "net init: {:?}", e);
+            error!(target: "bulk", "net init: {e}");
             return;
         }
     };

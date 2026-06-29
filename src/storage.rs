@@ -67,6 +67,18 @@ impl From<KvError<embassy_stm32::flash::Error>> for Error {
     }
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Error::Flash(_) => "EEPROM access failed",
+            Error::ValueTooLarge => "value exceeds MAX_VALUE",
+            Error::Full => "storage full (even after compaction)",
+            Error::InvalidKey => "invalid key (0 is reserved)",
+            Error::TooManyKeys => "too many distinct keys",
+        })
+    }
+}
+
 /// Non-volatile storage over the L0 data EEPROM (the raw byte area).
 pub struct Storage<'d> {
     flash: Flash<'d, Blocking>,

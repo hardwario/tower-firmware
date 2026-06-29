@@ -76,7 +76,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fhss", "net init: {:?}", e);
+            error!(target: "fhss", "net init: {e}");
             return;
         }
     };
@@ -85,7 +85,7 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_ID, &KEY);
         if let Err(e) = net.enable_fhss(FhssRole::Master, FhssConfig::default()).await {
-            error!(target: "fhss", "enable_fhss: {:?}", e);
+            error!(target: "fhss", "enable_fhss: {e}");
             return;
         }
         info!(target: "fhss", "MASTER: hopping 80 ch, beacon+listen per 300 ms slot");
@@ -108,7 +108,7 @@ async fn run(b: Board) {
     {
         net.add_peer(GW_ID, &KEY);
         if let Err(e) = net.enable_fhss(FhssRole::Node, FhssConfig::default()).await {
-            error!(target: "fhss", "enable_fhss: {:?}", e);
+            error!(target: "fhss", "enable_fhss: {e}");
             return;
         }
         info!(target: "fhss", "NODE: scanning for gateway beacon (parked on rendezvous)");

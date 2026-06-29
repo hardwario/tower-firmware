@@ -34,10 +34,10 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio_cw", "exit_shutdown: {:?}", e);
+        error!(target: "radio_cw", "exit_shutdown: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "radio_cw", "device id: {:?}", e);
+        error!(target: "radio_cw", "device id: {e}");
     }
 
     let cfg = RfConfig {
@@ -48,7 +48,7 @@ async fn run(b: Board) {
         Ok(()) => {
             info!(target: "radio_cw", "RF configured: EU868 ch{} (868.{} MHz)", CHANNEL, 1 + CHANNEL * 2)
         }
-        Err(e) => error!(target: "radio_cw", "config: {:?}", e),
+        Err(e) => error!(target: "radio_cw", "config: {e}"),
     }
 
     #[cfg(feature = "role-node")]
@@ -75,7 +75,7 @@ async fn tx_role(radio: &mut Spirit1) -> ! {
                 };
                 info!(target: "radio_cw", "CW ON: state=0x{:02X} {} error_lock={}", st, what, lock_err);
             }
-            Err(e) => error!(target: "radio_cw", "cw on: {:?}", e),
+            Err(e) => error!(target: "radio_cw", "cw on: {e}"),
         }
         Timer::after_secs(3).await;
         let _ = radio.cw_test(false).await;
@@ -110,7 +110,7 @@ async fn rx_role(radio: &mut Spirit1) -> ! {
                     if diag { " [diag]" } else { "" }
                 );
             }
-            Err(e) => error!(target: "radio_cw", "rssi_sample: {:?}", e),
+            Err(e) => error!(target: "radio_cw", "rssi_sample: {e}"),
         }
         n = n.wrapping_add(1);
         Timer::after_millis(500).await;

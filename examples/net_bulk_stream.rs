@@ -166,7 +166,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "stream", "net init: {:?}", e);
+            error!(target: "stream", "net init: {e}");
             return;
         }
     };

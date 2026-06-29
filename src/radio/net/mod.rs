@@ -104,6 +104,20 @@ pub enum SendResult {
     Error(RadioError),
 }
 
+impl core::fmt::Display for SendResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SendResult::Delivered => f.write_str("delivered"),
+            SendResult::NotDelivered => f.write_str("not delivered (no ACK)"),
+            SendResult::Busy => f.write_str("channel busy"),
+            SendResult::DutyLimited => f.write_str("duty-cycle limited"),
+            SendResult::WrongMode => f.write_str("wrong access mode"),
+            SendResult::NotSynced => f.write_str("not synced to hop schedule"),
+            SendResult::Error(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Spectrum-access mode (mutually exclusive, runtime-switchable like `set_band`).
 /// The default [`Duty`](Access::Duty) path is unchanged; AFA/FHSS add polite,
 /// region-specific access on top (EU LBT+AFA / US FHSS).

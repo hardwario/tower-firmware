@@ -170,6 +170,16 @@ pub enum Error {
     Unaligned,
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Error::Flash(_) => "program-flash access failed",
+            Error::TooLarge => "image exceeds the slot",
+            Error::Unaligned => "offset/length not word-aligned",
+        })
+    }
+}
+
 /// Round `n` up to the next multiple of `to` (a power of two ≥ 1).
 pub(crate) const fn round_up(n: u32, to: u32) -> u32 {
     (n + to - 1) & !(to - 1)

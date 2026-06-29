@@ -36,17 +36,17 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio", "exit_shutdown: {:?}", e);
+        error!(target: "radio", "exit_shutdown: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "radio", "device id: {:?}", e);
+        error!(target: "radio", "device id: {e}");
     }
     let cfg = RfConfig {
         band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "radio", "config: {:?}", e);
+        error!(target: "radio", "config: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -64,7 +64,7 @@ async fn beacon(radio: &mut Spirit1) -> ! {
         frame[..4].copy_from_slice(&seq.to_le_bytes());
         match radio.tx(&frame, false, Duration::from_millis(200)).await {
             Ok(()) => info!(target: "beacon", "tx seq={} ok", seq),
-            Err(e) => warn!(target: "beacon", "tx seq={} failed: {:?}", seq, e),
+            Err(e) => warn!(target: "beacon", "tx seq={} failed: {e}", seq),
         }
         seq = seq.wrapping_add(1);
         embassy_time::Timer::after_secs(1).await;
@@ -100,7 +100,7 @@ async fn sniffer(radio: &mut Spirit1) -> ! {
             Err(tower::radio::RadioError::Timeout) => {
                 info!(target: "sniffer", "...idle (no packet in 5 s)");
             }
-            Err(e) => warn!(target: "sniffer", "rx error: {:?}", e),
+            Err(e) => warn!(target: "sniffer", "rx error: {e}"),
         }
     }
 }

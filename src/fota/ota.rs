@@ -1,7 +1,7 @@
 //! OTA install driver (docs/fota.md) — the node-side control flow that turns a
 //! "downlink pending" advertisement into a staged, swap-ready image.
 //!
-//! The Ed25519 signature + SHA-256 verify lives in the **bootloader** (docs/fota.md) — that
+//! The Ed25519 signature + image-digest verify lives in the **bootloader** (docs/fota.md) — that
 //! keeps salty out of the duplicated A/B app slots (so a radio + crypto OTA
 //! node fits the L083) and runs the verify on the loader's clean stack. So the app's job is
 //! light and crypto-free:
@@ -64,9 +64,29 @@ pub enum PullOutcome {
     /// where it stopped, without re-downloading or re-erasing.
     InProgress { staged: u32, total: u32 },
     /// The full image is in DFU and the signed manifest is stashed — reset and the bootloader
-    /// will verify (Ed25519 + SHA-256) and swap. The caller persists `manifest.version` after a
+    /// will verify (Ed25519 + image digest) and swap. The caller persists `manifest.version` after a
     /// confirmed boot with [`set_installed_version`].
     Staged { manifest: Manifest },
+}
+
+impl core::fmt::Display for PullOutcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PullOutcome::NoManifest => f.write_str("no signed manifest received"),
+            PullOutcome::Malformed => f.write_str("manifest malformed"),
+            PullOutcome::NotNewer { version, installed } => {
+                write!(f, "v{version} not newer than installed v{installed}")
+            }
+            PullOutcome::TooLarge { size } => write!(f, "image too large ({size} B)"),
+            PullOutcome::ImageFailed => f.write_str("manifest stash failed after download"),
+            PullOutcome::InProgress { staged, total } => {
+                write!(f, "in progress ({staged}/{total} B)")
+            }
+            PullOutcome::Staged { manifest } => {
+                write!(f, "staged v{} ({} B)", manifest.version, manifest.size)
+            }
+        }
+    }
 }
 
 /// Pull + stage one update from `gateway` (docs/fota.md), **resuming** a partial download.

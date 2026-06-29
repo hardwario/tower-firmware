@@ -125,7 +125,7 @@ async fn node(b: Board) -> ! {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fota-ota", "net init: {e:?}");
+            error!(target: "fota-ota", "net init: {e}");
             idle().await;
         }
     };
@@ -141,7 +141,7 @@ async fn node(b: Board) -> ! {
         let pending = match net.send(GW_ID, b"HELLO", true, 3).await {
             SendResult::Delivered => net.take_downlink_pending(),
             other => {
-                warn!(target: "fota-ota", "heartbeat: {other:?}");
+                warn!(target: "fota-ota", "heartbeat: {other}");
                 false
             }
         };
@@ -262,7 +262,7 @@ async fn gateway(b: Board) -> ! {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fota-ota", "net init: {e:?}");
+            error!(target: "fota-ota", "net init: {e}");
             loop {
                 embassy_time::Timer::after_secs(60).await;
             }
