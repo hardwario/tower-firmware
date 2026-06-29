@@ -10,11 +10,14 @@
 //! elapsed / throughput / PASS-FAIL each round.
 //!
 //! Hardware-measured on two boards (4 MHz SPI):
-//! - 4 KB / 64 chunks and 6 KB / 96 chunks complete reliably, CRC OK every round,
-//!   ~4–6 kbps effective (dominated by the per-chunk req/resp round-trip, not airtime).
-//! - **Limits.** This example's receive buffer is monolithic, so its cap is RAM, not
-//!   the protocol (the 24-bit index allows 1 GB): 8 KB (~11.9 KB future → ~8.6 KB
-//!   stack left) overflows the L0 stack — keep blobs ≲ 6 KB *here*. For larger
+//! - 2 KB / 32 chunks completes reliably, CRC OK every round, ~2–4 kbps effective
+//!   (dominated by the per-chunk req/resp round-trip, not airtime).
+//! - **Limits.** This example's receive buffer is monolithic and lives in the task's
+//!   future (.bss), so on the 20 KB L0 it trades 1:1 against stack headroom. Stack
+//!   painting measured peak stack ≈ 9.0 KB, so free-stack-at-peak = 4044 − BLOB_LEN B:
+//!   the *hard* ceiling is ≈ 4 KB, and even 4096 silently overruns .bss by ~50 B
+//!   (it corrupts a static — observed as a garbage console drop-count) though the
+//!   transfer's CRC still passes. BLOB_LEN is 2048 here for a ~2 KB margin. For larger
 //!   transfers use the **streaming** `bulk_serve_from`/`bulk_fetch_into` API
 //!   (`net_bulk_stream` demos it to 64 KB at constant RAM). On EU 868 the 1 % duty governor caps
 //!   *sustained* bulk (correct regulatory behaviour): a ~4 KB transfer costs ~2.7 s
@@ -41,9 +44,13 @@ const GW_ID: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
-/// Blob size to stress (64-byte chunks → BLOB_LEN/64 chunks). ≲ 6 KB on this 20 KB
-/// L0 — a monolithic receive buffer larger than that starves the task stack.
-const BLOB_LEN: usize = 4096;
+/// Blob size to stress (64-byte chunks → BLOB_LEN/64 chunks). The receive buffer lives in
+/// this task's future (.bss), so on the 20 KB L0 it trades 1:1 against stack headroom.
+/// Stack-painting measured peak stack ≈ 9.0 KB during a fetch, and free-stack-at-peak
+/// = 4044 − BLOB_LEN bytes — so the *hard* ceiling is ≈ 4 KB (4096 already overruns .bss
+/// by ~50 B and silently corrupts a static). 2048 leaves a ~2 KB margin; do not raise it
+/// without re-measuring. For larger transfers use the streaming API (see `net_bulk_stream`).
+const BLOB_LEN: usize = 2048;
 
 /// Deterministic, position-dependent pattern (varies across all chunks, so a
 /// swapped/duplicated/dropped chunk is caught): byte i = i ⊕ (i>>8) ⊕ 0xA5.
