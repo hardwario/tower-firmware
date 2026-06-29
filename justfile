@@ -1,156 +1,179 @@
 # HARDWARIO TOWER Firmware SDK — task runner (https://just.systems)
 #
-# The crate is a library; flashable programs live in examples/. Build/flash one
-# by name:
-#   just samples            # list available examples
-#   just flash blinky       # build + flash the blinky sample
-#   just run thermometer    # build + flash, then stream the (framed) console logs
-# Override the serial port if needed: TOWER_PORT=/dev/cu.usbserial-XXXX just flash blinky
+# The crate is a library; flashable programs live in examples/. Run `just` (or `just default`)
+# for the full recipe list. Common flow:
 #
-# Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it
-# programs the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes
-# the firmware's framed console. Install it on your PATH (e.g. `cargo install --path
-# ../github/tower-cli`, or grab a release binary). The old `jolt monitor` shows the framed
-# console as raw bytes — use `tower logs` instead.
+#   just examples            # list the example apps you can build/flash
+#   just flash blinky        # build + flash the blinky example
+#   just run thermometer     # build + flash, then stream the (framed) console logs
+#
+# Override the serial port:   TOWER_PORT=/dev/cu.usbserial-XXXX just flash blinky
+# Pass cargo features:        TOWER_FEATURES=role-gateway just flash net_confirmed
+#
+# Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
+# the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes the firmware's
+# framed console (`just logs`, not a raw serial terminal). Install it on your PATH (e.g.
+# `cargo install --path ../github/tower-cli`, or grab a release binary).
+#
+# CROSS-PLATFORM: every recipe is a single program invocation (no bash, no sed/awk/ls pipelines),
+# so the same `just` recipes run on Linux, macOS, and Windows. The two genuinely script-shaped
+# steps live in Python (tools/size_check.py, tools/fota_merge.py) rather than inline shell.
+# Windows uses cmd.exe (below) so exit codes propagate to CI; the one directory listing that must
+# differ per-OS has [unix] / [windows] variants.
 
+# On Windows, run recipe lines with cmd.exe (always present; propagates child exit codes — unlike
+# `-Command` PowerShell). Unix keeps the default `sh`. See the cross-platform note above.
+set windows-shell := ["cmd.exe", "/c"]
+
+# Merged firmware image written by `build` and flashed by `flash`.
 bin := "target/firmware.bin"
+
+# Python launcher: `python3` on Unix, `python` on Windows (the python.org installer name).
+python := if os() == "windows" { "python" } else { "python3" }
 
 # Optional serial port; empty => let `tower` auto-detect the only USB serial device present.
 port := env_var_or_default("TOWER_PORT", "")
 _port_flag := if port == "" { "" } else { "-p " + port }
 
-# Optional cargo features, e.g. the radio examples' role selection:
+# Optional cargo features, e.g. a radio example's role selection:
 #   TOWER_FEATURES=role-gateway just flash net_confirmed
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
+# A FOTA build always needs `fota-active` (link the app into the ACTIVE slot); append any extras.
+_fota_features := if features == "" { "fota-active" } else { "fota-active," + features }
 
-# Host triple — host-side tests must build for the host, since the workspace
-# default target (thumbv6m, see .cargo/config.toml) has no libtest / panic handler.
-host := `rustc -vV | sed -n 's/^host: //p'`
+# Host triple — host-side tests must build for the host, since the workspace default target
+# (thumbv6m, see .cargo/config.toml) has no libtest / panic handler. `--print host-tuple` avoids
+# parsing `rustc -vV` and works on every OS.
+host := trim(`rustc --print host-tuple`)
 
-# Bootloader code budget (bytes) for `size-check`: the 20 KB BOOTLOADER region (BOOTLOADER_SIZE
-# in src/fota/mod.rs) minus a 2 KB reserve. The loader is ≈16 KB today; this warns well before it
-# could overflow its partition — which on the SWD-less Radio Dongle is an unrecoverable brick.
+# Bootloader code budget (bytes) for `size-check`: the 20 KB BOOTLOADER region (BOOTLOADER_SIZE in
+# src/fota/mod.rs) minus a 2 KB reserve. The loader is ≈16 KB today; this warns well before it could
+# overflow its partition — which on the SWD-less Radio Dongle is an unrecoverable brick.
 boot_budget := "18432"
 
-# List available recipes.
+# NOTE on comments below: `just --list` shows the LAST comment line above a recipe, so each recipe
+# ends its comment block with a one-line summary (examples/detail, if any, come first).
+
+# List the available recipes.
 default:
     @just --list
 
-# Guard the bootloader against silently eating its flash-region margin. The linker only hard-fails
-# at the *full* 20 KB region (= brick on the SWD-less Dongle), so this trips ~2 KB earlier
-# (`boot_budget`) as an early warning. Wired into `just test`; also run it in CI. If it fires:
-# trim the loader, or *deliberately* raise `boot_budget` together with BOOTLOADER_SIZE.
-size-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    text=$(cargo size --release -p tower-bootloader 2>/dev/null | tail -1 | awk '{print $1}')
-    region=20480
-    printf 'bootloader: %s B used / %s B region (budget %s B; %s B reserve to the hard limit)\n' \
-        "$text" "$region" "{{boot_budget}}" "$(( region - {{boot_budget}} ))"
-    if [ "$text" -gt {{boot_budget}} ]; then
-        printf 'ERROR: bootloader %s B exceeds the %s B budget — only %s B from the %s B brick limit.\n' \
-            "$text" "{{boot_budget}}" "$(( region - text ))" "$region" >&2
-        printf 'Trim the loader, or deliberately raise boot_budget + BOOTLOADER_SIZE (src/fota/mod.rs).\n' >&2
-        exit 1
-    fi
 
-# Run the firmware's host-side tests on the host triple (the firmware itself is no_std):
-#   - `tower-kv`    : the EEPROM key-value codec (record format / scan / in-place update /
-#                     compaction + power-loss edges), extracted so it CAN be unit-tested.
-#   - `fota-sign`   : host↔device Ed25519 interop (dalek↔salty) + the DEV_SEED↔VENDOR_PUBKEY pin.
-# The shared wire-protocol codec/manifest tests live in their own repo —
-# github.com/hardwario/tower-protocol (`cargo test --features verify` there). Also runs
-# `size-check` (the bootloader flash-budget guard) so margin erosion fails the test run.
-test *ARGS: size-check
-    cargo test -p tower-kv --target {{host}} {{ARGS}}
-    cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{ARGS}}
+# === Examples =====================================================================================
 
-# Sign a firmware image into a signed FOTA manifest (docs/fota.md) with the host tool
-# in tools/fota-sign (a std binary, built for the host triple). Examples:
-#   just fota-sign pubkey
-#   just fota-sign sign --version 2 --in target/firmware.bin --out target/fw.fmanifest
-fota-sign *ARGS:
-    cargo run --quiet --manifest-path tools/fota-sign/Cargo.toml --target {{host}} -- {{ARGS}}
+# List the example apps you can build/flash (one per examples/*.rs).
+[unix]
+examples:
+    @ls examples/*.rs | sed 's|examples/||; s|\.rs$||'
 
-# --- FOTA bootloader + ACTIVE-linked app ---
-# A FOTA build links the app into the ACTIVE slot (@0x0800_8100) and merges it with the
-# bootloader (@0x0800_0000) into ONE image, flashed over the UART bootloader. Flash it with
-# `just flash --fota <example>` (see the `flash` recipe); read the framed console with
-# `just logs`. `fota-image` below is the build-only step if you just want the merged binary
-# (e.g. for CI):
-#   just fota-image                                  # fota_app (swap+confirm)
-#   just fota-image fota_ota role-node,fota-active   # the real OTA node (v1)
-fota-image example="fota_app" features="fota-active":
-    cargo objcopy --release -p tower-bootloader -- -O binary target/fota-boot.bin
-    cargo objcopy --release --example {{example}} --features "{{features}}" -- -O binary target/fota-app.bin
-    python3 tools/fota_merge.py target/fota-boot.bin target/fota-app.bin target/fota-merged.bin
+[windows]
+examples:
+    @powershell -NoProfile -Command "Get-ChildItem examples/*.rs | Select-Object -ExpandProperty BaseName"
 
-# Build + sign the fota_ota "v2" image the host serves to the node (real-firmware swap E2E).
-# Produces target/fota-ota-v2.{bin,fmanifest}; serve with `tower fota serve` (see docs/fota.md).
-fota-ota-v2 version="2":
-    cargo objcopy --release --example fota_ota --features role-node,fota-active,fota-v2 -- -O binary target/fota-ota-v2.bin
-    just fota-sign sign --version {{version}} --in target/fota-ota-v2.bin --out target/fota-ota-v2.fmanifest
-
-# List the example apps you can build/flash.
-samples:
-    @ls examples/*.rs | sed 's|examples/||; s|\.rs||'
-
-# Build an example into target/firmware.bin, then print its on-chip size.
 # Set TOWER_FEATURES to pass cargo features (e.g. a radio example's role).
+# Build an example into target/firmware.bin, then print its on-chip size.
 build name: && (size name)
     cargo objcopy --release --example {{name}} {{_feat_flag}} -- -O binary {{bin}}
 
-# Build + flash an example via `tower` (erase, write, verify, reset). Pass `--fota` (first) to
-# build the FOTA-capable image — ACTIVE-linked, merged with the bootloader — and flash that;
-# otherwise a plain full-flash image at 0x0800_0000 (the whole 192 KB). Extra args after the
-# name go to `tower flash`. Set TOWER_FEATURES for cargo features; `--fota` adds `fota-active`.
-#   just flash blinky                                    # full-flash, no bootloader
-#   just flash --fota fota_app                           # FOTA self-swap demo
-#   TOWER_FEATURES=role-node just flash --fota fota_ota  # the real OTA node (v1)
-flash *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -- {{args}}
-    fota=0
-    if [ "${1-}" = "--fota" ]; then fota=1; shift; fi
-    [ "$#" -ge 1 ] || { echo "usage: just flash [--fota] <example> [tower flash args]" >&2; exit 2; }
-    name="$1"; shift
-    if [ "$fota" -eq 1 ]; then
-        just fota-image "$name" "fota-active${TOWER_FEATURES:+,${TOWER_FEATURES}}"
-        tower {{_port_flag}} flash target/fota-merged.bin "$@"
-    else
-        just build "$name"
-        tower {{_port_flag}} flash {{bin}} "$@"
-    fi
+# On-chip footprint (text/data/bss) of an example.
+size name:
+    cargo size --release --example {{name}} {{_feat_flag}}
 
-# Build + flash an example, then stream its framed console logs (resets into the app first).
+
+# === Flash & run ==================================================================================
+
+# Extra args after the name pass through to `tower flash`; set TOWER_FEATURES for cargo features:
+#   just flash blinky --no-verify
+#   TOWER_FEATURES=role-gateway just flash net_confirmed
+# Build + flash an example (plain full-flash at 0x0800_0000, no bootloader) — erase/write/verify/reset.
+flash name *args: (build name)
+    tower {{_port_flag}} flash {{bin}} {{args}}
+
+# The app links into the ACTIVE slot (@0x0800_8100), merged with the bootloader (@0x0800_0000) into
+# one image (see `fota-image`); `fota-active` is added automatically, TOWER_FEATURES appended:
+#   just flash-fota fota_app                              # FOTA self-swap demo
+#   TOWER_FEATURES=role-node just flash-fota fota_ota     # the real OTA node (v1)
+# Build + flash the FOTA-capable (bootloader + ACTIVE-linked app) image; read it with `just logs`.
+flash-fota name *args: (fota-image name _fota_features)
+    tower {{_port_flag}} flash target/fota-merged.bin {{args}}
+
+# Build + flash a plain example, then stream its framed console logs (resets into the app first).
 run name: (flash name)
     tower {{_port_flag}} logs
 
-# Stream the decoded framed console logs from the running MCU (extra args -> tower logs).
-logs *ARGS:
-    tower {{_port_flag}} logs {{ARGS}}
+# Build + flash a FOTA image, then stream its framed console logs (watch the swap + confirm).
+run-fota name: (flash-fota name)
+    tower {{_port_flag}} logs
+
+
+# === Console & device control =====================================================================
+
+# Stream the decoded framed console logs from the running MCU (extra args -> `tower logs`).
+logs *args:
+    tower {{_port_flag}} logs {{args}}
 
 # Open the full-screen TUI console (logs + events + interactive shell).
 console:
     tower {{_port_flag}} console
 
 # Reset the MCU into the application (add `--bootloader` to enter the system bootloader).
-reset *ARGS:
-    tower {{_port_flag}} reset {{ARGS}}
+reset *args:
+    tower {{_port_flag}} reset {{args}}
 
 # Erase the entire device flash, then reset into the application.
 erase:
     tower {{_port_flag}} erase
 
-# List available serial ports / TOWER devices.
+# List the available serial ports / TOWER devices.
 ports:
     tower devices
 
-# On-chip footprint (text/data/bss) of an example.
-size name:
-    cargo size --release --example {{name}} {{_feat_flag}}
+
+# === FOTA tooling =================================================================================
+
+# Combines the bootloader (@0x0800_0000) + the ACTIVE-linked app (@0x0800_8100) into
+# target/fota-merged.bin via tools/fota_merge.py. `flash-fota` calls this for you:
+#   just fota-image                                  # fota_app (swap+confirm)
+#   just fota-image fota_ota role-node,fota-active   # the real OTA node (v1)
+# Build the merged FOTA image WITHOUT flashing (e.g. for CI).
+fota-image example="fota_app" features="fota-active":
+    cargo objcopy --release -p tower-bootloader -- -O binary target/fota-boot.bin
+    cargo objcopy --release --example {{example}} --features "{{features}}" -- -O binary target/fota-app.bin
+    {{python}} tools/fota_merge.py target/fota-boot.bin target/fota-app.bin target/fota-merged.bin
+
+# Produces target/fota-ota-v2.{bin,fmanifest}; serve with `tower fota serve` (see docs/fota.md).
+# Build + sign the fota_ota "v2" image the host serves to the node (real-firmware swap E2E).
+fota-ota-v2 version="2":
+    cargo objcopy --release --example fota_ota --features role-node,fota-active,fota-v2 -- -O binary target/fota-ota-v2.bin
+    just fota-sign sign --version {{version}} --in target/fota-ota-v2.bin --out target/fota-ota-v2.fmanifest
+
+# Signs a firmware image into a signed FOTA manifest (docs/fota.md):
+#   just fota-sign pubkey
+#   just fota-sign sign --version 2 --in target/firmware.bin --out target/fw.fmanifest
+# Run the host signer (tools/fota-sign, a std host binary built for the host triple).
+fota-sign *args:
+    cargo run --quiet --manifest-path tools/fota-sign/Cargo.toml --target {{host}} -- {{args}}
+
+
+# === Tests & checks ===============================================================================
+
+# Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value codec)
+# and `fota-sign` (host<->device Ed25519 interop + the DEV_SEED<->VENDOR_PUBKEY pin). The shared
+# wire-protocol tests live in github.com/hardwario/tower-protocol. Runs `size-check` first.
+# Run the firmware's host-side unit tests.
+test *args: size-check
+    cargo test -p tower-kv --target {{host}} {{args}}
+    cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{args}}
+
+# The linker only hard-fails at the full 20 KB region (= brick on the SWD-less Dongle), so this trips
+# ~2 KB earlier (`boot_budget`) as an early warning. Wired into `just test`; also run it in CI.
+# Guard the bootloader against silently eating its flash-region margin (tools/size_check.py).
+size-check:
+    {{python}} tools/size_check.py {{boot_budget}}
+
+
+# === Maintenance ==================================================================================
 
 # Remove build artifacts.
 clean:

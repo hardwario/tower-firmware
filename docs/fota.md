@@ -133,7 +133,7 @@ async fn run(b: Board) {
 app!(run);
 ```
 
-Build full-flash with `just flash <app>`; build FOTA-capable with `just flash --fota <app>`
+Build full-flash with `just flash <app>`; build FOTA-capable with `just flash-fota <app>`
 (which also merges in the bootloader). A downstream product crate can wrap this in
 its own `fota` feature that forwards to `tower`'s `fota-active`.
 
@@ -201,13 +201,13 @@ flashed at `0x0800_0000` (`tools/fota_merge.py`).
 just run fota_stage                       # → *** ALL PASS ***
 
 # Phase 2 — A/B self-swap test (unsigned), single board:
-just flash --fota fota_app                # bootloader + fota_app, merged + flashed
+just flash-fota fota_app                # bootloader + fota_app, merged + flashed
 just logs                                 # → *** SWAP CONFIRMED *** (~2.5 min swap)
-TOWER_FEATURES=fota-no-confirm just flash --fota fota_app   # auto-revert test → *** REVERTED ***
+TOWER_FEATURES=fota-no-confirm just flash-fota fota_app   # auto-revert test → *** REVERTED ***
 
 # Real-firmware swap E2E (fota_ota) — two boards + host:
 just fota-ota-v2                          # build + sign the v2 image the host serves
-TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash --fota fota_ota   # node v1 (merged)
+TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota   # node v1 (merged)
 TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash fota_ota    # gateway
 tower -p <gw-port> fota serve --image target/fota-ota-v2.bin \
                               --manifest target/fota-ota-v2.fmanifest    # host-proxy
@@ -442,7 +442,7 @@ as-built design above.
 - **Bootloader (the verifier):** `crates/bootloader/` (`main.rs`, `memory.x`, `Cargo.toml`).
 - **App linking:** `link/memory-fota-app.x` + `build.rs`, `fota-active` Cargo feature.
 - **Host tools:** `tools/fota-sign/` (signer), `tools/fota_merge.py` (merge). `tower fota serve`
-  (in `tower-cli`). `just` recipes: `flash --fota`, `fota-sign`, `fota-image`, `fota-ota-v2`.
+  (in `tower-cli`). `just` recipes: `flash-fota`, `fota-sign`, `fota-image`, `fota-ota-v2`.
 - **Examples:** `examples/fota_stage.rs`, `examples/fota_app.rs`, `examples/fota_ota.rs`.
 - **Design rationale + caveats:** the *Design decisions* and *Known limitations & caveats*
   sections above. (The original phased plan — `FOTA.md` — has been folded into this guide and

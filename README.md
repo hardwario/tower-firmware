@@ -34,9 +34,9 @@ update path (`tower::fota` + an embassy-boot bootloader); without it an app link
 # One-time: cargo install just cargo-binutils   (+ rustup component add llvm-tools)
 #           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
 #           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing needs neither)
-just samples              # list the example apps
+just examples             # list the example apps
 just run thermometer      # build + flash, then watch the console from boot
-just monitor              # (re)attach to a running MCU without resetting it
+just logs                 # stream the framed console of a running MCU (no reset)
 ```
 
 ## Module layout
@@ -133,7 +133,7 @@ Two settings in [`board::init`](src/board.rs) matter here:
 ## Examples
 
 Each file in [`examples/`](examples) is a complete, flashable program. Add your
-own by dropping a `.rs` there — it's picked up automatically (`just samples`).
+own by dropping a `.rs` there — it's picked up automatically (`just examples`).
 
 | Example | Demonstrates |
 |---|---|
@@ -176,13 +176,14 @@ app!(run);
 
 See `thermometer.rs` (≈12 lines of logic) for the minimal real example.
 
-## Build / flash / monitor
+## Build / flash / logs
 
 Prerequisites (one-time): `cargo install just cargo-binutils probe-rs-tools`
-and `rustup component add llvm-tools`.
+and `rustup component add llvm-tools`. `just test` and the FOTA recipes also need
+`python3` (`python` on Windows) — see [`docs/fota.md`](docs/fota.md).
 
 ```sh
-just samples                 # list examples
+just examples                # list examples
 just build blinky            # → target/firmware.bin (+ size)
 just flash blinky            # build + flash over the UART bootloader (tower)
 just run thermometer         # build + flash, then stream the framed console logs

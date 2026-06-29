@@ -270,9 +270,9 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 ### M. FOTA (signed A/B OTA)
 | ID | Example | Boards | How | Pass |
 |---|---|---|---|---|
-| M1 | fota_stage | 1 (FOTA-linked) | `just flash --fota fota_stage` ; mode B (longer window — stages several sizes) | `fota_stage: … ALL PASS ***` (write/read-back/digest of staged images) |
-| M2 | fota_app | 1 (FOTA-linked) | `just flash --fota fota_app`; observe self-swap + confirm, then revert path | `*** SWAP CONFIRMED ***` (and revert on unconfirmed boot) |
-| M3 | fota_ota E2E | 2 | node: `TOWER_FEATURES=role-node just flash --fota fota_ota`; GW: `TOWER_FEATURES=role-gateway just flash fota_ota`; build+sign v2 `just fota-ota-v2`; serve `tower -p <GW> fota serve --image target/fota-ota-v2.bin --manifest target/fota-ota-v2.fmanifest`; watch node | node pulls → bootloader verifies Ed25519+SHA → swap → `*** UPDATE CONFIRMED ***` running v2 |
+| M1 | fota_stage | 1 (FOTA-linked) | `just flash-fota fota_stage` ; mode B (longer window — stages several sizes) | `fota_stage: … ALL PASS ***` (write/read-back/digest of staged images) |
+| M2 | fota_app | 1 (FOTA-linked) | `just flash-fota fota_app`; observe self-swap + confirm, then revert path | `*** SWAP CONFIRMED ***` (and revert on unconfirmed boot) |
+| M3 | fota_ota E2E | 2 | node: `TOWER_FEATURES=role-node just flash-fota fota_ota`; GW: `TOWER_FEATURES=role-gateway just flash fota_ota`; build+sign v2 `just fota-ota-v2`; serve `tower -p <GW> fota serve --image target/fota-ota-v2.bin --manifest target/fota-ota-v2.fmanifest`; watch node | node pulls → bootloader verifies Ed25519+SHA → swap → `*** UPDATE CONFIRMED ***` running v2 |
 
 FOTA happy-path detail and the bootloader verify gate live in `docs/fota.md`.
 
