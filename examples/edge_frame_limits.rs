@@ -45,10 +45,13 @@ fn bulk_hdr(counter: u32, idx: u32) -> Header {
 async fn run(_b: Board) {
     let mut ccm = Ccm::new();
     let mut pass = true;
+    // Quiet on success: this KAT fires ~13 checks back-to-back with no `.await` between
+    // them, so the writer task never runs to drain the console queue mid-burst. Logging
+    // every ✓ would overflow the depth-8 TX queue (drop-newest) and silently drop the
+    // final verdict line. We only log *failures* (rare) plus the single verdict at the
+    // end — the verdict is the answer; per-check detail appears only when something breaks.
     let mut check = |name: &str, ok: bool| {
-        if ok {
-            info!(target: "edge", "  {} ✓", name);
-        } else {
+        if !ok {
             error!(target: "edge", "  {} ✗ FAIL", name);
         }
         pass &= ok;
@@ -102,10 +105,11 @@ async fn run(_b: Board) {
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadVersion),
         );
     }
-    // Unknown type: set type field (bits[4:0]) to 7 (JoinConfirm=6 is the max valid).
+    // Unknown type: set type field (bits[4:0]) to 8. Beacon=7 is the max valid type,
+    // so 8 is the first unused discriminant — `FrameType::from_u8` returns None → BadType.
     {
         let mut b = buf;
-        b[0] = (b[0] & 0xE0) | 0x07;
+        b[0] = (b[0] & 0xE0) | 0x08;
         check(
             "unknown type → BadType",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadType),

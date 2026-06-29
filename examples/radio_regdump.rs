@@ -39,24 +39,30 @@ async fn run(b: Board) {
         (0x1A, 0x93, "MOD1 datarateM=147"),
         (0x1B, 0x19, "MOD0 GFSK|E9"),
         (0x1C, 0x45, "FDEV0 E4 M5"),
-        (0x1D, 0x23, "CHFLT"),
+        (0x1D, 0x02, "CHFLT"), // ~216 kHz RX BW — matches config.rs (`write_reg(CHFLT, 0x02)`)
         (0x1E, 0xC8, "AFC2"),
         (0x99, 0x80, "IQC 0x99"),
         (0x9A, 0xE3, "IQC 0x9A"),
         (0xBC, 0x22, "IQC 0xBC"),
         (0xA1, 0x25, "VCO_CONFIG current"),
         (0x31, 0x07, "PCKTCTRL3"),
-        (0x32, 0x87, "PCKTCTRL2"),
-        (0x33, 0x60, "PCKTCTRL1"),
+        (0x32, 0x1F, "PCKTCTRL2"), // preamble 4B | sync 4B | var-len — config.rs writes 0x1F
+        (0x33, 0x70, "PCKTCTRL1"), // CRC_MODE(3) | WHIT_EN — config.rs writes 0x70
         (0x36, 0xDB, "SYNC4"),
         (0x37, 0x62, "SYNC3"),
         (0x38, 0x47, "SYNC2"),
         (0x39, 0x15, "SYNC1"),
-        (0x50, 0x00, "PROTOCOL2 (auto-cal off, bit1=0)"),
+        (0x50, 0x02, "PROTOCOL2 (VCO auto-cal ON, bit1=1)"), // kept on by design (config.rs leaves the reset default)
     ];
 
     let spi = radio.spi();
+    // This dump emits ~26 lines in one go. They're all `info!` with no `.await` between
+    // them, so without pacing the writer task never runs to drain the depth-8 console
+    // queue and most of the dump (drop-newest) is lost. A short delay per line lets the
+    // UART flush each frame (~5 ms at 115200) so the whole table is observable.
+    let pace = || embassy_time::Timer::after_millis(8);
     info!(target: "regdump", "addr  read  expect  name");
+    pace().await;
     for &(addr, expect, name) in checks {
         match spi.read_reg(addr) {
             Ok((v, _)) => {
@@ -71,11 +77,13 @@ async fn run(b: Board) {
             }
             Err(e) => error!(target: "regdump", "0x{:02X} read err {e}", addr),
         }
+        pace().await;
     }
     // Also dump full SYNT3..0 + PROTOCOL2..0 + VCO cal IN words.
     let mut synt = [0u8; 4];
     let _ = spi.read_regs(0x08, &mut synt);
     info!(target: "regdump", "SYNT3..0 = {:02X} {:02X} {:02X} {:02X}", synt[0], synt[1], synt[2], synt[3]);
+    pace().await;
     let mut vcal = [0u8; 3];
     let _ = spi.read_regs(0x6D, &mut vcal);
     info!(target: "regdump", "VCO_CALIBR_IN2..0 = {:02X} {:02X} {:02X}", vcal[0], vcal[1], vcal[2]);
