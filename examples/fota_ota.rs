@@ -3,7 +3,7 @@
 //!   # 1) build + sign the v2 image the host will serve:
 //!   just fota-ota-v2
 //!   # 2) node (ACTIVE-linked, under the bootloader; bootloader+node merged into one flash):
-//!   TOWER_PORT=<node-port> just fota-flash fota_ota role-node,fota-active
+//!   TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash --fota fota_ota
 //!   # 3) gateway (normal app; proxies the image from the host over USB):
 //!   TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash fota_ota
 //!   # 4) host (streams the signed v2 image to the gateway on demand):

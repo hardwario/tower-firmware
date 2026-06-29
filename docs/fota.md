@@ -99,6 +99,46 @@ MANIFEST region is the only image metadata that crosses the app↔loader boundar
 
 ---
 
+## Opting out: full-flash builds without FOTA
+
+FOTA is **opt-in**, and it costs flash: the 76 KB ACTIVE slot above is what's left after the
+20 KB bootloader, 12 KB swap-state, 2 KB manifest, and the 78 KB DFU staging mirror — the
+inherent price of safe A/B + rollback. A product that doesn't need over-the-air updates simply
+**doesn't enable it, and the application gets the whole chip**:
+
+| Build | Linker map | App flash |
+|---|---|---|
+| **default** (no `fota-active`) | full-chip `memory.x` @ `0x0800_0000` | **192 KB**, no bootloader, no A/B |
+| `--features fota-active` | ACTIVE slot @ `0x0800_8800`, under the bootloader | 76 KB |
+
+A non-FOTA build pays **nothing** for FOTA: `tower::fota` is dead-code-eliminated when unused, and
+`salty`/`embassy-boot` are never linked (salty lives only in the bootloader crate). So `just flash
+<app>` with no feature is a plain single-image firmware with ~2.5× the room — every non-FOTA
+example (`blinky`, `thermometer`, `radio_node`, …) already builds exactly this way.
+
+**One source, both ways.** Gate the FOTA-specific code on the same `fota-active` feature, so it
+compiles out of a full-flash build (the feature already controls the linker map via `build.rs`):
+
+```rust,ignore
+async fn run(b: Board) {
+    // ... your application (sensors, radio, …) — identical in both builds ...
+
+    #[cfg(feature = "fota-active")]
+    {
+        // Confirm a freshly-swapped image, then pull updates when idle. See
+        // examples/fota_ota.rs for the full node: the boot-state confirm + fota::pull_update.
+        // (The confirm path uses embassy-boot, so pull it in under the same feature.)
+    }
+}
+app!(run);
+```
+
+Build full-flash with `just flash <app>`; build FOTA-capable with `just flash --fota <app>`
+(which also merges in the bootloader). A downstream product crate can wrap this in
+its own `fota` feature that forwards to `tower`'s `fota-active`.
+
+---
+
 ## The bootloader (`crates/bootloader`) — the verifying gate
 
 A minimal `embassy-boot` loader at `0x0800_0000` that is **also the FOTA authenticity gate**.
@@ -161,13 +201,13 @@ flashed at `0x0800_0000` (`tools/fota_merge.py`).
 just run fota_stage                       # → *** ALL PASS ***
 
 # Phase 2 — A/B self-swap test (unsigned), single board:
-just fota-flash                           # bootloader + fota_app, merged + flashed
+just flash --fota fota_app                # bootloader + fota_app, merged + flashed
 just logs                                 # → *** SWAP CONFIRMED *** (~2.5 min swap)
-just fota-flash fota_app fota-active,fota-no-confirm   # auto-revert test → *** REVERTED ***
+TOWER_FEATURES=fota-no-confirm just flash --fota fota_app   # auto-revert test → *** REVERTED ***
 
 # Real-firmware swap E2E (fota_ota) — two boards + host:
 just fota-ota-v2                          # build + sign the v2 image the host serves
-TOWER_PORT=<node-port> just fota-flash fota_ota role-node,fota-active   # node v1 (merged)
+TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash --fota fota_ota   # node v1 (merged)
 TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash fota_ota    # gateway
 tower -p <gw-port> fota serve --image target/fota-ota-v2.bin \
                               --manifest target/fota-ota-v2.fmanifest    # host-proxy
@@ -402,7 +442,7 @@ as-built design above.
 - **Bootloader (the verifier):** `crates/bootloader/` (`main.rs`, `memory.x`, `Cargo.toml`).
 - **App linking:** `link/memory-fota-app.x` + `build.rs`, `fota-active` Cargo feature.
 - **Host tools:** `tools/fota-sign/` (signer), `tools/fota_merge.py` (merge). `tower fota serve`
-  (in `tower-cli`). `just` recipes: `fota-sign`, `fota-image`, `fota-flash`, `fota-ota-v2`.
+  (in `tower-cli`). `just` recipes: `flash --fota`, `fota-sign`, `fota-image`, `fota-ota-v2`.
 - **Examples:** `examples/fota_stage.rs`, `examples/fota_app.rs`, `examples/fota_ota.rs`.
 - **Design rationale + caveats:** the *Design decisions* and *Known limitations & caveats*
   sections above. (The original phased plan — `FOTA.md` — has been folded into this guide and

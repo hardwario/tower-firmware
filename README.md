@@ -7,8 +7,9 @@ framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated 
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer —
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
-[`just`](https://just.systems). It also has a signed, A/B **firmware-over-the-air**
-update path (`tower::fota` + an embassy-boot bootloader). Each subsystem has a guide:
+[`just`](https://just.systems). It also has an **opt-in** signed, A/B **firmware-over-the-air**
+update path (`tower::fota` + an embassy-boot bootloader); without it an app links to the full
+192 KB flash (no bootloader, no A/B). Each subsystem has a guide:
 [`docs/console.md`](docs/console.md), [`docs/radio.md`](docs/radio.md), and
 [`docs/fota.md`](docs/fota.md).
 

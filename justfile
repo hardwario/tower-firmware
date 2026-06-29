@@ -74,22 +74,17 @@ fota-sign *ARGS:
     cargo run --quiet --manifest-path tools/fota-sign/Cargo.toml --target {{host}} -- {{ARGS}}
 
 # --- FOTA bootloader + ACTIVE-linked app ---
-# The Radio Dongle has no SWD, so the bootloader (@0x0800_0000) and the ACTIVE-linked app
-# (@0x0800_B800) are merged into ONE image and flashed over the UART bootloader. Read the
-# framed console with `just logs` (the `tower` CLI). `example`/`features` pick the app build:
-#   just fota-flash                                  # fota_app self-swap (swap+confirm)
-#   just fota-flash fota_app fota-active,fota-no-confirm   # fota_app auto-revert test
-#   just fota-flash fota_ota role-node,fota-active        # the real OTA node (v1)
-
-# Build the merged FOTA image (bootloader + the given ACTIVE-linked example) -> fota-merged.bin.
+# A FOTA build links the app into the ACTIVE slot (@0x0800_8800) and merges it with the
+# bootloader (@0x0800_0000) into ONE image, flashed over the UART bootloader. Flash it with
+# `just flash --fota <example>` (see the `flash` recipe); read the framed console with
+# `just logs`. `fota-image` below is the build-only step if you just want the merged binary
+# (e.g. for CI):
+#   just fota-image                                  # fota_app (swap+confirm)
+#   just fota-image fota_ota role-node,fota-active   # the real OTA node (v1)
 fota-image example="fota_app" features="fota-active":
     cargo objcopy --release -p tower-bootloader -- -O binary target/fota-boot.bin
     cargo objcopy --release --example {{example}} --features "{{features}}" -- -O binary target/fota-app.bin
     python3 tools/fota_merge.py target/fota-boot.bin target/fota-app.bin target/fota-merged.bin
-
-# Build the merged FOTA image and flash it (then read logs with `just logs`).
-fota-flash example="fota_app" features="fota-active": (fota-image example features)
-    tower {{_port_flag}} flash target/fota-merged.bin
 
 # Build + sign the fota_ota "v2" image the host serves to the node (real-firmware swap E2E).
 # Produces target/fota-ota-v2.{bin,fmanifest}; serve with `tower fota serve` (see docs/fota.md).
@@ -106,9 +101,28 @@ samples:
 build name: && (size name)
     cargo objcopy --release --example {{name}} {{_feat_flag}} -- -O binary {{bin}}
 
-# Build + flash an example via `tower` (erase, write, verify, reset). Extra args -> tower flash.
-flash name *ARGS: (build name)
-    tower {{_port_flag}} flash {{bin}} {{ARGS}}
+# Build + flash an example via `tower` (erase, write, verify, reset). Pass `--fota` (first) to
+# build the FOTA-capable image — ACTIVE-linked, merged with the bootloader — and flash that;
+# otherwise a plain full-flash image at 0x0800_0000 (the whole 192 KB). Extra args after the
+# name go to `tower flash`. Set TOWER_FEATURES for cargo features; `--fota` adds `fota-active`.
+#   just flash blinky                                    # full-flash, no bootloader
+#   just flash --fota fota_app                           # FOTA self-swap demo
+#   TOWER_FEATURES=role-node just flash --fota fota_ota  # the real OTA node (v1)
+flash *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -- {{args}}
+    fota=0
+    if [ "${1-}" = "--fota" ]; then fota=1; shift; fi
+    [ "$#" -ge 1 ] || { echo "usage: just flash [--fota] <example> [tower flash args]" >&2; exit 2; }
+    name="$1"; shift
+    if [ "$fota" -eq 1 ]; then
+        just fota-image "$name" "fota-active${TOWER_FEATURES:+,${TOWER_FEATURES}}"
+        tower {{_port_flag}} flash target/fota-merged.bin "$@"
+    else
+        just build "$name"
+        tower {{_port_flag}} flash {{bin}} "$@"
+    fi
 
 # Build + flash an example, then stream its framed console logs (resets into the app first).
 run name: (flash name)
