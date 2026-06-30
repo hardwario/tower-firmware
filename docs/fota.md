@@ -11,7 +11,7 @@ and the design rationale and (hard-won) caveats.
 > **Status: built and hardware-verified, end to end** (2026-06-28, two Radio Dongles + host).
 > `fota_ota` ran the full real-firmware swap: node **v1** advertised → pulled a 67.5 KB signed
 > firmware over the radio (host-proxied by `tower fota serve`) → stashed the manifest → reset →
-> the **bootloader verified Ed25519 + image digest → swapped → v2 booted and confirmed**
+> the **bootloader verified Ed25519 + image digest → swapped → the update (v2) booted and confirmed**
 > (`*** UPDATE CONFIRMED *** booted swapped v2`). Also HW-verified: Phase 1 staging
 > (`fota_stage`), Phase 2 A/B swap + confirm + revert (`fota_app`), and **download resume** — a
 > download interrupted mid-transfer (reset at ~43 KB) **resumed from the persisted high-water
@@ -44,7 +44,11 @@ The pieces:
 5. **Control protocol** — advertise (a bit on existing ACKs) → pull manifest → cheap policy →
    pull image → stash manifest → reset.
 
-Lifecycle (node = v1 in ACTIVE, the bootloader runs first on every reset):
+Throughout, **v1/v2** are the demo firmware's own version numbers (`fota_ota`'s `VERSION`,
+bumped 1→2 by the `fota-v2` feature) — not a protocol or SDK version. The device runs v1, then
+the bootloader accepts v2 only because its version *supersedes* what's installed.
+
+Lifecycle (node starts as v1 in ACTIVE, the bootloader runs first on every reset):
 
 ```
   boot ─► running v1 in ACTIVE ──(idle)──► gateway advertises (DOWNLINK_PENDING on its ACK)
