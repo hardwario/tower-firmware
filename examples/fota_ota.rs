@@ -43,10 +43,10 @@ use {
     log::warn,
     tower::fota::{PullOutcome, pull_update, set_installed_version},
     tower::radio::net::SendResult,
-    tower::storage::{Kv, Storage},
+    tower::storage::Nv,
 };
 #[cfg(not(feature = "role-node"))]
-use {tower::console, tower::fota::HostProxySource, tower::storage::Kv};
+use {tower::console, tower::fota::HostProxySource};
 
 #[cfg(feature = "role-node")]
 const NODE_ID: u32 = 0xF0_7A_5A_01;
@@ -92,13 +92,13 @@ async fn node(b: Board) -> ! {
     // instead of inflating this radio task's huge async poll frame — critical on the 20 KB
     // L0, where the combined frame would otherwise overflow the stack. Returns the reclaimed
     // Kv + whether this is a fresh boot (vs a just-confirmed swap / revert).
-    let (fresh, mut kv) = check_boot_state(b.storage);
+    let fresh = check_boot_state(b.kv);
     if !fresh {
         // We just confirmed (or reverted) — record the running version (the rollback floor an
         // offered image must strictly supersede) via the typed helper, then idle (no
-        // self-update loop). `set_installed_version` takes the reclaimed `Kv` directly, since
+        // self-update loop). `set_installed_version` takes the shared `Nv` directly, since
         // `Net` does not exist yet on this path.
-        let _ = set_installed_version(&mut kv, VERSION);
+        let _ = set_installed_version(b.kv, VERSION);
         idle().await;
     }
 
@@ -113,7 +113,7 @@ async fn node(b: Board) -> ! {
     );
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id: NODE_ID,
             key: KEY,
@@ -175,8 +175,9 @@ async fn node(b: Board) -> ! {
     }
 }
 
-/// Confirm a just-swapped image / note a revert, and reclaim the `Flash` as a `Kv` for the
-/// radio. Returns `(fresh, kv)` — `fresh` is true on a clean boot (no swap to confirm).
+/// Confirm a just-swapped image / note a revert. Returns `fresh` (true on a clean boot, no swap
+/// to confirm). The program Flash is borrowed **transiently** from the shared KV (via
+/// [`Nv::with_flash`]) for the synchronous state read; the KV itself stays shared for the radio.
 ///
 /// **Synchronous + `#[inline(never)]` on purpose:** the embassy-boot state machinery has a
 /// sizable stack footprint, and inlining it into the node's async poll pushed that frame
@@ -185,10 +186,12 @@ async fn node(b: Board) -> ! {
 /// (no `.await`), so it needn't be `async`.
 #[cfg(feature = "role-node")]
 #[inline(never)]
-fn check_boot_state(storage: Storage<'static>) -> (bool, Kv<'static>) {
-    let flash_mutex = Mutex::<NoopRawMutex, _>::new(RefCell::new(storage.into_flash()));
-    let mut aligned = AlignedBuffer([0u8; WRITE_SIZE]);
-    let fresh = {
+fn check_boot_state(kv: Nv) -> bool {
+    // `&mut Flash` is itself `NorFlash`, so embassy-boot drives the borrowed handle through the
+    // same `Mutex<RefCell<_>>` shape; the borrow ends with the closure, before the radio runs.
+    kv.with_flash(|flash| {
+        let flash_mutex = Mutex::<NoopRawMutex, _>::new(RefCell::new(flash));
+        let mut aligned = AlignedBuffer([0u8; WRITE_SIZE]);
         // BlockingFirmwareState = STATE only, no salty: the bootloader arms swaps; the app
         // only confirms (mark_booted) + reads state.
         let cfg = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash_mutex, &flash_mutex);
@@ -215,12 +218,7 @@ fn check_boot_state(storage: Storage<'static>) -> (bool, Kv<'static>) {
                 false
             }
         }
-    };
-    // Reclaim the Flash (fw + its borrow are dropped) for the radio's Kv.
-    (
-        fresh,
-        Kv::new(Storage::new(flash_mutex.into_inner().into_inner())),
-    )
+    })
 }
 
 /// Heartbeat idle so the monitor shows the live version between cycles. Diverges.
@@ -247,10 +245,9 @@ async fn gateway(b: Board) -> ! {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id: GW_ID,
             key: KEY,
@@ -293,4 +290,4 @@ async fn gateway(b: Board) -> ! {
     }
 }
 
-app!(run);
+app!(run, no_shell);

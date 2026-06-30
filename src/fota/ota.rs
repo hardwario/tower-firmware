@@ -28,7 +28,7 @@ use super::{
     MANIFEST_LEN, MANIFEST_OFFSET, MANIFEST_SIZE, Manifest, SIGNED_LEN, Stage,
 };
 use crate::radio::net::Net;
-use crate::storage::Kv;
+use crate::storage::Nv;
 
 /// Bench diagnostics (`fota-diag` feature): log a pull stage, then drain the console so the
 /// line reaches the UART before the next step (the task-based console can't flush after a
@@ -186,17 +186,18 @@ fn get_u32(net: &mut Net, key: u16) -> Option<u32> {
 /// Write the signed manifest into the MANIFEST region (erase the page, program the blob) so
 /// the bootloader can read + verify it before swapping. `SIGNED_LEN` (116) is word-aligned.
 fn stash_manifest(net: &mut Net, signed: &[u8; SIGNED_LEN]) -> bool {
-    let mut stage = Stage::new(net.kv().storage_mut().flash_mut(), MANIFEST_OFFSET, MANIFEST_SIZE);
-    stage.erase(SIGNED_LEN as u32).is_ok() && stage.program(0, signed).is_ok()
+    net.kv().with_flash(|f| {
+        let mut stage = Stage::new(f, MANIFEST_OFFSET, MANIFEST_SIZE);
+        stage.erase(SIGNED_LEN as u32).is_ok() && stage.program(0, signed).is_ok()
+    })
 }
 
 /// The installed firmware version from EEPROM (`KEY_INSTALLED_VERSION`, u32 LE), or `0` if
 /// never written — the rollback floor (an image must be strictly newer than this to install).
 ///
-/// Takes the [`Kv`] directly rather than `Net`, so it is callable at **confirm time** — in the
-/// synchronous boot-state path where only the reclaimed `Kv` is in hand and the radio `Net`
-/// does not exist yet. While transceiving, pass `net.kv()`.
-pub fn installed_version(kv: &Kv<'_>) -> u32 {
+/// Takes the shared [`Nv`] handle, so it is callable at **confirm time** — pass `b.kv` in the
+/// boot-state path before the radio `Net` exists; while transceiving, pass `net.kv()`.
+pub fn installed_version(kv: Nv) -> u32 {
     let mut buf = [0u8; 4];
     match kv.get_bytes(KEY_INSTALLED_VERSION, &mut buf) {
         Ok(Some(n)) if n >= 4 => u32::from_le_bytes(buf),
@@ -206,9 +207,9 @@ pub fn installed_version(kv: &Kv<'_>) -> u32 {
 
 /// Persist the installed firmware version (`KEY_INSTALLED_VERSION`). Call **after** a swapped
 /// image has booted and self-confirmed, so a later validly-signed *older* image is refused.
-/// Returns whether the write succeeded. Takes [`Kv`] (not `Net`) for the same reason as
-/// [`installed_version`]: the confirm happens before `Net` is constructed.
-pub fn set_installed_version(kv: &mut Kv<'_>, version: u32) -> bool {
+/// Returns whether the write succeeded. Takes the shared [`Nv`] handle (not `Net`) for the same
+/// reason as [`installed_version`]: the confirm happens before `Net` is constructed.
+pub fn set_installed_version(kv: Nv, version: u32) -> bool {
     kv.set_bytes(KEY_INSTALLED_VERSION, &version.to_le_bytes())
         .is_ok()
 }

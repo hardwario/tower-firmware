@@ -28,10 +28,10 @@
 //!     Entry::menu("radio", &[Entry::cmd("status", Args::None, cmd_hi)]), // new subtree
 //! ];
 //! static SETS: &[Setting] = &[
-//!     Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
-//!     Setting { key: 0x5511, name: "mode", kind: Kind::Enum(&["p2p", "star", "mesh"]), default: "star" },
+//!     Setting { key: 0x10, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+//!     Setting { key: 0x11, name: "mode", kind: Kind::Enum(&["p2p", "star", "mesh"]), default: "star" },
 //! ];
-//! shell::serve_ext(b.spawner, b.storage, CMDS, SETS);
+//! app!(run, commands: CMDS, settings: SETS); // or: shell::serve_ext(b.spawner, b.kv, CMDS, SETS)
 //! ```
 
 use core::fmt::{self, Write};
@@ -45,7 +45,7 @@ use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete,
 use tower_protocol::{FrameDecoder, MsgType, PROTOCOL_VERSION, decode_frame};
 
 use crate::console;
-use crate::storage::{CONSOLE_SETTINGS_BASE, Kv, Storage};
+use crate::storage::{NS_SHELL, Nv, Scoped};
 
 const MAX_LINE: usize = 96;
 /// Shell-response build buffer. Must stay equal to `console::MAX_RESP` (the transport's
@@ -83,8 +83,10 @@ pub enum Kind {
 /// A persisted, named setting. The shell derives `/system settings print|set|get`
 /// and `/export` from the table — no per-setting code.
 pub struct Setting {
-    /// EEPROM KV key. SDK settings use `0x5500+`; pick app keys above your base.
-    pub key: u16,
+    /// Local key within the shell namespace (`NS_SHELL`); the shell prefixes it, so a setting can
+    /// never collide with another subsystem's keys. App settings pick any free local (the base
+    /// `identity` setting uses `0x00`).
+    pub key: u8,
     /// Name used on the command line and in `print`/`export`.
     pub name: &'static str,
     /// Value type (drives validation + formatting).
@@ -95,7 +97,7 @@ pub struct Setting {
 
 /// SDK base settings; apps add their own via [`serve_ext`].
 static BASE_SETTINGS: &[Setting] = &[Setting {
-    key: CONSOLE_SETTINGS_BASE,
+    key: 0x00,
     name: "identity",
     kind: Kind::Str { max: 32 },
     default: "tower",
@@ -163,8 +165,8 @@ impl Outcome {
 /// Execution context for a command handler. Write the response via `write!(ctx, …)`
 /// (Ctx is [`core::fmt::Write`]); persistent state is `ctx.kv` / `ctx.settings`.
 pub struct Ctx<'a> {
-    /// The EEPROM key-value store (apps own keys outside the `0x5500` console range).
-    pub kv: &'a mut Kv<'static>,
+    /// The shell's namespace-scoped EEPROM handle (`NS_SHELL`); settings are keyed by `u8` local.
+    pub kv: Scoped,
     /// The merged settings table (SDK base + app).
     pub settings: SettingsTable,
     out: &'a mut String<RESP_CAP>,
@@ -298,26 +300,25 @@ fn resolve(toks: &[&str], app: &'static [Entry]) -> Resolved {
 // ---- task / dispatch --------------------------------------------------------
 
 /// Serve the shell with only the SDK base tree + settings.
-pub fn serve(spawner: Spawner, storage: Storage<'static>) {
-    serve_ext(spawner, storage, &[], &[]);
+pub fn serve(spawner: Spawner, kv: Nv) {
+    serve_ext(spawner, kv, &[], &[]);
 }
 
 /// Serve the shell with app extensions: extra top-level command-tree entries and
 /// extra settings (reachable via `/system settings`). Pass `&[]` for none.
 pub fn serve_ext(
     spawner: Spawner,
-    storage: Storage<'static>,
+    kv: Nv,
     app_commands: &'static [Entry],
     app_settings: &'static [Setting],
 ) {
-    let kv = Kv::new(storage);
     let rx = console::take_rx().expect("console RX already taken / not initialised");
-    spawner.spawn(shell_task(kv, rx, app_commands, app_settings).unwrap());
+    spawner.spawn(shell_task(kv.scope(NS_SHELL), rx, app_commands, app_settings).unwrap());
 }
 
 #[embassy_executor::task]
 async fn shell_task(
-    mut kv: Kv<'static>,
+    kv: Scoped,
     mut rx: BufferedUartRx<'static>,
     app_commands: &'static [Entry],
     app_settings: &'static [Setting],
@@ -337,14 +338,14 @@ async fn shell_task(
         };
         for &b in &buf[..n] {
             if let Some(inner) = dec.push(b) {
-                handle(&mut kv, app_commands, settings, inner).await;
+                handle(kv, app_commands, settings, inner).await;
             }
         }
     }
 }
 
 /// Decode a complete frame and act on `ShellCommand` / `ShellComplete`.
-async fn handle(kv: &mut Kv<'static>, app: &'static [Entry], settings: SettingsTable, inner: &[u8]) {
+async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inner: &[u8]) {
     let Ok((mt, _seq, payload)) = decode_frame(inner) else {
         return;
     };
@@ -369,7 +370,7 @@ async fn handle(kv: &mut Kv<'static>, app: &'static [Entry], settings: SettingsT
 }
 
 async fn dispatch(
-    kv: &mut Kv<'static>,
+    kv: Scoped,
     app: &'static [Entry],
     settings: SettingsTable,
     cmd_id: u16,
@@ -564,7 +565,7 @@ fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<
 }
 
 /// Read a setting's current value (or its default if unset / unreadable) as text.
-fn read_value(kv: &Kv<'static>, s: &Setting, out: &mut String<MAX_SETTING>) {
+fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
     let mut buf = [0u8; MAX_SETTING];
     if let Ok(Some(n)) = kv.get_bytes(s.key, &mut buf) {
         let n = n.min(MAX_SETTING);

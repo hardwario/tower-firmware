@@ -42,9 +42,11 @@ pub use embassy_executor::Spawner;
 
 /// Define an application entry point with the common boilerplate handled.
 ///
-/// Wraps your `async fn run(b: Board)` with the STOP-mode executor + reset
-/// entry, and the always-on board setup ([`board::Board::take`] — clock,
-/// console, and the TMP112 shut into one-shot mode). The whole app is then just:
+/// Wraps your `async fn run(b: Board)` with the STOP-mode executor + reset entry and the
+/// always-on board setup ([`board::Board::take`] — clock, console, TMP112 one-shot). It also
+/// **serves the interactive [`shell`](crate::shell) by default**, over the shared EEPROM
+/// [`Nv`](crate::storage::Nv) handle, so the app can drive `Net`/FOTA on the same `b.kv`
+/// alongside it. The whole app is then just:
 ///
 /// ```ignore
 /// #![no_std]
@@ -52,22 +54,54 @@ pub use embassy_executor::Spawner;
 /// use tower::{app, board::Board};
 ///
 /// async fn run(mut b: Board) {
-///     // use b.spawner, b.tmp112, b.led, b.button, b.accel_int, b.storage, b.strip_* …
+///     // use b.spawner, b.tmp112, b.led, b.button, b.accel_int, b.kv, b.strip_* …
 /// }
-/// app!(run);
+/// app!(run);                                    // base shell (/system/resource, settings, …)
+/// // app!(run, commands: CMDS, settings: SETS); // + an app command tree / settings
+/// // app!(run, no_shell);                       // opt out (app owns console RX, or stays minimal)
 /// ```
+///
+/// The shell is served **before** `run`, so it claims the console RX while still free; an app
+/// that reads the console RX itself (e.g. a host-proxy gateway) must use `no_shell`.
 #[macro_export]
 macro_rules! app {
+    // Default: serve the base SDK shell (over the shared EEPROM KV), then run.
     ($run:path) => {
+        $crate::app!(@entry $run, |b: &$crate::board::Board| {
+            $crate::shell::serve(b.spawner, b.kv);
+        });
+    };
+    // Serve the shell with an app command tree + settings, then run.
+    ($run:path, commands: $cmds:expr, settings: $sets:expr) => {
+        $crate::app!(@entry $run, |b: &$crate::board::Board| {
+            $crate::shell::serve_ext(b.spawner, b.kv, $cmds, $sets);
+        });
+    };
+    // Serve the shell with an app command tree (no extra settings), then run.
+    ($run:path, commands: $cmds:expr) => {
+        $crate::app!(@entry $run, |b: &$crate::board::Board| {
+            $crate::shell::serve_ext(b.spawner, b.kv, $cmds, &[]);
+        });
+    };
+    // Run with NO shell — the app owns the console RX, or stays minimal.
+    ($run:path, no_shell) => {
+        $crate::app!(@entry $run, |_b: &$crate::board::Board| {});
+    };
+
+    // Internal: emit the embassy entry. `$setup` (a closure taking `&Board`) runs after the
+    // board + console are up but BEFORE `run`, so the shell claims the console RX while it is
+    // still free. The board is then moved into the app's `run`.
+    (@entry $run:path, $setup:expr) => {
         #[embassy_executor::main(
             executor = "embassy_stm32::executor::Executor",
             entry = "cortex_m_rt::entry"
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
             let board = $crate::board::Board::take(spawner);
-            // Uniform startup banner, naming this example/app (the `just flash
-            // <name>` target). `CARGO_BIN_NAME` is the example's name.
+            // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
+            let __setup = $setup;
+            __setup(&board);
             $run(board).await
         }
     };

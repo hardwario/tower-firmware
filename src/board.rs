@@ -21,7 +21,7 @@ use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
 use embassy_time::Duration;
 use log::LevelFilter;
 
-use crate::storage::Storage;
+use crate::storage::{Nv, Storage};
 use crate::tmp112::{self, Tmp112};
 
 // PA8 (button), PA12 (VBUS_SENSE) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7
@@ -65,8 +65,11 @@ pub struct Board {
     /// — for the tilt/movement interrupt. The accelerometer shares the I²C2 bus
     /// with the TMP112; reclaim it with [`tmp112`](Self::tmp112)`.release()`.
     pub accel_int: ExtiInput<'static, Async>,
-    /// Non-volatile storage in the data EEPROM — see [`storage`](crate::storage).
-    pub storage: Storage<'static>,
+    /// The one shared key-value store over the data EEPROM — see [`storage`](crate::storage).
+    /// `Copy`; hand the same handle to `Net`, the [`shell`](crate::shell), and FOTA at once (each
+    /// call locks the one store). For raw program-flash access (FOTA staging) use
+    /// [`Nv::with_flash`](crate::storage::Nv::with_flash).
+    pub kv: Nv,
 
     // --- SPIRIT1 sub-GHz radio (SPSGRF module) — see [`radio`](crate::radio). ---
     /// SPIRIT1 shutdown pin (PB7). Has a 1 MΩ hardware pull-up so the part boots
@@ -151,7 +154,7 @@ impl Board {
             strip_dma: p.DMA1_CH3,
             // LIS2DH12 INT1 (PB6) — active-high push-pull, so pull-down + rising edge.
             accel_int: ExtiInput::new(p.PB6, p.EXTI6, Pull::Down, Irqs),
-            storage: Storage::new(Flash::new_blocking(p.FLASH)),
+            kv: Nv::install(Storage::new(Flash::new_blocking(p.FLASH))),
 
             // SPIRIT1 radio resources. The driver (radio::init) builds the
             // blocking SPI and drives SDN/CS itself; here we just hand over the

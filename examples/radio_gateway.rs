@@ -16,7 +16,6 @@ use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
-use tower::storage::Kv;
 use tower::{app, board::Board};
 
 const NODE_ID: u32 = 0x1111_1111;
@@ -35,11 +34,10 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id: GW_ID,
             key: KEY,

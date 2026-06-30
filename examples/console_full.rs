@@ -13,11 +13,10 @@ use core::fmt::Write;
 use embassy_time::Timer;
 use heapless::String;
 use log::{debug, error, info, trace, warn};
-use tower::{app, board::Board, console, println, shell};
+use tower::{app, board::Board, console, println};
 
 async fn run(b: Board) {
-    // Hand the EEPROM to the shell and spawn it (Responses/Command panes).
-    shell::serve(b.spawner, b.storage);
+    // The shell is served automatically by `app!` (Responses/Command panes), over the shared KV.
     info!("console_full ready — drive the shell, e.g. `/system identity print`");
 
     let mut n: u32 = 0;

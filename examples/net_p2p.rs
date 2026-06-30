@@ -20,7 +20,6 @@ use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig, SendResult};
-use tower::storage::Kv;
 use tower::{app, board::Board};
 
 const PEER_A: u32 = 0x0000_00A1;
@@ -39,7 +38,6 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     #[cfg(feature = "role-peer-b")]
     let (my_id, peer_id) = (PEER_B, PEER_A);
@@ -48,7 +46,7 @@ async fn run(b: Board) {
 
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id,
             key: LINK_KEY,

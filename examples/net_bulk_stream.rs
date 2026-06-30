@@ -27,7 +27,6 @@ use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
-use tower::storage::Kv;
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
@@ -145,7 +144,6 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     #[cfg(feature = "role-node")]
     let my_id = NODE_ID;
@@ -154,7 +152,7 @@ async fn run(b: Board) {
 
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id,
             key: KEY,

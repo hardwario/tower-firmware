@@ -19,7 +19,6 @@ use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
-use tower::storage::Kv;
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
@@ -53,7 +52,6 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     // The gateway's default key is KEY_A; each node is registered with its own.
     #[cfg(feature = "role-node")]
@@ -63,7 +61,7 @@ async fn run(b: Board) {
 
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id,
             key,

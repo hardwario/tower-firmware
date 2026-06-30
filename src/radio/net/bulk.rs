@@ -305,8 +305,9 @@ impl Net {
         if start == 0 {
             // Fresh start: erase the destination for the announced length (one short flash
             // borrow, released before the radio loop). A resume keeps the staged bytes.
-            if Stage::new(self.kv.storage_mut().flash_mut(), base, size)
-                .erase(total_len as u32)
+            if self
+                .kv
+                .with_flash(|f| Stage::new(f, base, size).erase(total_len as u32))
                 .is_err()
             {
                 return 0;
@@ -352,8 +353,9 @@ impl Net {
                     let mut padded = [0u8; BULK_CHUNK];
                     padded[..dlen].copy_from_slice(&dbuf[..dlen]);
                     let plen = dlen.div_ceil(w) * w;
-                    if Stage::new(self.kv.storage_mut().flash_mut(), base, size)
-                        .program(off as u32, &padded[..plen])
+                    if self
+                        .kv
+                        .with_flash(|f| Stage::new(f, base, size).program(off as u32, &padded[..plen]))
                         .is_err()
                     {
                         break; // flash write failed — stop; the HWM lets a retry resume

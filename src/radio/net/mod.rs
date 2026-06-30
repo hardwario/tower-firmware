@@ -34,7 +34,7 @@ use super::config::{self, Band, RfConfig};
 use super::device::{RadioError, Spirit1};
 use super::duty::{self, DutyGovernor};
 use super::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
-use crate::storage::Kv;
+use crate::storage::{NS_NET, Nv, Scoped};
 
 /// ACK window the sender waits for an acknowledgement (docs/radio.md). The measured ACK
 /// round-trip is ~35 ms (turnaround + ACK ToA + RX set-up), so 200 ms is ample.
@@ -59,16 +59,17 @@ const RESERVE: u32 = 1024;
 /// Receiver last-seen lazy-persist period: the replay window across a reboot is
 /// ≤ `P` transfers (docs/radio.md).
 const P: u32 = 32;
-/// EEPROM key-value keys for the persisted counter state.
-const KEY_WATERMARK: u16 = 0x5201;
-const KEY_LASTSEEN: u16 = 0x5202;
+/// EEPROM local keys (within `NS_NET`) for the persisted counter state.
+const KEY_WATERMARK: u8 = 0x00;
+const KEY_LASTSEEN: u8 = 0x01;
 
 /// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
 /// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
 /// is a usage policy, not a different type.
 pub const MAX_PEERS: usize = 64;
-/// Base Kv key for per-peer last-seen persistence (slot `i` → `KEY_LASTSEEN_BASE + i`).
-const KEY_LASTSEEN_BASE: u16 = 0x5300;
+/// Local base (within `NS_NET`) for per-peer last-seen lanes (slot `i` → `KEY_LASTSEEN_BASE + i`,
+/// `i < MAX_PEERS = 64`, so lanes occupy locals `0x10..=0x4F`).
+const KEY_LASTSEEN_BASE: u8 = 0x10;
 
 /// A registered peer: its ID, per-peer AES key, and replay state (docs/radio.md).
 #[derive(Clone, Copy)]
@@ -183,8 +184,8 @@ pub struct Net {
     tx_counter: u32,
     /// Highest reserved (persisted) counter value; `tx_counter < reserve_limit`.
     reserve_limit: u32,
-    /// EEPROM-backed counter persistence.
-    kv: Kv<'static>,
+    /// EEPROM-backed counter persistence (shared handle).
+    kv: Nv,
     /// EU duty-cycle governor (airtime budget for all TX).
     duty: DutyGovernor,
     /// Cached ACK bytes for the most recent confirmed RX, to re-send on a
@@ -216,7 +217,7 @@ impl Net {
     /// EEPROM (`kv`): resume the TX counter at the persisted reserve watermark and
     /// reserve the next block, and restore the default-lane last-seen (per-peer
     /// lanes are restored when their peer is registered via [`add_peer`](Self::add_peer)).
-    pub async fn new(mut radio: Spirit1, mut kv: Kv<'static>, cfg: NetConfig) -> Result<Self, RadioError> {
+    pub async fn new(mut radio: Spirit1, kv: Nv, cfg: NetConfig) -> Result<Self, RadioError> {
         radio.exit_shutdown().await?;
         radio.read_device_id()?;
         config::apply(
@@ -230,10 +231,11 @@ impl Net {
 
         // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the
         // very first boot, since 0 = "never sent"), then reserve the next block.
-        let resume = read_u32(&kv, KEY_WATERMARK).unwrap_or(1).max(1);
+        let nkv = kv.scope(NS_NET); // our namespaced view; the raw `kv` is kept for `Net::kv()`
+        let resume = read_u32(nkv, KEY_WATERMARK).unwrap_or(1).max(1);
         let reserve_limit = resume.wrapping_add(RESERVE);
-        let _ = kv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes());
-        let last_seen = read_u32(&kv, KEY_LASTSEEN).unwrap_or(0);
+        let _ = nkv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes());
+        let last_seen = read_u32(nkv, KEY_LASTSEEN).unwrap_or(0);
 
         // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/radio.md).
         let duty = match cfg.band {
@@ -281,18 +283,6 @@ impl Net {
         core::mem::take(&mut self.downlink_pending_rx)
     }
 
-    /// Consume the network layer and reclaim its [`Kv`] (and thus the `Flash` it owns), for an
-    /// app that needs program-flash access once the radio is done. Drops the radio + peer table
-    /// — call only when finished transceiving.
-    ///
-    /// The as-built FOTA flow does **not** need this: [`pull_update`](crate::fota::pull_update)
-    /// stages the image through `Net`'s own flash, and the **bootloader** (not the app) arms the
-    /// swap after a reset — so the node never reclaims the flash to drive an updater itself.
-    /// Kept as a general resource-reclaim accessor.
-    pub fn into_kv(self) -> Kv<'static> {
-        self.kv
-    }
-
     /// The active spectrum-access mode ([`Access::Duty`] unless AFA/FHSS was enabled).
     #[must_use]
     pub fn access(&self) -> Access {
@@ -305,11 +295,11 @@ impl Net {
         self.my_id
     }
 
-    /// Mutable access to the EEPROM key-value store the network layer owns, for
-    /// application-level persistence (e.g. soak tallies). The network layer uses
-    /// keys `0x5201`, `0x5202` and `0x5300+slot`; pick others to avoid clashes.
-    pub fn kv(&mut self) -> &mut Kv<'static> {
-        &mut self.kv
+    /// The shared (unscoped) EEPROM handle, for FOTA + application-level persistence. The network
+    /// layer owns the `NS_NET` namespace; for your own keys take a [`Scoped`] view of a different
+    /// namespace, e.g. `net.kv().scope(NS_APP)` (see [`Nv::scope`](crate::storage::Nv::scope)).
+    pub fn kv(&self) -> Nv {
+        self.kv
     }
 
     /// Current live TX counter (for diagnostics / persistence demos).
@@ -341,7 +331,8 @@ impl Net {
         }
         for i in 0..MAX_PEERS {
             if self.peers[i].is_none() {
-                let last_seen = read_u32(&self.kv, KEY_LASTSEEN_BASE + i as u16).unwrap_or(0);
+                let last_seen =
+                    read_u32(self.kv.scope(NS_NET), KEY_LASTSEEN_BASE + i as u8).unwrap_or(0);
                 self.peers[i] = Some(Peer {
                     id,
                     key: *key,
@@ -412,14 +403,15 @@ impl Net {
                 if p.accepts.is_multiple_of(P) {
                     let _ = self
                         .kv
-                        .set_bytes(KEY_LASTSEEN_BASE + i as u16, &counter.to_le_bytes());
+                        .scope(NS_NET)
+                        .set_bytes(KEY_LASTSEEN_BASE + i as u8, &counter.to_le_bytes());
                 }
             }
             None => {
                 self.default_last_seen = counter;
                 self.default_accepts = self.default_accepts.wrapping_add(1);
                 if self.default_accepts.is_multiple_of(P) {
-                    let _ = self.kv.set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
+                    let _ = self.kv.scope(NS_NET).set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
                 }
             }
         }
@@ -442,6 +434,7 @@ impl Net {
             self.reserve_limit = self.reserve_limit.saturating_add(RESERVE);
             let _ = self
                 .kv
+                .scope(NS_NET)
                 .set_bytes(KEY_WATERMARK, &self.reserve_limit.to_le_bytes());
         }
     }
@@ -665,9 +658,9 @@ impl Net {
 }
 
 /// Read a little-endian u32 from a Kv key, if present and exactly 4 bytes.
-fn read_u32(kv: &Kv<'static>, key: u16) -> Option<u32> {
+fn read_u32(kv: Scoped, local: u8) -> Option<u32> {
     let mut b = [0u8; 4];
-    match kv.get_bytes(key, &mut b) {
+    match kv.get_bytes(local, &mut b) {
         Ok(Some(4)) => Some(u32::from_le_bytes(b)),
         _ => None,
     }

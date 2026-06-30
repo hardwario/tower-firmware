@@ -59,10 +59,10 @@ const SWAP_DELAY_S: u64 = 8;
 async fn run(b: Board) {
     info!(target: "fota-app", "firmware v{VERSION} running from the ACTIVE slot");
 
-    // The one L0 Flash, reclaimed from the EEPROM Storage and split into its single bank
-    // region, shared through a blocking mutex — what embassy-boot's FirmwareUpdater drives
-    // (it owns the DFU + STATE partitions over this same handle, so there is one writer).
-    let regions = b.storage.into_flash().into_blocking_regions();
+    // The one L0 Flash, reclaimed from the shared KV (sole owner — `no_shell`, no radio) and split
+    // into its single bank region, shared through a blocking mutex — what embassy-boot's
+    // FirmwareUpdater drives (it owns the DFU + STATE partitions over this same handle).
+    let regions = b.kv.into_owned_flash().into_blocking_regions();
     let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(regions.bank1_region));
     let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash, &flash);
     let mut aligned = AlignedBuffer([0u8; WRITE_SIZE]);
@@ -188,4 +188,4 @@ async fn stage_self_image<DFU: NorFlash, STATE: NorFlash>(
     }
 }
 
-app!(run);
+app!(run, no_shell);

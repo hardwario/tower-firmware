@@ -20,7 +20,7 @@ use core::fmt::Write;
 
 use embassy_time::{Instant, Timer};
 use log::info;
-use tower::shell::{self, Args, Ctx, Entry, Kind, Outcome, Setting};
+use tower::shell::{Args, Ctx, Entry, Kind, Outcome, Setting};
 use tower::{app, board::Board};
 
 /// App command `/uptime` (top-level).
@@ -62,38 +62,37 @@ static APP_COMMANDS: &[Entry] = &[
     ),
 ];
 
-/// App settings — one of each kind. Keys are above the console base (`0x5500`);
-/// `identity` (SDK) stays at `0x5500`.
+/// App settings — one of each kind. Keys are `u8` locals in the shell namespace (`NS_SHELL`);
+/// pick any free local (the SDK `identity` setting uses `0x00`).
 static APP_SETTINGS: &[Setting] = &[
     Setting {
-        key: 0x5510,
+        key: 0x10,
         name: "interval",
         kind: Kind::Uint { min: 1, max: 3600 },
         default: "30",
     },
     Setting {
-        key: 0x5511,
+        key: 0x11,
         name: "verbose",
         kind: Kind::Bool,
         default: "false",
     },
     Setting {
-        key: 0x5512,
+        key: 0x12,
         name: "mode",
         kind: Kind::Enum(&["p2p", "star", "mesh"]),
         default: "star",
     },
     Setting {
-        key: 0x5513,
+        key: 0x13,
         name: "tx_power",
         kind: Kind::Int { min: -30, max: 20 },
         default: "14",
     },
 ];
 
-async fn run(b: Board) {
-    // Hand the EEPROM to the shell with the app's commands + settings, then spawn it.
-    shell::serve_ext(b.spawner, b.storage, APP_COMMANDS, APP_SETTINGS);
+async fn run(_b: Board) {
+    // The shell (with this app's APP_COMMANDS + APP_SETTINGS) is served by `app!` below.
     info!("shell ready — try `/system settings print` via `tower shell`");
 
     // Logs keep flowing alongside the shell on the same framed link.
@@ -105,4 +104,4 @@ async fn run(b: Board) {
     }
 }
 
-app!(run);
+app!(run, commands: APP_COMMANDS, settings: APP_SETTINGS);

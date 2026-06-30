@@ -28,7 +28,7 @@ use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
-use tower::storage::Kv;
+use tower::storage::{NS_APP, Scoped};
 use tower::{app, board::Board};
 
 #[cfg(feature = "role-node")]
@@ -42,10 +42,10 @@ const GW_ID: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
-/// EEPROM keys for cumulative soak tallies. App-owned keys live at `0x6000+`, clear of all
-/// SDK reservations (net `0x52xx/0x53xx`, FOTA `0x54xx`, console `0x55xx`; see `storage`).
-const KV_COUNT: u16 = 0x6000; // node: tx_ok / gateway: accepted
-const KV_FAIL: u16 = 0x6001; // either role: latched failures
+/// EEPROM locals for cumulative soak tallies, in the app namespace (`NS_APP`) — structurally
+/// clear of every SDK namespace (net/fota/shell), so no manual range-picking.
+const KV_COUNT: u8 = 0x00; // node: tx_ok / gateway: accepted
+const KV_FAIL: u8 = 0x01; // either role: latched failures
 
 #[cfg(feature = "role-node")]
 fn xorshift32(s: &mut u32) -> u32 {
@@ -69,9 +69,9 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-fn read_u32(kv: &Kv<'static>, key: u16) -> u32 {
+fn read_u32(kv: Scoped, local: u8) -> u32 {
     let mut b = [0u8; 4];
-    match kv.get_bytes(key, &mut b) {
+    match kv.get_bytes(local, &mut b) {
         Ok(Some(4)) => u32::from_le_bytes(b),
         _ => 0,
     }
@@ -88,7 +88,6 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     #[cfg(feature = "role-node")]
     let my_id = NODE_ID;
@@ -97,7 +96,7 @@ async fn run(b: Board) {
 
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id,
             key: KEY,
@@ -113,7 +112,8 @@ async fn run(b: Board) {
             return;
         }
     };
-    let (cum_count, cum_fail) = (read_u32(net.kv(), KV_COUNT), read_u32(net.kv(), KV_FAIL));
+    let akv = net.kv().scope(NS_APP);
+    let (cum_count, cum_fail) = (read_u32(akv, KV_COUNT), read_u32(akv, KV_FAIL));
 
     #[cfg(feature = "role-node")]
     node(&mut net, &mut led, cum_count, cum_fail).await;
@@ -181,8 +181,9 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
             led.set_high(); // latched FAIL
         }
         if iters.is_multiple_of(50) {
-            let _ = net.kv().set_bytes(KV_COUNT, &(cum_ok + ok).to_le_bytes());
-            let _ = net.kv().set_bytes(KV_FAIL, &fails.to_le_bytes());
+            let akv = net.kv().scope(NS_APP);
+            let _ = akv.set_bytes(KV_COUNT, &(cum_ok + ok).to_le_bytes());
+            let _ = akv.set_bytes(KV_FAIL, &fails.to_le_bytes());
             info!(
                 target: "soak",
                 "VERDICT: {}  iters={} ok={} nd={} busy={} duty={} rej={} fails={}",
@@ -238,8 +239,9 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
                 led.set_high();
             }
             if accepted.is_multiple_of(25) {
-                let _ = net.kv().set_bytes(KV_COUNT, &(cum_acc + accepted).to_le_bytes());
-                let _ = net.kv().set_bytes(KV_FAIL, &fails.to_le_bytes());
+                let akv = net.kv().scope(NS_APP);
+                let _ = akv.set_bytes(KV_COUNT, &(cum_acc + accepted).to_le_bytes());
+                let _ = akv.set_bytes(KV_FAIL, &fails.to_le_bytes());
                 info!(
                     target: "soak",
                     "VERDICT: {}  accepted={} integrity_fail={} order_fail={} fails={} last_cnt={}",

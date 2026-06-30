@@ -51,9 +51,9 @@ fn pat(i: usize) -> u8 {
 }
 
 async fn run(b: Board) {
-    // Reclaim the single Flash handle from the EEPROM Storage — FOTA stages in program
-    // flash on the same peripheral (disjoint region). No radio, no Net needed.
-    let mut flash = b.storage.into_flash();
+    // Reclaim the single Flash handle from the shared KV — FOTA stages in program flash on the
+    // same peripheral (disjoint region). Sole flash owner: no radio, no Net, no shell (`no_shell`).
+    let mut flash = b.kv.into_owned_flash();
 
     info!(target: "fota", "STAGE TEST: DFU slot at offset 0x{:05x}, size {} B", DFU_OFFSET, DFU_SIZE);
     // Yield so the writer task can flush the banner + line above: flash program/erase below
@@ -167,4 +167,4 @@ async fn run(b: Board) {
     }
 }
 
-app!(run);
+app!(run, no_shell);

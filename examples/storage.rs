@@ -1,7 +1,7 @@
 //! storage — key-value persistence in the L0 EEPROM
 //! ([`storage`](tower::storage) block).
 //!
-//! Shows both value styles of the [`Kv`] store, surviving reset/power-cycle:
+//! Shows both value styles of the shared key-value store, surviving reset/power-cycle:
 //!   * a **raw scalar** — a boot counter stored as `u32` little-endian bytes
 //!     (no serializer), and
 //!   * a **postcard record** — a `Settings` struct (any serde type).
@@ -18,12 +18,13 @@
 use embassy_time::Timer;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use tower::storage::Kv;
+use tower::storage::NS_APP;
 use tower::{app, board::Board};
 
-// Keys (any nonzero u16; 0 is reserved). Pick a fresh number to add a new value.
-const KEY_BOOTS: u16 = 1; // raw u32
-const KEY_SETTINGS: u16 = 2; // postcard struct
+// Locals within NS_APP (any u8 — the namespace prefix keeps the full key nonzero, so even
+// local 0 is fine). Add a fresh local to add a new value.
+const KEY_BOOTS: u8 = 0x00; // raw u32 (local within NS_APP)
+const KEY_SETTINGS: u8 = 0x01; // postcard struct (local within NS_APP)
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Settings {
@@ -41,7 +42,7 @@ impl Default for Settings {
 }
 
 async fn run(b: Board) {
-    let mut kv = Kv::new(b.storage);
+    let kv = b.kv.scope(NS_APP); // this app's namespaced view; locals are u8, can't hit SDK keys
 
     // --- raw scalar: a persistent boot counter ------------------------------
     let mut buf = [0u8; 4];

@@ -147,20 +147,21 @@ const _: () = {
 // console `0x55xx`). Values are stored via `storage::Kv` (postcard or raw bytes).
 // ---------------------------------------------------------------------------
 
-/// Base of the FOTA EEPROM key range. `0x5400` itself is currently reserved/unused — the
-/// first live key is [`KEY_DOWNLOAD_HWM`] at `0x5401`.
-pub const KEY_BASE: u16 = 0x5400;
+use crate::storage::{NS_FOTA, key};
+
+// FOTA keys cross into `Net::bulk_fetch_to_flash` (a raw-`u16` progress key), so they are composed
+// with [`key`](crate::storage::key) rather than held as a [`Scoped`](crate::storage::Scoped) handle.
 /// KV key: download high-water mark (u32 LE) — bytes contiguously staged in DFU, for resume
 /// (docs/fota.md: high-water mark, restart from the last contiguous chunk). Updated
 /// periodically during a pull so a duty stall or power-cut resumes instead of restarting.
-pub const KEY_DOWNLOAD_HWM: u16 = 0x5401;
+pub const KEY_DOWNLOAD_HWM: u16 = key(NS_FOTA, 0x00);
 /// KV key: installed firmware version (u32 LE) — rollback protection rejects an image
 /// whose `version <= installed` (docs/fota.md).
-pub const KEY_INSTALLED_VERSION: u16 = 0x5402;
+pub const KEY_INSTALLED_VERSION: u16 = key(NS_FOTA, 0x01);
 /// KV key: the in-progress download's image version (u32 LE) — pairs with
 /// [`KEY_DOWNLOAD_HWM`] so a resume only continues the *same* image (a different version on
 /// offer ⇒ start fresh, re-erase DFU). The bootloader's SHA check is the final backstop.
-pub const KEY_DOWNLOAD_IDENT: u16 = 0x5403;
+pub const KEY_DOWNLOAD_IDENT: u16 = key(NS_FOTA, 0x02);
 
 /// A FOTA staging error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

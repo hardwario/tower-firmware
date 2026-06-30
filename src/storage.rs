@@ -16,9 +16,9 @@
 //!     buffer) — ample for the SDK's counter/peer/settings state.
 //!
 //! ```ignore
-//! let mut kv = Kv::new(b.storage);
-//! const BOOTS: u16 = 1;
-//! const CFG: u16 = 2;
+//! let kv = b.kv.scope(NS_APP); // a namespaced view — apps own NS_APP; locals are u8
+//! const BOOTS: u8 = 0x01;
+//! const CFG: u8 = 0x02;
 //!
 //! kv.set_bytes(BOOTS, &count.to_le_bytes())?;       // raw scalar, no codec
 //! kv.set(CFG, &Settings { interval_s: 30 })?;       // postcard
@@ -31,7 +31,11 @@
 
 // Reusable SDK surface: both layers are fully exposed even if an app uses one.
 
+use core::cell::RefCell;
+
 use embassy_stm32::flash::{Blocking, EEPROM_SIZE, Flash};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tower_kv::{Eeprom, KvError};
@@ -143,18 +147,32 @@ impl Eeprom for Storage<'_> {
     }
 }
 
-/// KV key range reserved for console/shell settings (e.g. `/system identity`).
+/// EEPROM key **namespace**. Each subsystem owns one `Ns`; combined with a per-subsystem 8-bit
+/// `local` key it forms the 16-bit [`Kv`] key as `(ns << 8) | local`. Two subsystems with
+/// different `Ns` can never collide, whatever locals they pick — so the disjoint-key invariant is
+/// **structural** (hold a [`Scoped`] view via [`Nv::scope`]), not a hand-maintained convention.
 ///
-/// Authoritative SDK EEPROM key map — apps must pick keys clear of **all** of these:
-///   - `0x5201`, `0x5202`, `0x5300..=0x533F` — radio [`net`](crate::radio::net) layer
-///     (TX-counter watermark, default-lane last-seen, and per-peer last-seen lanes).
-///   - `0x5400..=0x5403` — [`fota`](crate::fota) (download high-water mark + ident,
-///     installed-version rollback floor).
-///   - `0x5500+` — console/shell settings, allocated upward from this base (one key per
-///     declared [`Setting`](crate::shell)).
-///
-/// Apps owning their own state should use **`0x6000+`** to stay clear of the SDK ranges.
-pub const CONSOLE_SETTINGS_BASE: u16 = 0x5500;
+/// The high byte is the namespace, the low byte the local key — a flat `u16` space as before, just
+/// partitioned by *number*, not by memory (the log-structured [`Kv`] stores by key tag + insertion
+/// order, so the key value costs nothing — see the module docs).
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Ns(pub u8);
+
+/// Radio [`net`](crate::radio::net) layer (TX-counter watermark, last-seen lanes).
+pub const NS_NET: Ns = Ns(0x52);
+/// [`fota`](crate::fota) (download high-water mark / ident, installed-version rollback floor).
+pub const NS_FOTA: Ns = Ns(0x54);
+/// Console/shell settings (one local per declared [`Setting`](crate::shell)).
+pub const NS_SHELL: Ns = Ns(0x55);
+/// Application-owned state — apps pick any locals here, clear of every SDK namespace.
+pub const NS_APP: Ns = Ns(0x60);
+
+/// Compose a full [`Kv`] key from a namespace + an 8-bit local key. Use it for `const` keys and at
+/// API boundaries that take a raw `u16` (e.g. `Net::bulk_fetch_to_flash`'s progress key); for live
+/// get/set prefer a [`Scoped`] handle ([`Nv::scope`]), which applies this automatically.
+pub const fn key(ns: Ns, local: u8) -> u16 {
+    ((ns.0 as u16) << 8) | local as u16
+}
 
 /// A key-value store over the EEPROM. Keys are `u16` (1..=65535; `0` is reserved).
 ///
@@ -227,5 +245,137 @@ impl<'d> Kv<'d> {
     /// (Codec in [`tower_kv`].)
     pub fn compact(&mut self) -> Result<(), Error> {
         tower_kv::compact(&mut self.storage, self.capacity).map_err(Error::from)
+    }
+}
+
+/// The one process-wide [`Kv`] over the EEPROM, behind a blocking mutex + `RefCell`, parked in a
+/// `'static` (see [`Nv::install`]). Every subsystem — radio [`net`](crate::radio::net), the
+/// [`shell`](crate::shell), [`fota`](crate::fota), and apps — borrows it through an [`Nv`] handle.
+///
+/// A *blocking* (non-async) mutex suffices: EEPROM access is synchronous and is never held across
+/// `.await` on this single-core cooperative executor, and no EEPROM access happens in an interrupt.
+/// The `Option` lets a sole-owner FOTA app reclaim the raw `Flash` via [`Nv::into_owned_flash`].
+pub type SharedKv = Mutex<CriticalSectionRawMutex, RefCell<Option<Kv<'static>>>>;
+
+/// A cheap, `Copy` handle to the one shared [`Kv`]. Hand the same handle to `Net`, the shell, and
+/// FOTA at once (it is [`Board::kv`](crate::board::Board)); each method locks + borrows the store
+/// for that one call, so the subsystems coexist over the single EEPROM. They stay non-colliding by
+/// each taking a [`Scoped`] view of their own namespace ([`Nv::scope`]).
+#[derive(Copy, Clone)]
+pub struct Nv(&'static SharedKv);
+
+impl Nv {
+    /// Build the one [`Kv`] over `storage`, park it in a process-wide `static`, and return the
+    /// handle. Call **exactly once** — the [`cortex_m::singleton!`] enforces it (a second call
+    /// panics). The sole caller is [`Board::take`](crate::board::Board::take).
+    pub fn install(storage: Storage<'static>) -> Self {
+        let cell: &'static SharedKv = cortex_m::singleton!(
+            : SharedKv = Mutex::new(RefCell::new(Some(Kv::new(storage))))
+        )
+        .expect("Nv::install called more than once");
+        Nv(cell)
+    }
+
+    /// Run `f` against the one [`Kv`] under the lock. Panics only if the `Kv` was reclaimed by
+    /// [`into_owned_flash`](Self::into_owned_flash) — which a sole-owner FOTA app does, and it
+    /// serves no shell / builds no `Net`, so nothing else calls this afterwards.
+    fn with<R>(&self, f: impl FnOnce(&mut Kv<'static>) -> R) -> R {
+        self.0
+            .lock(|c| f(c.borrow_mut().as_mut().expect("Nv used after into_owned_flash")))
+    }
+
+    /// Store raw bytes under `key` (see [`Kv::set_bytes`]).
+    pub fn set_bytes(&self, key: u16, value: &[u8]) -> Result<(), Error> {
+        self.with(|kv| kv.set_bytes(key, value))
+    }
+
+    /// Read the raw bytes stored under `key` into `out` (see [`Kv::get_bytes`]).
+    pub fn get_bytes(&self, key: u16, out: &mut [u8]) -> Result<Option<usize>, Error> {
+        self.with(|kv| kv.get_bytes(key, out))
+    }
+
+    /// Store any serde value under `key`, postcard-serialized (see [`Kv::set`]).
+    pub fn set<T: Serialize>(&self, key: u16, value: &T) -> Result<(), Error> {
+        self.with(|kv| kv.set(key, value))
+    }
+
+    /// Load a postcard value under `key`, or `None` if absent (see [`Kv::get`]).
+    pub fn get<T: DeserializeOwned>(&self, key: u16) -> Result<Option<T>, Error> {
+        self.with(|kv| kv.get(key))
+    }
+
+    /// Reclaim space taken by superseded records (see [`Kv::compact`]).
+    pub fn compact(&self) -> Result<(), Error> {
+        self.with(|kv| kv.compact())
+    }
+
+    /// Borrow the underlying **program-flash** handle for a *synchronous* op (FOTA staging, or a
+    /// boot-state read/confirm), while the EEPROM [`Kv`] stays parked behind the lock. The EEPROM
+    /// and program flash are disjoint regions of the one `Flash` peripheral (see
+    /// [`Storage::flash_mut`]). The lock is held for the whole closure — do **not** `.await` and do
+    /// **not** call other [`Nv`] methods inside `f`.
+    pub fn with_flash<R>(&self, f: impl FnOnce(&mut Flash<'static, Blocking>) -> R) -> R {
+        self.with(|kv| f(kv.storage_mut().flash_mut()))
+    }
+
+    /// Reclaim the owned program `Flash`, consuming the shared [`Kv`]. **Sound only for a
+    /// sole-owner FOTA app** that serves no shell and builds no `Net` — e.g. a staging / A-B
+    /// updater that must hold `Flash` across `.await` (which the locked
+    /// [`with_flash`](Self::with_flash) cannot give). After this, any other [`Nv`] call panics, so
+    /// use `app!(run, no_shell)`.
+    pub fn into_owned_flash(self) -> Flash<'static, Blocking> {
+        self.0
+            .lock(|c| c.borrow_mut().take().expect("Nv flash already reclaimed"))
+            .into_storage()
+            .into_flash()
+    }
+
+    /// A namespace-scoped view: every get/set is keyed by an 8-bit `local`, silently prefixed with
+    /// `ns`. A subsystem holding the returned [`Scoped`] **cannot** address another namespace's
+    /// keys, so cross-subsystem collisions are impossible by construction. Hand each subsystem
+    /// `b.kv.scope(NS_…)`.
+    pub fn scope(self, ns: Ns) -> Scoped {
+        Scoped { nv: self, ns: ns.0 }
+    }
+}
+
+/// A namespace-scoped [`Nv`] (see [`Nv::scope`]). Get/set are keyed by an 8-bit `local` and
+/// auto-prefixed with the namespace; [`full_key`](Self::full_key) exposes the composed `u16` for
+/// APIs that take a raw key, and [`raw`](Self::raw) drops back to the unscoped handle.
+#[derive(Copy, Clone)]
+pub struct Scoped {
+    nv: Nv,
+    ns: u8,
+}
+
+impl Scoped {
+    /// The full 16-bit [`Kv`] key this `local` maps to — for APIs that take a raw `u16`.
+    pub fn full_key(&self, local: u8) -> u16 {
+        ((self.ns as u16) << 8) | local as u16
+    }
+
+    /// The underlying unscoped handle (e.g. for [`Nv::with_flash`], or to re-`scope`).
+    pub fn raw(&self) -> Nv {
+        self.nv
+    }
+
+    /// Store raw bytes under `local` in this namespace (see [`Kv::set_bytes`]).
+    pub fn set_bytes(&self, local: u8, value: &[u8]) -> Result<(), Error> {
+        self.nv.set_bytes(self.full_key(local), value)
+    }
+
+    /// Read the raw bytes under `local` in this namespace into `out` (see [`Kv::get_bytes`]).
+    pub fn get_bytes(&self, local: u8, out: &mut [u8]) -> Result<Option<usize>, Error> {
+        self.nv.get_bytes(self.full_key(local), out)
+    }
+
+    /// Store a postcard value under `local` in this namespace (see [`Kv::set`]).
+    pub fn set<T: Serialize>(&self, local: u8, value: &T) -> Result<(), Error> {
+        self.nv.set(self.full_key(local), value)
+    }
+
+    /// Load a postcard value under `local` in this namespace (see [`Kv::get`]).
+    pub fn get<T: DeserializeOwned>(&self, local: u8) -> Result<Option<T>, Error> {
+        self.nv.get(self.full_key(local))
     }
 }

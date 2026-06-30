@@ -18,7 +18,6 @@ use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig, PAIRING_KEY, PAIRING_WINDOW};
-use tower::storage::Kv;
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
@@ -42,7 +41,6 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let kv = Kv::new(b.storage);
 
     #[cfg(feature = "role-node")]
     let my_id = MY_ID;
@@ -52,7 +50,7 @@ async fn run(b: Board) {
     // The Net's own key is unused during pairing (JOIN frames use PAIRING_KEY).
     let mut net = match Net::new(
         radio,
-        kv,
+        b.kv,
         NetConfig {
             my_id,
             key: PAIRING_KEY,
