@@ -2,7 +2,7 @@
 //!
 //! A slow heartbeat with a double-blink fired every 5 s that preempts it.
 //!
-//!   just flash blinky
+//!   just flash example blinky
 
 #![no_std]
 #![no_main]

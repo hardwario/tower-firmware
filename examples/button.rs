@@ -2,11 +2,11 @@
 //!
 //! Logs every event from the on-board button (PA8): `Press`, `Release`,
 //! `Click` (short press), `Hold` (long press). A click flashes the LED briefly,
-//! a hold flashes it longer — so it's visible with or without `just monitor`.
+//! a hold flashes it longer — so it's visible with or without `just logs`.
 //!
 //! Tune the debounce / click / hold timings via `button::Config`.
 //!
-//!   just flash button   (then press/click/hold the button)
+//!   just flash example button   (then press/click/hold the button)
 
 #![no_std]
 #![no_main]

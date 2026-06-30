@@ -1,8 +1,8 @@
 //! net_secure_ping — the full stack end-to-end over the air: build a CCM-sealed
 //! DATA frame, transmit it, receive + authenticate + decrypt on the other board.
 //!
-//!   TOWER_FEATURES=role-node    just flash net_secure_ping   # sends sealed frames
-//!   TOWER_FEATURES=role-gateway just flash net_secure_ping   # receives + verifies
+//!   TOWER_FEATURES=role-node    just flash example net_secure_ping   # sends sealed frames
+//!   TOWER_FEATURES=role-gateway just flash example net_secure_ping   # receives + verifies
 //!
 //! Proves radio link + frame codec + AES-CCM together: the Gateway logs the
 //! decrypted payload only if the CCM tag authenticates (a forged/tampered frame

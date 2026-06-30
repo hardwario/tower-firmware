@@ -1,7 +1,7 @@
 //! fota_stage — staging verify: program flash <- generated image (docs/fota.md).
 //!
-//!   just flash fota_stage      # single board, no radio, no role feature
-//!   just run   fota_stage      # flash + open the monitor (catches the boot banner)
+//!   just flash example fota_stage      # single board, no radio, no role feature
+//!   just run example fota_stage      # flash + open the monitor (catches the boot banner)
 //!
 //! Proves the device-side FOTA write path end-to-end **without the radio**: a
 //! deterministic, firmware-sized blob is streamed 64 B at a time through

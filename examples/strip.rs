@@ -3,7 +3,7 @@
 //! Demonstrates the effects layer ([`strip`](tower::strip)) over the
 //! PWM/DMA driver. Edit `NUM` for your strip length.
 //!
-//!   just flash strip
+//!   just flash example strip
 
 #![no_std]
 #![no_main]

@@ -34,9 +34,10 @@ update path (`tower::fota` + an embassy-boot bootloader); without it an app link
 # One-time: cargo install just cargo-binutils   (+ rustup component add llvm-tools)
 #           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
 #           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing needs neither)
-just examples             # list the example apps
-just run thermometer      # build + flash, then watch the console from boot
-just logs                 # stream the framed console of a running MCU (no reset)
+just examples                  # list example names      (just apps → product names)
+just run example thermometer    # build + flash an example, watch the console from boot
+just run app radio_push_button  # same, for a ready-made TOWER IoT Kit product (apps/)
+just logs                       # re-attach to a running MCU's framed console (no reset)
 ```
 
 ## Module layout
@@ -130,10 +131,18 @@ Two settings in [`board::init`](src/board.rs) matter here:
 > A debug probe attached with `enable_debug_during_sleep = false` will lose the
 > core during STOP — measure real current standalone.
 
-## Examples
+## Examples and applications
 
-Each file in [`examples/`](examples) is a complete, flashable program. Add your
-own by dropping a `.rs` there — it's picked up automatically (`just examples`).
+Flashable programs come in two kinds:
+
+- **Examples** — each file in [`examples/`](examples) is a complete program that demonstrates
+  one block. Add your own by dropping a `.rs` there — it's picked up automatically
+  (`just examples`). Built as Cargo examples (`just build example <name>`).
+- **Applications** — ready-made TOWER IoT Kit product firmwares in [`apps/`](apps) (e.g.
+  `radio_dongle_gateway`, `radio_push_button`, `radio_climate_monitor`). These are full
+  applications, so they're Cargo binaries: list them with `just apps`, build with
+  `just build app <name>`. Add one by dropping `apps/<name>.rs` and a matching `[[bin]]` in
+  `Cargo.toml`.
 
 | Example | Demonstrates |
 |---|---|
@@ -182,13 +191,16 @@ Prerequisites (one-time): `cargo install just cargo-binutils probe-rs-tools`
 and `rustup component add llvm-tools`. `just test` and the FOTA recipes also need
 `python3` (`python` on Windows) — see [`docs/fota.md`](docs/fota.md).
 
+`build`/`flash`/`run`/`size` take a kind (`example` or `app`) then the name:
+
 ```sh
-just examples                # list examples
-just build blinky            # → target/firmware.bin (+ size)
-just flash blinky            # build + flash over the UART bootloader (tower)
-just run thermometer         # build + flash, then stream the framed console logs
-just logs                    # stream the framed console from the running MCU (tower logs)
-just flash blinky --no-verify  # extra args pass through to `tower flash`
+just examples                        # list example names      (just apps → product names)
+just build example blinky            # → target/firmware.bin (+ size)
+just flash example blinky            # build + flash over the UART bootloader (tower)
+just flash app radio_push_button     # same, for a ready-made TOWER IoT Kit product (apps/)
+just run   example thermometer       # build + flash, then stream the framed console logs
+just logs                            # stream the framed console from the running MCU (tower logs)
+just flash example blinky --no-verify  # extra args pass through to `tower flash`
 ```
 
 Flashing + console use the [`tower`](https://github.com/hardwario/tower-cli) CLI (it
@@ -197,8 +209,8 @@ on your `PATH`. Set `TOWER_PORT=/dev/cu.usbserial-XXXX` if more than one serial 
 present. `cargo run --release --example blinky` also flashes via the SWD probe-rs runner
 in `.cargo/config.toml` if you use a J-Link/ST-Link instead.
 
-`just build NAME` runs `cargo objcopy --example NAME` → `target/firmware.bin`
-(linked at `0x08000000`). The console is **framed** (COBS+CRC+postcard), so use
+`just build KIND NAME` runs `cargo objcopy` (`--example NAME` for `example`, `--bin NAME`
+for `app`) → `target/firmware.bin` (linked at `0x08000000`). The console is **framed** (COBS+CRC+postcard), so use
 `tower logs` — a raw serial terminal shows binary. `tower logs` reads without resetting
 the MCU; **close it before flashing** (`tower flash` needs exclusive port access).
 

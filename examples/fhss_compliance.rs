@@ -1,6 +1,6 @@
 //! fhss_compliance — F10: §15.247 compliance evidence from a board log (1 board).
 //!
-//!   just flash fhss_compliance
+//!   just flash example fhss_compliance
 //!
 //! Runs the FHSS hop-master for >1 full cycle (80 slots) and then reports, from the
 //! per-channel airtime counters, the three §15.247(a)(1)(i) facts the hop schedule

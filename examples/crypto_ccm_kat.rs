@@ -6,7 +6,7 @@
 //! rejects it (tag mismatch). Proves the CCM construction before the network
 //! layer relies on it.
 //!
-//!   just flash crypto_ccm_kat    (watch with: tower logs)
+//!   just flash example crypto_ccm_kat    (watch with: tower logs)
 
 #![no_std]
 #![no_main]

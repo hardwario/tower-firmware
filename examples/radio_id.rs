@@ -6,7 +6,7 @@
 //! 304, version 48). All-`0x00` or all-`0xFF` means the bus/CS/SDN wiring or
 //! timing is wrong.
 //!
-//!   just flash radio_id        (watch with: tower logs)
+//!   just flash example radio_id        (watch with: tower logs)
 
 #![no_std]
 #![no_main]

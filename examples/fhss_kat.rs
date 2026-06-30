@@ -2,7 +2,7 @@
 //! no RF link). Proves the hop permutation, the per-channel dwell bound, and the
 //! beacon frame round-trip before the on-air link is built.
 //!
-//!   just flash fhss_kat
+//!   just flash example fhss_kat
 //!
 //! F5: hop_channel(seed,cycle,·) over i=0..N is a permutation of 0..N every cycle
 //!     (each channel exactly once ⇒ equal use), for several cycles + seeds.

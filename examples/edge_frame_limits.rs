@@ -2,7 +2,7 @@
 //! Single board, no radio link: drives the frame codec + AES-CCM at its
 //! boundaries and asserts each accept/reject, printing one PASS/FAIL verdict.
 //!
-//!   just flash edge_frame_limits
+//!   just flash example edge_frame_limits
 //!
 //! Covers: payload MTU (1 B / 74 B accept, 75 B reject; bulk 64 B accept, 65 B
 //! reject), and the receive-side drops — bad version, unknown type, truncated,

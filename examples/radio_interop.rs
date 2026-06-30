@@ -1,7 +1,7 @@
 //! radio_interop — comprehensive semi-fuzzy soak campaign (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node    just flash radio_interop   # randomized sender
-//!   TOWER_FEATURES=role-gateway just flash radio_interop   # invariant checker
+//!   TOWER_FEATURES=role-node    just flash example radio_interop   # randomized sender
+//!   TOWER_FEATURES=role-gateway just flash example radio_interop   # invariant checker
 //!
 //! One file, two roles, long unattended runs on the two boards. The node drives
 //! pseudo-random traffic (seeded from its device ID so a run replays bit-for-bit;

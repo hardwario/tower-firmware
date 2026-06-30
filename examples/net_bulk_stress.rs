@@ -1,7 +1,7 @@
 //! net_bulk_stress — large bulk transfer stress (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway just flash net_bulk_stress   # sender: serves a big blob
-//!   TOWER_FEATURES=role-node    just flash net_bulk_stress   # requester: pulls + verifies
+//!   TOWER_FEATURES=role-gateway just flash example net_bulk_stress   # sender: serves a big blob
+//!   TOWER_FEATURES=role-node    just flash example net_bulk_stress   # requester: pulls + verifies
 //!
 //! Like `net_bulk` but a **multi-KB** blob over many chunks, to stress the pull
 //! state machine (24-bit chunk index, per-chunk req/resp + retries, session-counter

@@ -1,7 +1,7 @@
 //! edge_rapid — back-to-back transfers: one-at-a-time, monotonic counters (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node    just flash edge_rapid   # hammers confirmed sends
-//!   TOWER_FEATURES=role-gateway just flash edge_rapid   # checks ordering
+//!   TOWER_FEATURES=role-node    just flash example edge_rapid   # hammers confirmed sends
+//!   TOWER_FEATURES=role-gateway just flash example edge_rapid   # checks ordering
 //!
 //! The node fires confirmed sends with NO inter-send delay (the Net serializes
 //! them — one transfer at a time, docs/radio.md). The gateway asserts every accepted frame's

@@ -1,7 +1,7 @@
 //! net_channel — secured confirmed link on a NON-default channel (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node    just flash net_channel   # sender on ch2
-//!   TOWER_FEATURES=role-gateway just flash net_channel   # receiver on ch2
+//!   TOWER_FEATURES=role-node    just flash example net_channel   # sender on ch2
+//!   TOWER_FEATURES=role-gateway just flash example net_channel   # receiver on ch2
 //!
 //! Same confirmed-delivery link as `radio_node`/`radio_gateway`, but on channel 2
 //! instead of 0. Bringing the radio up on a non-zero channel exercises the channel

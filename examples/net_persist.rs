@@ -7,7 +7,7 @@
 //! starts at 1 (watermark 1025); after a reset it resumes at 1025 (watermark
 //! 2049), skipping the unused tail of the reserved block.
 //!
-//!   just flash net_persist     (then: just logs; power-cycle to watch the counter resume)
+//!   just flash example net_persist     (then: just logs; power-cycle to watch the counter resume)
 
 #![no_std]
 #![no_main]

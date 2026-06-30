@@ -2,8 +2,8 @@
 //! / interrupts, to verify the packet-handling *infrastructure* (not just RF
 //! registers).
 //!
-//!   TOWER_FEATURES=role-node    just flash radio_linkdiag   # TX: trace each send
-//!   TOWER_FEATURES=role-gateway just flash radio_linkdiag   # RX: poll the FIFO
+//!   TOWER_FEATURES=role-node    just flash example radio_linkdiag   # TX: trace each send
+//!   TOWER_FEATURES=role-gateway just flash example radio_linkdiag   # RX: poll the FIFO
 //!
 //! TX role: loads a known payload, confirms it landed in the TX FIFO, strobes TX,
 //! traces the MC_STATE progression (READY→SYNTH→LOCK→TX→READY), reads the result

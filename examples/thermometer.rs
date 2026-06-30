@@ -1,9 +1,9 @@
 //! thermometer — log the TMP112 temperature every 2 s.
 //!
 //! The console and the TMP112 (one-shot mode) are already set up by the board,
-//! so the app is just the read loop. Watch it with `just monitor`.
+//! so the app is just the read loop. Watch it with `just logs`.
 //!
-//!   just flash thermometer
+//!   just flash example thermometer
 
 #![no_std]
 #![no_main]

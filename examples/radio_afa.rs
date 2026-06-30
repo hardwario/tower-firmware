@@ -1,7 +1,7 @@
 //! radio_afa — EU 868 LBT + Adaptive Frequency Agility (EN 300 220).
 //!
-//!   TOWER_FEATURES=role-gateway just flash radio_afa   # scans the AFA set, auto-ACKs
-//!   TOWER_FEATURES=role-node    just flash radio_afa   # LBT + agility transmitter
+//!   TOWER_FEATURES=role-gateway just flash example radio_afa   # scans the AFA set, auto-ACKs
+//!   TOWER_FEATURES=role-node    just flash example radio_afa   # LBT + agility transmitter
 //!
 //! Listen-Before-Talk + frequency agility is the EU technique that relaxes the 1 %
 //! duty cap. The node listens before every TX (CCA) and hops to another channel

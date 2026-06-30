@@ -1,7 +1,7 @@
 //! radio_fhss — US 915 FHSS link (FCC §15.247), star topology.
 //!
-//!   TOWER_FEATURES=role-gateway just flash radio_fhss   # hop time-master (beacons)
-//!   TOWER_FEATURES=role-node    just flash radio_fhss   # follower (scans → locks → sends)
+//!   TOWER_FEATURES=role-gateway just flash example radio_fhss   # hop time-master (beacons)
+//!   TOWER_FEATURES=role-node    just flash example radio_fhss   # follower (scans → locks → sends)
 //!
 //! The gateway runs a free-running hop clock over 80 channels (903.0–926.7 MHz),
 //! beaconing each 300 ms slot's pseudo-random channel and then listening. The node

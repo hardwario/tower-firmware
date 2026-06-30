@@ -1,8 +1,11 @@
 # tower-firmware — working notes for Claude
 
 Embassy-based, `no_std` firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ,
-Cortex-M0+). The crate is a library; runnable programs live in `examples/`. Build/flash with
-`just` (`just flash <example>`, `just run <example>`, `just logs`) over the UART bootloader via the
+Cortex-M0+). The crate is a library; runnable programs come in two kinds — educational
+`examples/` (Cargo `--example`) and ready-made TOWER IoT Kit product firmwares in `apps/` (Cargo
+`[[bin]]`, `--bin`). Build/flash with `just`, which takes the kind then the name
+(`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`,
+`just logs`) over the UART bootloader via the
 `tower` CLI. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/fota.md`. Host tests:
 `just test` (the `fota-sign` signer — the firmware itself is `no_std` and can't `cargo test`).
 

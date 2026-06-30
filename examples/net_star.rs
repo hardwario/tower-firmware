@@ -1,8 +1,8 @@
 //! net_star — star topology with per-node keys (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway              just flash net_star  # hub (holds both nodes)
-//!   TOWER_FEATURES=role-node                 just flash net_star  # node A
-//!   TOWER_FEATURES=role-node,node-2          just flash net_star  # node B
+//!   TOWER_FEATURES=role-gateway              just flash example net_star  # hub (holds both nodes)
+//!   TOWER_FEATURES=role-node                 just flash example net_star  # node A
+//!   TOWER_FEATURES=role-node,node-2          just flash example net_star  # node B
 //!
 //! The gateway registers TWO peers, each under its OWN key (add_peer). A node is
 //! flashed as A (default) or B (node-2) with that node's key and sends confirmed

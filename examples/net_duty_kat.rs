@@ -3,7 +3,7 @@
 //! values and reports PASS/FAIL, so the airtime logic is verified independently
 //! of timing.
 //!
-//!   just flash net_duty_kat
+//!   just flash example net_duty_kat
 
 #![no_std]
 #![no_main]

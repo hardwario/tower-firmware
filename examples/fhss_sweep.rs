@@ -2,7 +2,7 @@
 //! whole 903–926.7 MHz set (especially the band edges), and **measure** the
 //! retune+VCO-lock time so the FHSS slot GUARD is set from data, not assumed.
 //!
-//!   just flash fhss_sweep        # one board
+//!   just flash example fhss_sweep        # one board
 //!
 //! For each of the 80 channels: set_freq_hz → strobe RX (triggers VCO auto-cal) →
 //! poll until MC_STATE reaches RX, timing it, and check ERROR_LOCK. Prints the lock

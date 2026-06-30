@@ -1,6 +1,6 @@
 //! radio_gateway — reference gateway (shipped happy-path app, docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway just flash radio_gateway
+//!   TOWER_FEATURES=role-gateway just flash example radio_gateway
 //!
 //! Pairs with `radio_node`. Listens for confirmed telemetry frames, authenticates
 //! and decrypts them (AES-CCM), applies the replay rule, auto-ACKs, and prints the

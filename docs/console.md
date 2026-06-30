@@ -53,7 +53,7 @@ which decodes the frames.
 
 ```sh
 # Firmware: flash any example (it auto-starts the console).
-TOWER_PORT=/dev/cu.usbserial-140 just flash console_demo
+TOWER_PORT=/dev/cu.usbserial-140 just flash example console_demo
 
 # Host: build the CLI once, then stream the device.
 cd ../tower-cli && cargo build --release      # produces `tower`
@@ -464,7 +464,7 @@ structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32
 | `shell_demo` | the shell: built-ins, settings of every kind, an app command + nested subtree, app settings |
 | `console_full` | the showcase for `tower console` — logs + events + shell together |
 
-Flash any of them, e.g. `TOWER_PORT=/dev/cu.usbserial-140 just flash shell_demo`,
+Flash any of them, e.g. `TOWER_PORT=/dev/cu.usbserial-140 just flash example shell_demo`,
 then drive with `tower shell` / `tower logs` / `tower console`.
 
 ## Testing

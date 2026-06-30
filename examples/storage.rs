@@ -8,9 +8,9 @@
 //!
 //! Adding a new key never disturbs existing ones, so this is also how you evolve
 //! stored data: add a key instead of growing a struct. Reset the board a few
-//! times with `just run storage` and watch the boot count climb.
+//! times with `just run example storage` and watch the boot count climb.
 //!
-//!   just run storage
+//!   just run example storage
 
 #![no_std]
 #![no_main]

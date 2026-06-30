@@ -1,9 +1,9 @@
 //! radio_cw — CW carrier bring-up, verified with two boards (no SDR needed).
 //!
 //! Build twice with a role feature:
-//!   TOWER_FEATURES=role-node    just flash radio_cw   # TX: keys an unmodulated
+//!   TOWER_FEATURES=role-node    just flash example radio_cw   # TX: keys an unmodulated
 //!                                                      #     carrier on/off
-//!   TOWER_FEATURES=role-gateway just flash radio_cw   # RX: sits in RX and logs
+//!   TOWER_FEATURES=role-gateway just flash example radio_cw   # RX: sits in RX and logs
 //!                                                      #     RSSI on the channel
 //! (no feature defaults to the RX role).
 //!

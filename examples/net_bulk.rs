@@ -1,7 +1,7 @@
 //! net_bulk — bulk transfer via the pull mechanism (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway just flash net_bulk   # sender: serves a blob
-//!   TOWER_FEATURES=role-node    just flash net_bulk   # requester: pulls + verifies
+//!   TOWER_FEATURES=role-gateway just flash example net_bulk   # sender: serves a blob
+//!   TOWER_FEATURES=role-node    just flash example net_bulk   # requester: pulls + verifies
 //!
 //! The sender announces a 200-byte blob (byte[i] = i) and answers BULK_REQ(index)
 //! with BULK_DATA(index, ≤64 B); the requester pulls all 4 chunks, reassembles,

@@ -1,6 +1,6 @@
 //! radio_node — reference sensor node (shipped happy-path app, docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node just flash radio_node
+//!   TOWER_FEATURES=role-node just flash example radio_node
 //!
 //! Pairs with `radio_gateway`. Every 5 s the node sends a confirmed telemetry
 //! frame (sequence, battery mV, temperature ×10 °C) to the gateway and reports

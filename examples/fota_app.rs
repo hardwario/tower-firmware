@@ -6,7 +6,7 @@
 //!   # The Radio Dongle has no SWD, so the bootloader + this app (linked into ACTIVE) are
 //!   # merged into one image (tools/fota_merge.py) and flashed over the UART bootloader,
 //!   # then watched with the `tower` CLI:
-//!   just flash --fota fota_app   # build bootloader + app, merge, flash (`tower flash`)
+//!   just flash-fota fota_app   # build bootloader + app, merge, flash (`tower flash`)
 //!   just logs              # stream the framed console (`tower logs`)
 //!
 //! What it does, with **no button**, one self-swap per power cycle:

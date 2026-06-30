@@ -1,9 +1,9 @@
 //! radio_beacon — first real modulated two-board link (one file, two roles).
 //!
 //! Build twice:
-//!   TOWER_FEATURES=role-node    just flash radio_beacon   # TX: sends a counter
+//!   TOWER_FEATURES=role-node    just flash example radio_beacon   # TX: sends a counter
 //!                                                          #     frame every 1 s
-//!   TOWER_FEATURES=role-gateway just flash radio_beacon   # RX (sniffer): logs each
+//!   TOWER_FEATURES=role-gateway just flash example radio_beacon   # RX (sniffer): logs each
 //!                                                          #     frame + RSSI/LQI/SQI/AFC
 //! (no feature defaults to the RX/sniffer role).
 //!

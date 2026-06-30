@@ -1,7 +1,7 @@
 //! net_pairing — OTA 3-way pairing under the public pairing key (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway just flash net_pairing   # host: opens a window
-//!   TOWER_FEATURES=role-node    just flash net_pairing   # joiner: requests to join
+//!   TOWER_FEATURES=role-gateway just flash example net_pairing   # host: opens a window
+//!   TOWER_FEATURES=role-node    just flash example net_pairing   # joiner: requests to join
 //!
 //! The host opens a 1-minute pairing window ([`PAIRING_WINDOW`]) and, on the first
 //! JOIN_REQ, hands out a per-node key (JOIN_RESP) and waits for JOIN_CONFIRM. The

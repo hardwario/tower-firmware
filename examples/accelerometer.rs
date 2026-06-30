@@ -2,7 +2,7 @@
 //! ([`lis2dh12`](tower::lis2dh12) block).
 //!
 //! Reports which die face is up (1–6) as you turn the board, like a digital die.
-//! Opposite faces sum to 7. Watch with `just run accelerometer`.
+//! Opposite faces sum to 7. Watch with `just run example accelerometer`.
 //!
 //! Tilt detection is **opt-in** via the `TILT` constant below: set it to a
 //! [`Sensitivity`](tower::lis2dh12::Sensitivity) to have the accelerometer's
@@ -12,7 +12,7 @@
 //! The accelerometer shares the I²C2 bus with the TMP112, so the app reclaims the
 //! bus from the (shut-down) sensor via `release()`.
 //!
-//!   just run accelerometer
+//!   just run example accelerometer
 
 #![no_std]
 #![no_main]

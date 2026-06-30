@@ -145,9 +145,9 @@ node-2 = []
 # ACTIVE-origin memory.x on the link path (it wins over embassy-stm32's auto-generated
 # one). Build the FOTA app with it: `TOWER_FEATURES=fota-active just flash fota_app`.
 fota-active = []
-# Version bump (1 -> 2) for the FOTA examples: fota_app's reported version, and the
-# fota_ota node's VERSION (so `just fota-ota-v2` builds the v2 image the host serves over
-# v1). Pair with fota-active.
+# Version bump (1 -> 2) for the FOTA examples: fota_app's reported version, and the fota_ota
+# node's VERSION (so `just fota-update` builds an image that supersedes the v1 the host serves
+# over). Pair with fota-active.
 fota-v2 = []
 # Revert test: fota_app skips mark_booted after a swap, so power-cycling rolls the
 # unconfirmed image back (bootloader auto-revert). Pair with fota-active.
@@ -157,6 +157,26 @@ fota-no-confirm = []
 # real hardware is localized to the last stage printed (the task-based console can't flush
 # after a fault). Bench-only — never ship it.
 fota-diag = []
+
+# Ready-made product firmwares for the TOWER IoT Kit — distinct from the educational
+# `examples/` (which demonstrate one block each). These are full applications, so they are
+# Cargo binaries (`--bin`), built/flashed by name + kind: `just build app radio_push_button`
+# (vs `just build example blinky`). They live in `apps/` (not the default `src/bin/`), so each
+# needs an explicit path here. Like examples, they get the firmware linker args from build.rs
+# (the un-suffixed `rustc-link-arg` applies to bins too) and use the `app!` macro / `Board`.
+# NOTE: binaries cannot use `[dev-dependencies]` (those are examples/tests/benches only); apps
+# use the library's regular dependencies. Add a product by dropping `apps/<name>.rs` + a `[[bin]]`.
+[[bin]]
+name = "radio_dongle_gateway"
+path = "apps/radio_dongle_gateway.rs"
+
+[[bin]]
+name = "radio_push_button"
+path = "apps/radio_push_button.rs"
+
+[[bin]]
+name = "radio_climate_monitor"
+path = "apps/radio_climate_monitor.rs"
 
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.

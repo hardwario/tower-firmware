@@ -7,7 +7,7 @@
 # Build the inputs first, e.g.:
 #   just fota-image fota_ota role-node,fota-active                                  # -> target/fota-merged.bin   (V1_MERGED)
 #   cargo objcopy --release --example fota_ota --features role-gateway -- -O binary gw.bin   # (GW_BIN)
-#   just fota-ota-v2                                                                # -> target/fota-ota-v2.{bin,fmanifest}
+#   just fota-update                                                                # -> target/fota-update.{bin,fmanifest}
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 P1="$1"; P2="$2"; V1="$3"; GW="$4"; V2="$5"; MAN="$6"; OUT="${7:-/tmp/m3}"; SECS="${8:-340}"

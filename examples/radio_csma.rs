@@ -1,7 +1,7 @@
 //! radio_csma — CSMA/CCA: defer TX while the channel is busy (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-gateway just flash radio_csma   # jammer: CW 3 s on / 3 s off
-//!   TOWER_FEATURES=role-node    just flash radio_csma   # sender: TX with CSMA enabled
+//!   TOWER_FEATURES=role-gateway just flash example radio_csma   # jammer: CW 3 s on / 3 s off
+//!   TOWER_FEATURES=role-node    just flash example radio_csma   # sender: TX with CSMA enabled
 //!
 //! The jammer holds an unmodulated carrier for 3 s, then releases it for 3 s,
 //! repeating. The sender transmits a small frame every 600 ms with CSMA/CCA

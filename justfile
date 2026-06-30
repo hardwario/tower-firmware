@@ -1,14 +1,15 @@
 # HARDWARIO TOWER Firmware SDK — task runner (https://just.systems)
 #
-# The crate is a library; flashable programs live in examples/. Run `just` (or `just default`)
-# for the full recipe list. Common flow:
+# The crate is a library; flashable programs come in two kinds — `example` (educational,
+# examples/) and `app` (a ready-made TOWER IoT Kit product, apps/). build/flash/run/size take
+# the kind then the name. Run `just` (or `just default`) for the full recipe list. Common flow:
 #
-#   just examples            # list the example apps you can build/flash
-#   just flash blinky        # build + flash the blinky example
-#   just run thermometer     # build + flash, then stream the (framed) console logs
+#   just examples                  # list example names    (just apps  lists product names)
+#   just flash example blinky      # build + flash the blinky example
+#   just run app radio_push_button # build + flash a product, then stream the (framed) console logs
 #
-# Override the serial port:   TOWER_PORT=/dev/cu.usbserial-XXXX just flash blinky
-# Pass cargo features:        TOWER_FEATURES=role-gateway just flash net_confirmed
+# Override the serial port:   TOWER_PORT=/dev/cu.usbserial-XXXX just flash example blinky
+# Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
 #
 # Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
 # the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes the firmware's
@@ -36,7 +37,7 @@ port := env_var_or_default("TOWER_PORT", "")
 _port_flag := if port == "" { "" } else { "-p " + port }
 
 # Optional cargo features, e.g. a radio example's role selection:
-#   TOWER_FEATURES=role-gateway just flash net_confirmed
+#   TOWER_FEATURES=role-gateway just flash example net_confirmed
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 # A FOTA build always needs `fota-active` (link the app into the ACTIVE slot); append any extras.
@@ -60,9 +61,16 @@ default:
     @just --list
 
 
-# === Examples =====================================================================================
+# === Targets ======================================================================================
+#
+# A buildable target has a KIND and a NAME, and `build`/`flash`/`run`/`size` take both:
+#   example  — educational, demonstrates one block      (examples/*.rs, cargo --example)
+#   app      — a ready-made TOWER IoT Kit product        (apps/*.rs,     cargo --bin)
+#     just build example blinky
+#     just flash app radio_push_button
+# `just examples` / `just apps` list the names of each kind.
 
-# List the example apps you can build/flash (one per examples/*.rs).
+# List the example apps (examples/*.rs) — build/flash/run them as kind `example`.
 [unix]
 examples:
     @ls examples/*.rs | sed 's|examples/||; s|\.rs$||'
@@ -71,23 +79,35 @@ examples:
 examples:
     @powershell -NoProfile -Command "Get-ChildItem examples/*.rs | Select-Object -ExpandProperty BaseName"
 
-# Set TOWER_FEATURES to pass cargo features (e.g. a radio example's role).
-# Build an example into target/firmware.bin, then print its on-chip size.
-build name: && (size name)
-    cargo objcopy --release --example {{name}} {{_feat_flag}} -- -O binary {{bin}}
+# List the TOWER IoT Kit product firmwares (apps/*.rs) — build/flash/run them as kind `app`.
+[unix]
+apps:
+    @ls apps/*.rs | sed 's|apps/||; s|\.rs$||'
 
-# On-chip footprint (text/data/bss) of an example.
-size name:
-    cargo size --release --example {{name}} {{_feat_flag}}
+[windows]
+apps:
+    @powershell -NoProfile -Command "Get-ChildItem apps/*.rs | Select-Object -ExpandProperty BaseName"
+
+# `kind` is example|app; set TOWER_FEATURES to pass cargo features (e.g. a radio example's role):
+#   just build example blinky
+#   just build app radio_push_button
+# Build a target into target/firmware.bin, then print its on-chip size.
+build kind name: && (size kind name)
+    cargo objcopy --release {{ if kind == "example" { "--example" } else if kind == "app" { "--bin" } else { error("kind must be 'example' or 'app' (got '" + kind + "')") } }} {{name}} {{_feat_flag}} -- -O binary {{bin}}
+
+# On-chip footprint (text/data/bss) of a target. `kind` is example|app.
+size kind name:
+    cargo size --release {{ if kind == "example" { "--example" } else if kind == "app" { "--bin" } else { error("kind must be 'example' or 'app' (got '" + kind + "')") } }} {{name}} {{_feat_flag}}
 
 
 # === Flash & run ==================================================================================
 
-# Extra args after the name pass through to `tower flash`; set TOWER_FEATURES for cargo features:
-#   just flash blinky --no-verify
-#   TOWER_FEATURES=role-gateway just flash net_confirmed
-# Build + flash an example (plain full-flash at 0x0800_0000, no bootloader) — erase/write/verify/reset.
-flash name *args: (build name)
+# `kind` is example|app; extra args after the name pass through to `tower flash`; set
+# TOWER_FEATURES for cargo features:
+#   just flash example blinky --no-verify
+#   TOWER_FEATURES=role-gateway just flash example net_confirmed
+# Build + flash a target (plain full-flash at 0x0800_0000, no bootloader) — erase/write/verify/reset.
+flash kind name *args: (build kind name)
     tower {{_port_flag}} flash {{bin}} {{args}}
 
 # The app links into the ACTIVE slot (@0x0800_8100), merged with the bootloader (@0x0800_0000) into
@@ -98,8 +118,8 @@ flash name *args: (build name)
 flash-fota name *args: (fota-image name _fota_features)
     tower {{_port_flag}} flash target/fota-merged.bin {{args}}
 
-# Build + flash a plain example, then stream its framed console logs (resets into the app first).
-run name: (flash name)
+# Build + flash a target (kind example|app), then stream its framed console logs (resets first).
+run kind name: (flash kind name)
     tower {{_port_flag}} logs
 
 # Build + flash a FOTA image, then stream its framed console logs (watch the swap + confirm).
@@ -142,11 +162,14 @@ fota-image example="fota_app" features="fota-active":
     cargo objcopy --release --example {{example}} --features "{{features}}" -- -O binary target/fota-app.bin
     {{python}} tools/fota_merge.py target/fota-boot.bin target/fota-app.bin target/fota-merged.bin
 
-# Produces target/fota-ota-v2.{bin,fmanifest}; serve with `tower fota serve` (see docs/fota.md).
-# Build + sign the fota_ota "v2" image the host serves to the node (real-firmware swap E2E).
-fota-ota-v2 version="2":
-    cargo objcopy --release --example fota_ota --features role-node,fota-active,fota-v2 -- -O binary target/fota-ota-v2.bin
-    just fota-sign sign --version {{version}} --in target/fota-ota-v2.bin --out target/fota-ota-v2.fmanifest
+# A newer fota_ota build (version 2 by default, via the `fota-v2` feature) that supersedes the v1
+# a device received from `flash-fota`. App-only + a signed manifest — the on-device bootloader
+# verifies & swaps it; nothing is flashed here. Produces target/fota-update.{bin,fmanifest},
+# served with `tower fota serve` (see docs/fota.md).
+# Build + sign the over-the-air firmware update the host serves to a node (real-firmware swap E2E).
+fota-update version="2":
+    cargo objcopy --release --example fota_ota --features role-node,fota-active,fota-v2 -- -O binary target/fota-update.bin
+    just fota-sign sign --version {{version}} --in target/fota-update.bin --out target/fota-update.fmanifest
 
 # Signs a firmware image into a signed FOTA manifest (docs/fota.md):
 #   just fota-sign pubkey

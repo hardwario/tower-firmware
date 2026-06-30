@@ -1,14 +1,14 @@
 //! fota_ota — the **real-firmware** over-the-air swap, end to end (docs/fota.md).
 //!
-//!   # 1) build + sign the v2 image the host will serve:
-//!   just fota-ota-v2
+//!   # 1) build + sign the update image the host will serve:
+//!   just fota-update
 //!   # 2) node (ACTIVE-linked, under the bootloader; bootloader+node merged into one flash):
-//!   TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash --fota fota_ota
+//!   TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota
 //!   # 3) gateway (normal app; proxies the image from the host over USB):
-//!   TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash fota_ota
-//!   # 4) host (streams the signed v2 image to the gateway on demand):
-//!   tower -p <gw-port> fota serve --image target/fota-ota-v2.bin \
-//!                                 --manifest target/fota-ota-v2.fmanifest
+//!   TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash example fota_ota
+//!   # 4) host (streams the signed update image to the gateway on demand):
+//!   tower -p <gw-port> fota serve --image target/fota-update.bin \
+//!                                 --manifest target/fota-update.fmanifest
 //!
 //! This serves a **real signed firmware** the host holds, and the node actually swaps to it.
 //! The node never verifies or arms the swap itself — it stages the image, stashes the signed

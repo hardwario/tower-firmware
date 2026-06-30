@@ -10,7 +10,7 @@
 //! running, which is set up in Step 6 — see `radio_sleep`. STANDBY is the
 //! always-available config-retaining low-power state used here.
 //!
-//!   just flash radio_state     (watch with: tower logs)
+//!   just flash example radio_state     (watch with: tower logs)
 
 #![no_std]
 #![no_main]

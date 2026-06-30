@@ -1,7 +1,7 @@
 //! net_confirmed — confirmed delivery with ACK + retransmit (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node    just flash net_confirmed   # confirmed sender
-//!   TOWER_FEATURES=role-gateway just flash net_confirmed   # receiver + auto-ACK
+//!   TOWER_FEATURES=role-node    just flash example net_confirmed   # confirmed sender
+//!   TOWER_FEATURES=role-gateway just flash example net_confirmed   # receiver + auto-ACK
 //!
 //! Node: sends a confirmed message every 2 s and reports Delivered / NotDelivered
 //! with the latency. Gateway: receives, auto-ACKs, and logs each accepted message

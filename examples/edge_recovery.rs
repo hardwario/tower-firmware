@@ -1,6 +1,6 @@
 //! edge_recovery — stuck-state / timeout recovery (docs/radio.md). Single board.
 //!
-//!   just flash edge_recovery
+//!   just flash example edge_recovery
 //!
 //! Hammers the failure paths that must self-heal: an RX that times out (no sender)
 //! must SABORT back to READY, a FIFO flush must leave the FIFOs empty, and an

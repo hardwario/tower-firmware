@@ -34,13 +34,13 @@ the FHSS mode (see *Spectrum-access modes* below).
 Examples live in `examples/`. Flash with the UART bootloader and watch the console:
 
 ```sh
-just flash <example>                 # build + flash (auto-detect port)
-TOWER_PORT=/dev/cu.usbserial-XXXX just flash <example>   # pick a board
+just flash example <name>                 # build + flash (auto-detect port)
+TOWER_PORT=/dev/cu.usbserial-XXXX just flash example <name>   # pick a board
 tower logs                 # watch from boot
 
 # two-board examples select a role via a Cargo feature:
-TOWER_FEATURES=role-gateway just flash <example>   # one board
-TOWER_FEATURES=role-node    just flash <example>   # the other
+TOWER_FEATURES=role-gateway just flash example <name>   # one board
+TOWER_FEATURES=role-node    just flash example <name>   # the other
 ```
 
 ## Radio layer API (`tower::radio`)
@@ -288,7 +288,7 @@ exercised). The hop seed is key-derived (not sent on air).
 ## Examples
 
 Two-board examples are one source file built twice with a role feature (e.g.
-`TOWER_FEATURES=role-node just flash net_confirmed`).
+`TOWER_FEATURES=role-node just flash example net_confirmed`).
 
 | Example | Boards / roles | What it shows |
 |---|---|---|

@@ -1,7 +1,7 @@
 //! radio_sleep — low-power SLEEP / SHUTDOWN between transfers (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-node    just flash radio_sleep   # duty-cycled sender
-//!   TOWER_FEATURES=role-gateway just flash radio_sleep   # always-on receiver
+//!   TOWER_FEATURES=role-node    just flash example radio_sleep   # duty-cycled sender
+//!   TOWER_FEATURES=role-gateway just flash example radio_sleep   # always-on receiver
 //!
 //! The node wakes, transmits a frame, then drops the radio to a low-power state
 //! between transfers — alternating SLEEP (config retained, fast wake) and SHUTDOWN

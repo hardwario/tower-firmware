@@ -1,7 +1,7 @@
 //! net_p2p — peer-to-peer confirmed exchange under a shared link key (docs/radio.md).
 //!
-//!   TOWER_FEATURES=role-peer-a just flash net_p2p   # initiator (PING)
-//!   TOWER_FEATURES=role-peer-b just flash net_p2p   # responder (PONG)
+//!   TOWER_FEATURES=role-peer-a just flash example net_p2p   # initiator (PING)
+//!   TOWER_FEATURES=role-peer-b just flash example net_p2p   # responder (PONG)
 //!
 //! Two boards as symmetric peers: each registers the other with add_peer under
 //! the shared per-link key and exchanges confirmed messages BOTH directions.
