@@ -14,11 +14,8 @@
 //! retransmit drives another fetch, and the (length-checked) bulk fetcher rejects anything
 //! short — so a slow/dead host degrades to a failed pull, never a corrupt image.
 
-use embassy_stm32::usart::BufferedUartRx;
 use embassy_time::{Duration, with_timeout};
-use embedded_io_async::Read as _;
 use tower_protocol::fota::FOTA_MANIFEST_OFFSET;
-use tower_protocol::{FrameDecoder, MsgType, decode_frame};
 
 use super::{MANIFEST_LEN, Manifest, SIGNED_LEN};
 use crate::console;
@@ -32,27 +29,23 @@ const CHUNK_REPS: u8 = 2;
 const MANIFEST_REPS: u8 = 6;
 const MANIFEST_WINDOW: Duration = Duration::from_millis(500);
 
-/// A [`BulkSource`] that streams a FOTA image from the host over the console link. Build it
-/// with [`connect`](Self::connect) (which also returns the signed manifest to serve first).
-/// It **borrows** the console RX half so the gateway keeps ownership and can serve again.
-pub struct HostProxySource<'r> {
-    rx: &'r mut BufferedUartRx<'static>,
-    dec: FrameDecoder,
+/// A [`BulkSource`] that streams a FOTA image from the host over the console link. Build
+/// it with [`connect`](Self::connect) (which also returns the signed manifest to serve
+/// first). The decoded `FotaData` replies are delivered by the console's RX router via
+/// [`console::FOTA_DATA`](crate::console) — the dynamic console owns the UART, so the
+/// host-proxy no longer borrows the raw RX half.
+pub struct HostProxySource {
     image_len: usize,
 }
 
-impl<'r> HostProxySource<'r> {
-    /// Borrow the console RX half (from [`console::take_rx`]), fetch the signed manifest from
-    /// the host, and build the source — its [`total_len`](BulkSource::total_len) is the
-    /// manifest's image `size`. Returns the source **and** the 116-byte signed manifest
-    /// (serve that to the node as the first bulk transfer, the image as the second). `None`
-    /// if the host doesn't answer or the manifest is malformed.
-    pub async fn connect(rx: &'r mut BufferedUartRx<'static>) -> Option<(Self, [u8; SIGNED_LEN])> {
-        let mut s = Self {
-            rx,
-            dec: FrameDecoder::new(),
-            image_len: 0,
-        };
+impl HostProxySource {
+    /// Fetch the signed manifest from the host and build the source — its
+    /// [`total_len`](BulkSource::total_len) is the manifest's image `size`. Returns the
+    /// source **and** the 116-byte signed manifest (serve that to the node as the first
+    /// bulk transfer, the image as the second). `None` if the host doesn't answer or the
+    /// manifest is malformed. (Requires USB present so the console/host link is up.)
+    pub async fn connect() -> Option<(Self, [u8; SIGNED_LEN])> {
+        let mut s = Self { image_len: 0 };
         let mut manifest = [0u8; SIGNED_LEN];
         let n = s
             .fetch(
@@ -69,11 +62,12 @@ impl<'r> HostProxySource<'r> {
         Some((s, manifest))
     }
 
-    /// Send one `FotaReq(offset, out.len())`, then read frames until the matching `FotaData`
-    /// arrives (within `window`); retry up to `reps`. Returns the bytes written to `out`.
+    /// Send one `FotaReq(offset, out.len())`, then await the matching `FotaData` (within
+    /// `window`); retry up to `reps`. Returns the bytes written to `out`.
     async fn fetch(&mut self, offset: u32, out: &mut [u8], reps: u8, window: Duration) -> Option<usize> {
         for _ in 0..reps {
-            self.dec.reset(); // drop any partial frame left by a prior timeout
+            // Drop any stale routed chunk left by a prior timeout.
+            while console::FOTA_DATA.try_receive().is_ok() {}
             console::send_fota_req(offset, out.len() as u16).await;
             if let Some(n) = self.await_data(offset, out, window).await {
                 return Some(n);
@@ -82,33 +76,26 @@ impl<'r> HostProxySource<'r> {
         None
     }
 
-    /// Read + deframe console RX until a `FotaData` whose payload offset matches `offset`.
-    /// Returns `None` if no byte arrives within `window` (the host went quiet).
+    /// Await routed `FotaData` chunks until one whose payload offset matches `offset`.
+    /// Returns `None` if nothing arrives within `window` (the host went quiet).
     async fn await_data(&mut self, offset: u32, out: &mut [u8], window: Duration) -> Option<usize> {
-        let mut buf = [0u8; 64];
         loop {
-            let n = with_timeout(window, self.rx.read(&mut buf)).await.ok()?.ok()?;
-            for &b in &buf[..n] {
-                let Some(inner) = self.dec.push(b) else { continue };
-                let Ok((MsgType::FotaData, _seq, p)) = decode_frame(inner) else {
-                    continue;
-                };
-                if p.len() < 4 {
-                    continue;
-                }
-                if u32::from_le_bytes([p[0], p[1], p[2], p[3]]) != offset {
-                    continue; // a stale reply to an earlier request — ignore
-                }
-                let data = &p[4..];
-                let m = data.len().min(out.len());
-                out[..m].copy_from_slice(&data[..m]);
-                return Some(m);
+            let chunk = with_timeout(window, console::FOTA_DATA.receive()).await.ok()?;
+            if chunk.len() < 4 {
+                continue;
             }
+            if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != offset {
+                continue; // a stale reply to an earlier request — ignore
+            }
+            let data = &chunk[4..];
+            let m = data.len().min(out.len());
+            out[..m].copy_from_slice(&data[..m]);
+            return Some(m);
         }
     }
 }
 
-impl BulkSource for HostProxySource<'_> {
+impl BulkSource for HostProxySource {
     fn total_len(&self) -> usize {
         self.image_len
     }

@@ -16,7 +16,6 @@ use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals::{DMA1_CH3, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::usart::{BufferedUart, Config as UartConfig};
 use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
 use embassy_time::Duration;
 use log::LevelFilter;
@@ -28,14 +27,18 @@ use crate::tmp112::{self, Tmp112};
 // — all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, also here).
 bind_interrupts!(struct Irqs {
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
-    // USART1 interrupt — drives the interrupt-buffered console UART (BufferedUart);
-    // no DMA, so no clash with the WS2812 strip's DMA1_CHANNEL2_3.
-    USART1 => embassy_stm32::usart::BufferedInterruptHandler<embassy_stm32::peripherals::USART1>;
 });
+// The USART1 interrupt (console UART) is bound in `console` (`ConsoleIrqs`), which owns
+// the UART and rebuilds it dynamically as USB is plugged/unplugged.
 
 /// Default console verbosity set by [`Board::take`]; lower it at runtime with
 /// `log::set_max_level`.
 const LOG_LEVEL: LevelFilter = LevelFilter::Trace;
+
+// I2C2 addresses of the always-on bus devices `Board::take` quiesces at boot.
+const ACCEL_ADDR: u8 = 0x19; // LIS2DH12 accelerometer (SA0 tied high)
+const LIS2DH12_CTRL_REG1: u8 = 0x20; // ODR/enable; 0x00 = power-down
+const ATSHA_ADDR: u8 = 0x64; // ATSHA204A crypto (word address 0x01 = Sleep)
 
 /// The board's TMP112 on the I²C2 bus (blocking), in shutdown / one-shot mode.
 pub type Tmp112Sensor = Tmp112<I2c<'static, Blocking, Master>>;
@@ -106,40 +109,46 @@ impl Board {
     pub fn take(spawner: Spawner) -> Self {
         let p = init();
 
-        // Console — always on. Full-duplex USART1 (PA9 TX / PA10 RX) at 115200 8N1,
-        // interrupt-buffered (BufferedUart): no DMA → no clash with the WS2812 strip's
-        // DMA group. The writer holds a WakeGuard while transmitting so the low-power
-        // executor uses WFI (USART clocked) instead of STOP (which gates it); the shell
-        // reads RX async. docs/console.md.
-        let tx_buf = cortex_m::singleton!(: [u8; 256] = [0; 256]).unwrap();
-        let rx_buf = cortex_m::singleton!(: [u8; 128] = [0; 128]).unwrap();
-        let uart = BufferedUart::new(
-            p.USART1,
-            p.PA10,
-            p.PA9,
-            tx_buf,
-            rx_buf,
-            Irqs,
-            UartConfig::default(),
-        )
-        .expect("USART1 115200 8N1 config");
-        let (console_tx, console_rx) = uart.split();
-        crate::console::init(spawner, console_tx, console_rx, LOG_LEVEL);
+        // Dynamic, USB-presence-gated console. On the STM32L0 an *enabled* USART holds
+        // embassy's STOP refcount, so a permanently-on console would keep the low-power
+        // executor out of STOP forever — an unplugged node would burn ~3.5 mA (WFI at
+        // 16 MHz) instead of idling at µA. So the console UART is owned by
+        // [`console::manager`], which builds it while USB is present and **drops** it on
+        // unplug (releasing the refcount → STOP). `VBUS_SENSE` (PA12) is the gate: EXTI
+        // line 12 wakes the MCU out of STOP on plug-in to bring the console back.
+        // Pull-down so the sense line reads a defined low when unplugged (no false "USB
+        // present" from a floating pin); the external divider drives it high when plugged
+        // (docs/console.md notes the V_IH caveat to verify on HW).
+        crate::console::install_logger(LOG_LEVEL);
+        let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
+        spawner.spawn(crate::console::manager(p.USART1, p.PA9, p.PA10, vbus).unwrap());
 
-        // TMP112 — put it in shutdown (one-shot) mode so it doesn't free-run.
+        // I2C2 sensor bus — quiesce every device on it so the bus costs ~no idle current
+        // (each may be absent on some boards, so NACKs are ignored). Order matters: the
+        // ATSHA sleep is the LAST bus op, since any I2C traffic can re-wake it.
         let mut i2c_config = I2cConfig::default();
         i2c_config.frequency = Hertz::khz(100);
         let i2c = I2c::new_blocking(p.I2C2, p.PB10, p.PB11, i2c_config);
-        let mut sensor = Tmp112::new(i2c, tmp112::ADDR_VPLUS);
-        let _ = sensor.shutdown(); // ignore: sensor may be absent on some boards
 
-        // USB-aware power management, for every app: inhibit STOP while VBUS
-        // (PA12) is high so the console/EXTI stay live; allow STOP when unplugged.
-        // Pull-down so the sense line reads a defined low when unplugged (no false
-        // "USB present" from a floating pin); the external divider drives it high
-        // when plugged (docs/console.md notes the V_IH caveat to verify on HW).
-        let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
-        spawner.spawn(crate::power::vbus_task(vbus).unwrap());
+        // TMP112 → shutdown (one-shot) so it doesn't free-run.
+        let mut sensor = Tmp112::new(i2c, tmp112::ADDR_VPLUS);
+        let _ = sensor.shutdown();
+        let mut i2c = sensor.release(); // reclaim the bus for the rest of the hygiene
+
+        // LIS2DH12 accelerometer → power-down (CTRL_REG1 = 0x00). Its POR default is
+        // already power-down (~0.5 µA), but a prior configuration can persist across a
+        // warm reset, so force it — the board wires only the accel's INT line, never
+        // configures the part.
+        let _ = i2c.blocking_write(ACCEL_ADDR, &[LIS2DH12_CTRL_REG1, 0x00]);
+
+        // ATSHA204A crypto → Sleep (word address 0x01, ~30 nA). Its idle draw is ~200 µA
+        // and any bus activity can wake it; the on-chip watchdog auto-sleeps it ~1.3 s
+        // after a wake, but we sleep it explicitly here (the last bus op) so it's down
+        // immediately. Apps that poll the I2C bus should re-sleep it after each batch.
+        let _ = i2c.blocking_write(ATSHA_ADDR, &[0x01]);
+
+        // Re-wrap the (already shut-down) TMP112 for the app's one-shot reads.
+        let sensor = Tmp112::new(i2c, tmp112::ADDR_VPLUS);
 
         Board {
             spawner,
@@ -185,5 +194,18 @@ pub fn init() -> Peripherals {
     config.rcc.ls = LsConfig::default_lse();
     config.min_stop_pause = Duration::from_ticks(0);
     config.enable_debug_during_sleep = false;
-    embassy_stm32::init(config)
+    let p = embassy_stm32::init(config);
+
+    // STOP-mode regulator: embassy's L0 low-power `enter_stop` sets only PDDS/CWUF,
+    // leaving the *main* voltage regulator powered in STOP (tens–hundreds of µA).
+    // Switch the regulator to low-power mode in deep sleep (PWR_CR.LPSDSR) and
+    // disable VREFINT in Stop (PWR_CR.ULP) for the datasheet ~µA STOP current.
+    // embassy's later read-modify-write of PWR_CR (PDDS/CWUF on stop entry)
+    // preserves these bits, and the fast-wakeup path re-enables VREFINT as needed.
+    embassy_stm32::pac::PWR.cr().modify(|w| {
+        w.set_lpsdsr(embassy_stm32::pac::pwr::vals::Mode::LOW_POWER_MODE);
+        w.set_ulp(true);
+    });
+
+    p
 }

@@ -37,12 +37,10 @@
 use core::fmt::{self, Write};
 
 use embassy_executor::Spawner;
-use embassy_stm32::usart::BufferedUartRx;
 use embassy_time::{Instant, Timer};
-use embedded_io_async::Read as _;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
-use tower_protocol::{FrameDecoder, MsgType, PROTOCOL_VERSION, decode_frame};
+use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
 
 use crate::console;
 use crate::storage::{NS_SHELL, Nv, Scoped};
@@ -299,49 +297,49 @@ fn resolve(toks: &[&str], app: &'static [Entry]) -> Resolved {
 
 // ---- task / dispatch --------------------------------------------------------
 
+/// Shell parameters registered by [`serve_ext`] and consumed by the console's RX router
+/// (the [`manager`](crate::console::manager)) via [`dispatch_frame`]. `None` until a
+/// shell is served — an app using `no_shell` leaves it unset, so incoming shell frames
+/// are simply ignored. `Nv` and the slices are `Copy`, so a `Cell` suffices.
+static SHELL_PARAMS: critical_section::Mutex<
+    core::cell::Cell<Option<(Nv, &'static [Entry], &'static [Setting])>>,
+> = critical_section::Mutex::new(core::cell::Cell::new(None));
+
 /// Serve the shell with only the SDK base tree + settings.
 pub fn serve(spawner: Spawner, kv: Nv) {
     serve_ext(spawner, kv, &[], &[]);
 }
 
-/// Serve the shell with app extensions: extra top-level command-tree entries and
-/// extra settings (reachable via `/system settings`). Pass `&[]` for none.
+/// Register the shell with the (dynamic, USB-gated) console so its RX router forwards
+/// `ShellCommand`/`ShellComplete` frames here. `app_commands`/`app_settings` add an app
+/// command tree / settings (pass `&[]` for none). No task is spawned — the console
+/// [`manager`](crate::console::manager) owns the UART RX and calls [`dispatch_frame`].
 pub fn serve_ext(
-    spawner: Spawner,
+    _spawner: Spawner,
     kv: Nv,
     app_commands: &'static [Entry],
     app_settings: &'static [Setting],
 ) {
-    let rx = console::take_rx().expect("console RX already taken / not initialised");
-    spawner.spawn(shell_task(kv.scope(NS_SHELL), rx, app_commands, app_settings).unwrap());
+    critical_section::with(|cs| {
+        SHELL_PARAMS
+            .borrow(cs)
+            .set(Some((kv, app_commands, app_settings)));
+    });
 }
 
-#[embassy_executor::task]
-async fn shell_task(
-    kv: Scoped,
-    mut rx: BufferedUartRx<'static>,
-    app_commands: &'static [Entry],
-    app_settings: &'static [Setting],
-) {
+/// Handle one decoded shell RX frame — called by the console's RX router. No-op if no
+/// shell was served (`no_shell` apps).
+pub(crate) async fn dispatch_frame(inner: &[u8]) {
+    let Some((kv, app_commands, app_settings)) =
+        critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
+    else {
+        return;
+    };
     let settings = SettingsTable {
         base: BASE_SETTINGS,
         app: app_settings,
     };
-    let mut dec = FrameDecoder::new();
-    let mut buf = [0u8; 64];
-    loop {
-        // Async read — awaits the USART RX interrupt (no busy-poll). When USB is present
-        // `vbus_task` holds STOP off, so the interrupt fires; unplugged there's no host.
-        let n = match rx.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        for &b in &buf[..n] {
-            if let Some(inner) = dec.push(b) {
-                handle(kv, app_commands, settings, inner).await;
-            }
-        }
-    }
+    handle(kv.scope(NS_SHELL), app_commands, settings, inner).await;
 }
 
 /// Decode a complete frame and act on `ShellCommand` / `ShellComplete`.

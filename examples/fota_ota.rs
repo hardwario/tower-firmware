@@ -46,7 +46,7 @@ use {
     tower::storage::Nv,
 };
 #[cfg(not(feature = "role-node"))]
-use {tower::console, tower::fota::HostProxySource};
+use tower::fota::HostProxySource;
 
 #[cfg(feature = "role-node")]
 const NODE_ID: u32 = 0xF0_7A_5A_01;
@@ -267,8 +267,8 @@ async fn gateway(b: Board) -> ! {
     };
     info!(target: "fota-ota", "GATEWAY {:08X}: advertising; serves the host's image on PULL", GW_ID);
     net.set_downlink_pending(true);
-    // The console RX half carries the host's FotaData replies (the host-proxy link).
-    let mut rx = console::take_rx().expect("console RX");
+    // The host's FotaData replies arrive on the console RX and are routed to the
+    // host-proxy by the console manager (USB must be present — a gateway is USB-powered).
 
     loop {
         let Some(rx_msg) = net.recv(embassy_time::Duration::from_secs(10)).await else {
@@ -279,7 +279,7 @@ async fn gateway(b: Board) -> ! {
         }
         let node = rx_msg.src;
         info!(target: "fota-ota", "node {node:08X} requested update — fetching manifest from host");
-        match HostProxySource::connect(&mut rx).await {
+        match HostProxySource::connect().await {
             Some((mut src, manifest)) => {
                 let m = net.bulk_serve(node, &manifest).await; // 1) signed manifest
                 let img = net.bulk_serve_from(node, &mut src).await; // 2) image (host-proxied)

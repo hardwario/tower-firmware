@@ -22,20 +22,44 @@
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
+use core::ptr::addr_of_mut;
 
 use critical_section::Mutex;
-use embassy_executor::Spawner;
+use embassy_futures::select::select3;
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::mode::Async;
+use embassy_stm32::peripherals::{PA9, PA10, USART1};
 use embassy_stm32::rcc::{StopMode, WakeGuard};
-use embassy_stm32::usart::{BufferedUartRx, BufferedUartTx};
+use embassy_stm32::usart::{
+    BufferedInterruptHandler, BufferedUart, BufferedUartRx, BufferedUartTx, Config as UartConfig,
+};
+use embassy_stm32::{Peri, bind_interrupts};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, Timer};
+use embedded_io_async::Read as _; // brings read into scope for BufferedUartRx
 use embedded_io_async::Write as _; // brings write_all/flush into scope for BufferedUartTx
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
 use tower_protocol::msg::{Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse};
-use tower_protocol::{MAX_WIRE, MsgType, PROTOCOL_VERSION, encode_frame, encode_frame_raw};
+use tower_protocol::{
+    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame, encode_frame_raw,
+};
+
+// USART1 interrupt for the console UART. Bound here (not in `board`) because the console
+// manager owns the UART and rebuilds it on every USB plug-in.
+bind_interrupts!(pub struct ConsoleIrqs {
+    USART1 => BufferedInterruptHandler<USART1>;
+});
+
+/// Max bytes of a routed `FotaData` payload (offset(4) + up to a manifest/chunk read).
+const FOTA_CHUNK: usize = 128;
+/// `FotaData` frames received on RX are decoded by the manager and routed here for the
+/// FOTA host-proxy ([`crate::fota::HostProxySource`]) to consume — so the host-proxy no
+/// longer needs to own the raw RX half (the dynamic console manager owns it).
+pub(crate) static FOTA_DATA: Channel<CriticalSectionRawMutex, Vec<u8, FOTA_CHUNK>, 1> =
+    Channel::new();
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
 const MAX_MSG: usize = 192;
@@ -96,8 +120,9 @@ static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channe
 /// Count of messages dropped because [`TX_CHANNEL`] was full; reported by the writer
 /// as a [`Dropped`] marker before the next real frame.
 static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
-/// RX half, parked until the shell takes it (`take_rx`).
-static PARKED_RX: Mutex<RefCell<Option<BufferedUartRx<'static>>>> = Mutex::new(RefCell::new(None));
+/// Firmware name for the boot `Hello` (set by [`boot_banner`]); the dynamic console
+/// [`manager`] re-emits `Hello` with it on every USB plug-in so the host resyncs.
+static FW_NAME: Mutex<RefCell<String<FW_LEN>>> = Mutex::new(RefCell::new(String::new()));
 
 fn bump_dropped() {
     critical_section::with(|cs| {
@@ -192,45 +217,96 @@ impl log::Log for ConsoleLogger {
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
 
-/// Initialise the framed console: install the `log` backend and spawn the writer
-/// task that owns `tx`. `rx` is parked for the shell. Call once at start-up.
-pub fn init(
-    spawner: Spawner,
-    tx: BufferedUartTx<'static>,
-    rx: BufferedUartRx<'static>,
-    max_level: LevelFilter,
-) {
-    critical_section::with(|cs| {
-        PARKED_RX.borrow(cs).replace(Some(rx));
-    });
+/// Install the `log` backend at `max_level`. Call once at start-up; the console UART
+/// itself is brought up/down dynamically by [`manager`] as USB is plugged/unplugged,
+/// but the backend (which only enqueues into [`TX_CHANNEL`]) is always present — when
+/// no UART exists the queue simply drops (harmless).
+pub fn install_logger(max_level: LevelFilter) {
     // `_racy` variants: no atomic CAS on M0+. Safe — called once, single-threaded,
     // before any task or log call runs.
     unsafe {
         let _ = log::set_logger_racy(&LOGGER);
         log::set_max_level_racy(max_level);
     }
-    spawner.spawn(writer_task(tx).unwrap());
 }
 
-/// Reclaim the parked RX half for the shell (async reads). Returns `None` if already
-/// taken or never initialised.
-pub fn take_rx() -> Option<BufferedUartRx<'static>> {
-    critical_section::with(|cs| PARKED_RX.borrow(cs).borrow_mut().take())
-}
+// Buffers for the console UART, rebuilt on each USB plug-in. A fresh `&'static mut`
+// per build is sound because [`manager`] keeps at most one `BufferedUart` alive at a
+// time (its loop builds, runs, then drops before rebuilding).
+static mut TX_BUF: [u8; 256] = [0; 256];
+static mut RX_BUF: [u8; 128] = [0; 128];
 
-/// The single UART owner. Assigns `seq`, encodes, and drains [`TX_CHANNEL`] over the
-/// interrupt-buffered UART. Holds a [`WakeGuard`] across each transmit burst: the async
-/// write awaits the USART TXE interrupt, which STOP would gate (the low-power executor
-/// enters STOP when idle) — the guard forces a plain WFI so the USART stays clocked and
-/// the interrupt fires. At the `receive().await` (truly idle) **no** guard is held, so
-/// STOP is still reached when unplugged. (docs/console.md.)
+/// USB-presence-gated **dynamic** console. Owns USART1 + PA9/PA10 for the whole run.
+/// While USB is present (`VBUS_SENSE`/PA12 high) it builds the `BufferedUart` and runs
+/// the framed writer + the RX frame-router; on unplug it **drops** the UART — which
+/// disables USART1 and releases embassy's STOP refcount, so the low-power executor can
+/// enter STOP and idle at µA — then parks on the PA12 EXTI edge (which wakes the MCU
+/// out of STOP to bring the console back on plug-in). Spawned by
+/// [`board::Board::take`](crate::board::Board::take).
+///
+/// `usart1`/`tx_pin`/`rx_pin` are held to reserve the peripherals; each build
+/// re-acquires them with `steal()` (sound — exactly one instance is alive at a time).
 #[embassy_executor::task]
-async fn writer_task(mut tx: BufferedUartTx<'static>) {
+pub async fn manager(
+    usart1: Peri<'static, USART1>,
+    tx_pin: Peri<'static, PA9>,
+    rx_pin: Peri<'static, PA10>,
+    mut vbus: ExtiInput<'static, Async>,
+) {
+    let _reserved = (usart1, tx_pin, rx_pin);
+    loop {
+        // Wait for USB present (debounced). EXTI on PA12 wakes the MCU out of STOP.
+        if !vbus.is_high() {
+            vbus.wait_for_high().await;
+            Timer::after(Duration::from_millis(50)).await;
+            if !vbus.is_high() {
+                continue;
+            }
+        }
+
+        // Build the console UART. SAFETY: at most one BufferedUart is alive at a time.
+        let uart = unsafe {
+            BufferedUart::new(
+                USART1::steal(),
+                PA10::steal(),
+                PA9::steal(),
+                &mut *addr_of_mut!(TX_BUF),
+                &mut *addr_of_mut!(RX_BUF),
+                ConsoleIrqs,
+                UartConfig::default(),
+            )
+        };
+        let Ok(uart) = uart else {
+            Timer::after(Duration::from_millis(500)).await; // avoid a tight rebuild loop
+            continue;
+        };
+        let (mut tx, mut rx) = uart.split();
+
+        // Re-announce the link so the host resyncs its per-session `seq` / header.
+        let name = critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone());
+        try_enqueue(Outgoing::Hello(name));
+
+        // Run the writer + RX router until USB is unplugged (debounced), then tear the
+        // UART down by dropping `tx`/`rx` at the end of this scope.
+        let unplug = async {
+            vbus.wait_for_low().await;
+            Timer::after(Duration::from_millis(50)).await;
+        };
+        let _ = select3(writer_loop(&mut tx), rx_loop(&mut rx), unplug).await;
+        // tx/rx drop → USART1 disabled → STOP re-enabled while unplugged.
+    }
+}
+
+/// Drain [`TX_CHANNEL`] over `tx` until cancelled. Holds a [`WakeGuard`] across each
+/// transmit burst: the async write awaits the USART TXE interrupt, which STOP would
+/// gate — the guard forces a plain WFI so the USART stays clocked and the interrupt
+/// fires. Between bursts **no** guard is held (docs/console.md).
+async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
     // Lone 0x00 at start-up: flush any partial frame on the host's decoder.
     {
         let _g = WakeGuard::new(StopMode::Stop1);
         let _ = tx.write_all(&[0u8]).await;
-        let _ = embedded_io_async::Write::flush(&mut tx).await;
+        let _ = tx.flush().await;
     }
 
     let mut seq: u16 = 0;
@@ -242,13 +318,13 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
         // Report any dropped frames first (one marker before the next real frame).
         let dropped = take_dropped();
         if dropped > 0 {
-            send(&mut tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
+            send(tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
         }
 
         match &item {
             Outgoing::Hello(fw) => {
                 send(
-                    &mut tx,
+                    tx,
                     &mut seq,
                     MsgType::Hello,
                     &Hello {
@@ -265,7 +341,7 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                 message,
             } => {
                 send(
-                    &mut tx,
+                    tx,
                     &mut seq,
                     MsgType::Log,
                     &Log {
@@ -278,7 +354,7 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                 .await
             }
             Outgoing::Print(text) => {
-                send(&mut tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await
+                send(tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await
             }
             Outgoing::Event { name, fields } => {
                 // Capacity matches the wire type (`Event.fields: Vec<_, 8>`); the
@@ -288,7 +364,7 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                     let _ = wire.push((k.as_str(), v.as_str()));
                 }
                 send(
-                    &mut tx,
+                    tx,
                     &mut seq,
                     MsgType::Event,
                     &Event {
@@ -299,19 +375,64 @@ async fn writer_task(mut tx: BufferedUartTx<'static>) {
                 .await
             }
             Outgoing::ShellResponse { cmd_id, result, text } => {
-                send_shell_response(&mut tx, &mut seq, *cmd_id, *result, text.as_str()).await
+                send_shell_response(tx, &mut seq, *cmd_id, *result, text.as_str()).await
             }
-            Outgoing::Completions(c) => send(&mut tx, &mut seq, MsgType::ShellCompletions, c).await,
+            Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
             Outgoing::FotaReq { offset, len } => {
                 let mut payload = [0u8; 6];
                 payload[0..4].copy_from_slice(&offset.to_le_bytes());
                 payload[4..6].copy_from_slice(&len.to_le_bytes());
-                send_raw(&mut tx, &mut seq, MsgType::FotaReq, &payload).await
+                send_raw(tx, &mut seq, MsgType::FotaReq, &payload).await
             }
         }
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
-        let _ = embedded_io_async::Write::flush(&mut tx).await;
+        let _ = tx.flush().await;
+    }
+}
+
+/// Read `rx` and route decoded frames (until cancelled): shell frames go to the
+/// [`shell`](crate::shell) dispatcher; `FotaData` frames go to [`FOTA_DATA`] for the
+/// FOTA host-proxy. Owning RX here (instead of the shell/host-proxy owning it) is what
+/// lets the console be torn down and rebuilt across USB plug/unplug.
+async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
+    let mut dec = FrameDecoder::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let n = match rx.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        for &b in &buf[..n] {
+            if let Some(inner) = dec.push(b) {
+                route_frame(inner).await;
+            }
+        }
+    }
+}
+
+/// Route one decoded inner frame by message type.
+async fn route_frame(inner: &[u8]) {
+    let Ok((mt, _seq, payload)) = decode_frame(inner) else {
+        return;
+    };
+    match mt {
+        MsgType::ShellCommand | MsgType::ShellComplete => {
+            crate::shell::dispatch_frame(inner).await;
+        }
+        MsgType::FotaData => {
+            let mut v: Vec<u8, FOTA_CHUNK> = Vec::new();
+            let take = payload.len().min(FOTA_CHUNK);
+            let _ = v.extend_from_slice(&payload[..take]);
+            // Drop-oldest: replace any stale chunk so the host-proxy sees the freshest.
+            if FOTA_DATA.try_send(v).is_err() {
+                let _ = FOTA_DATA.try_receive();
+                let mut v2: Vec<u8, FOTA_CHUNK> = Vec::new();
+                let _ = v2.extend_from_slice(&payload[..take]);
+                let _ = FOTA_DATA.try_send(v2);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -432,9 +553,13 @@ pub async fn send_fota_req(offset: u32, len: u16) {
     TX_CHANNEL.send(Outgoing::FotaReq { offset, len }).await;
 }
 
-/// Emit the boot `Hello` (firmware string for the host header) and a banner log.
-/// Called by the [`app!`](crate::app) macro right after the console comes up.
+/// Record the firmware name and emit the boot `Hello` + a banner log. Called by the
+/// [`app!`](crate::app) macro at start-up. The name is stored so the dynamic console
+/// [`manager`] can re-emit `Hello` on each USB plug-in.
 pub fn boot_banner(name: &str) {
+    critical_section::with(|cs| {
+        *FW_NAME.borrow(cs).borrow_mut() = clip(name);
+    });
     try_enqueue(Outgoing::Hello(clip(name)));
     log::info!(target: "boot", "booted: {}", name);
 }

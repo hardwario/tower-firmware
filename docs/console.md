@@ -95,24 +95,77 @@ app!(run);
 - **Producers** build an owned message and `try_send` it into a bounded channel
   (depth 8). Non-blocking and safe from any context (including the `log` backend).
   If the queue is full the newest is dropped and a counter bumped.
-- **One writer task** owns the UART. It assigns the per-frame **`seq`** at send time
-  (so a gap on the wire means *real* loss, never a queue drop), encodes the frame,
-  and writes it. Before the next real frame it emits a `Dropped{count}` marker if
-  anything was dropped.
+- **One writer loop** (inside `console::manager`) owns the UART TX. It assigns the
+  per-frame **`seq`** at send time (so a gap on the wire means *real* loss, never a queue
+  drop), encodes the frame, and writes it. Before the next real frame it emits a
+  `Dropped{count}` marker if anything was dropped.
 - **The codec** (`tower-protocol`) frames every message identically — see *Wire
   protocol*.
-- **RX** is read asynchronously off `BufferedUartRx` by the shell task (opt-in).
+- **RX** is read by the same manager and **routed by frame type** — shell frames to the
+  shell, `FotaData` to the host-proxy channel. The manager owns the whole UART so it can
+  be torn down/rebuilt on USB unplug/plug — see *Low power & the dynamic console*.
 
-### Low power (the `WakeGuard`)
+### Low power & the dynamic (USB-gated) console
 
-The SDK runs a low-power STOP executor: when idle it enters STOP, which **gates the
-USART clock**. If the writer awaited the TXE interrupt in STOP, the interrupt would
-never fire and TX would hang. The writer therefore holds a `WakeGuard(Stop1)` **per
-transmit burst** — STOP is downgraded to plain WFI so the USART stays clocked and the
-interrupt fires; the guard is dropped at the idle `receive().await`, so STOP is still
-reached when the device is truly idle (e.g. unplugged). RX likewise needs the device
-awake; while USB is present `power::vbus_task` holds STOP off, so the RX interrupt
-fires and the shell is responsive. Unplugged there is no host, so RX sleeping is fine.
+On the STM32L0 an **enabled USART holds embassy's STOP refcount**, so a permanently-on
+console would keep the low-power executor out of STOP *forever* — an unplugged / battery
+node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is therefore
+**dynamic**: `console::manager` (spawned by `Board::take`) owns USART1 + PA9/PA10 + the
+`VBUS_SENSE` (PA12) EXTI, and gates the whole UART on USB presence:
+
+- **USB present** → builds the `BufferedUart`, runs the writer + the RX frame-router, and
+  re-emits a `Hello`. While USB is present the enabled USART keeps the MCU in WFI (not
+  STOP) — which is what we want: the console/shell stay responsive and the node is
+  powered/plugged anyway.
+- **USB absent** → **drops** the UART, which disables USART1 and releases the STOP
+  refcount, so the executor reaches STOP and the node idles at µA (~32 µA @3 V measured,
+  vs 3527 µA with a permanently-on console). It then parks on the PA12 EXTI edge; EXTI
+  works in STOP, so a plug-in wakes the MCU to rebuild the console — **no reset, no polling**.
+
+RX is owned by the manager and **routed by frame type**: `ShellCommand`/`ShellComplete`
+go to the shell (`shell::dispatch_frame`; the shell registers its command tree + settings
+via `shell::serve`/`serve_ext`, which just store them — no task); `FotaData` goes to a
+channel the FOTA host-proxy consumes. So the shell and host-proxy keep working across
+teardown/rebuild without owning the raw RX half.
+
+**The `WakeGuard`:** even while the console is up, STOP would gate the USART clock and the
+writer's awaited TXE interrupt would never fire. The writer holds a `WakeGuard(Stop1)`
+**per transmit burst** (STOP → plain WFI so the USART stays clocked and the interrupt
+fires), dropped between bursts.
+
+### Dynamic console verification
+
+The dynamic behavior (console live on plug, torn down on unplug, no reset) can only be
+verified with real USB. Recommended bench procedure:
+
+**Setup.** Power the board from a **separate supply** (battery / power-profiler), *not*
+from USB, so plugging/unplugging USB only toggles `VBUS_SENSE` — it doesn't cut power.
+Have the `tower` CLI on PATH and flash a console-exercising firmware (`console_full` is
+ideal): `just flash example console_full`. (Flashing is unaffected — the STM32 bootloader
+runs before the app's console.)
+
+| Test | Steps | Pass |
+|---|---|---|
+| **A — console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`/system/resource print`, TAB) |
+| **B — live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
+| **B (no-reset check)** | across the unplug/replug in B, watch the log **uptime timestamps** | Uptime is **continuous / increasing** (device kept running+sleeping). If it resets to 0 → the device rebooted, i.e. *not* the dynamic path |
+| **C — headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI wakes the MCU; console appears in `tower logs` within a fraction of a second |
+| **D — FOTA host-proxy** | node `just flash-fota fota_ota` (role-node); gateway (USB) `role-gateway`; host `tower fota serve …`; trigger a pull | node fetches manifest + image via the gateway and swaps (exercises the `FotaData → console::FOTA_DATA` route) |
+
+**If a test fails — where to look:**
+
+- **Console never appears on plug** → most likely `VBUS_SENSE`/PA12 isn't reaching the
+  STM32's V_IH when USB is plugged (see the caveat below). Scope PA12 on plug — it must
+  read logic-high, or the manager never sees "USB present." (Hardware-threshold issue,
+  not the firmware logic.)
+- **Logs appear but garbled** → framing / the reused static `TX_BUF`/`RX_BUF` across rebuilds.
+- **Shell silent, logs fine** → the RX router (`dispatch_frame`) or `SHELL_PARAMS` not set
+  (a `no_shell` app has no shell by design).
+- **FOTA pull stalls** → the `FotaData → FOTA_DATA` routing (`console::route_frame`).
+- **Current doesn't drop on unplug** → the UART isn't being dropped; check the manager's
+  unplug branch (`select3`) fires (VBUS debounce is 50 ms).
+- **Host reports a `seq` gap on re-plug** → benign: the writer's `seq` resets per USB
+  session; `tower` resyncs from the `Hello`.
 
 ### The panic path
 
@@ -442,8 +495,9 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 `tower::console`:
 - `event(name, &[(k, v)]).await` — emit a structured event
 - `print!` / `println!` — raw text (re-exported macros)
-- `init(spawner, tx, rx, max_level)`, `take_rx()`, `boot_banner(name)` — wiring
-  (handled for you by `Board::take` / `app!`)
+- `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, vbus)`, `boot_banner(name)`
+  — wiring for the dynamic (USB-gated) console, handled for you by `Board::take` / `app!`
+- `FOTA_DATA` — channel of decoded `FotaData` payloads the manager routes to the FOTA host-proxy
 
 `tower::shell`:
 - `serve(spawner, storage)` / `serve_ext(spawner, storage, app_commands, app_settings)`
@@ -487,9 +541,16 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 - **No DMA:** the WS2812 strip owns the DMA group, so the console is interrupt-driven.
   This is why the writer holds a `WakeGuard` per burst (above).
 - **`fw ?` in the header** appears only if you attach `tower console` and never see a
-  `Hello` — the firmware announces it on boot/VBUS edge, not on host connect. The TUI
+  `Hello` — the firmware announces it on boot and on each USB plug-in (when the dynamic
+  console rebuilds), not on host connect. The TUI
   header otherwise shows the **`tower` CLI** version; the firmware version is in
   `/system/resource print`.
+- **`VBUS_SENSE` (PA12) V_IH:** the dynamic console gates on PA12 reading logic-high when
+  USB is plugged (the external divider drives it from USB 5 V). Verify on your hardware
+  that the divider clears the STM32's V_IH — scope PA12 on plug. If it doesn't, the console
+  won't come up on plug-in (the manager never sees "USB present"), and an unplugged node
+  might falsely read "present" and stay out of STOP. The pin uses an internal pull-down so
+  it reads a defined low when unplugged.
 - **Setting values can't contain `/`, space, or tab** — those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
