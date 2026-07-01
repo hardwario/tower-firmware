@@ -25,7 +25,7 @@ use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 
 use critical_section::Mutex;
-use embassy_futures::select::select3;
+use embassy_futures::select::{select, select3};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
 use embassy_stm32::peripherals::{PA9, PA10, USART1};
@@ -255,13 +255,17 @@ pub async fn manager(
 ) {
     let _reserved = (usart1, tx_pin, rx_pin);
     loop {
-        // Wait for USB present (debounced). EXTI on PA12 wakes the MCU out of STOP.
+        // Wait for USB present. The PA12 EXTI edge wakes the low-power executor out of
+        // STOP the instant VBUS rises; the periodic re-check is a fallback for a missed
+        // edge — the FT231X (which drives PA12 via CBUS3) only asserts it tens of ms
+        // after power-up, i.e. after the executor has already armed the wait, so relying
+        // on the edge alone can hang. The ~500 ms RTC wake while unplugged costs sub-µA.
+        while !vbus.is_high() {
+            let _ = select(vbus.wait_for_high(), Timer::after(Duration::from_millis(500))).await;
+        }
+        Timer::after(Duration::from_millis(50)).await; // debounce
         if !vbus.is_high() {
-            vbus.wait_for_high().await;
-            Timer::after(Duration::from_millis(50)).await;
-            if !vbus.is_high() {
-                continue;
-            }
+            continue;
         }
 
         // Build the console UART. SAFETY: at most one BufferedUart is alive at a time.
