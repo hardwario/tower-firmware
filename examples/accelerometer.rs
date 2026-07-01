@@ -53,7 +53,9 @@ async fn run(b: Board) {
     );
 
     let mut int1 = b.accel_int;
-    // Reclaim the shared I²C2 bus from the TMP112 driver for the accelerometer.
+    // Reclaim the shared I²C2 bus from the TMP112 driver for the accelerometer. The bus is
+    // ATSHA-guarded, so every accel read here automatically re-sleeps the ATSHA204A — no
+    // explicit hygiene needed even though this polls the shared bus continuously.
     let mut accel = Lis2dh12::new(b.tmp112.release(), lis2dh12::ADDR_DEFAULT);
 
     match accel.who_am_i() {

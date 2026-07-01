@@ -17,6 +17,7 @@ use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
 use embassy_time::Duration;
+use embedded_hal::i2c::{ErrorType, I2c as I2cTrait, Operation};
 use log::LevelFilter;
 
 use crate::storage::{Nv, Storage};
@@ -39,8 +40,13 @@ const ACCEL_ADDR: u8 = 0x19; // LIS2DH12 accelerometer (SA0 tied high)
 const LIS2DH12_CTRL_REG1: u8 = 0x20; // ODR/enable; 0x00 = power-down
 const ATSHA_ADDR: u8 = 0x64; // ATSHA204A crypto (word address 0x01 = Sleep)
 
-/// The board's TMP112 on the I²C2 bus (blocking), in shutdown / one-shot mode.
-pub type Tmp112Sensor = Tmp112<I2c<'static, Blocking, Master>>;
+/// The board's shared I²C2 bus (blocking), wrapped in an [`AtshaGuard`] so every
+/// transaction automatically re-sleeps the ATSHA204A. This is the bus type the app
+/// receives (via [`Board::tmp112`] and `release()`).
+pub type GuardedI2c = AtshaGuard<I2c<'static, Blocking, Master>>;
+
+/// The board's TMP112 on the (ATSHA-guarded) I²C2 bus (blocking), in shutdown / one-shot mode.
+pub type Tmp112Sensor = Tmp112<GuardedI2c>;
 
 /// Ready-to-use board resources handed to an app by [`Board::take`].
 ///
@@ -142,13 +148,13 @@ impl Board {
         // configures the part.
         let _ = i2c.blocking_write(ACCEL_ADDR, &[LIS2DH12_CTRL_REG1, 0x00]);
 
-        // ATSHA204A crypto → Sleep (the last bus op, since any I2C traffic can re-wake it).
-        // Apps that poll the shared I2C bus must re-sleep it after each batch — see
-        // [`atsha_sleep`].
+        // ATSHA204A crypto → Sleep (the last raw bus op, since any I2C traffic can re-wake
+        // it). From here on the app's bus is [`AtshaGuard`]-wrapped, so every subsequent
+        // transaction re-sleeps it automatically — no app has to remember.
         atsha_sleep(&mut i2c);
 
-        // Re-wrap the (already shut-down) TMP112 for the app's one-shot reads.
-        let sensor = Tmp112::new(i2c, tmp112::ADDR_VPLUS);
+        // Re-wrap the (already shut-down) TMP112 on the ATSHA-guarded bus for the app.
+        let sensor = Tmp112::new(AtshaGuard::new(i2c), tmp112::ADDR_VPLUS);
 
         Board {
             spawner,
@@ -224,12 +230,54 @@ pub(crate) fn apply_stop_tuning() {
 
 /// Put the on-board **ATSHA204A** crypto (I²C 0x64) back to Sleep (word address `0x01`,
 /// idle ~30 nA). Awake it draws far more (up to ~200 µA idle) — enough to dwarf the µA
-/// STOP-mode floor. It wakes on a *wake token* (SDA held low ≥ ~60 µs): code that uses
-/// the ATSHA obviously wakes it, but so can a zero-heavy byte on the shared I²C2 bus at
-/// 100 kHz (8 low bits ≈ 80 µs). Its on-chip watchdog auto-sleeps it ~1.3 s after a wake,
-/// so an occasional accidental wake self-heals — but an app that *deliberately* uses the
-/// part must call this after each batch, or it stays awake. A NACK (part absent on some
-/// board variants) is ignored.
+/// STOP-mode floor. **Assume any I²C transaction on the shared bus can wake it**, so it
+/// must be re-slept after *every* other transaction; the [`AtshaGuard`] bus wrapper does
+/// this automatically, so most code never calls this directly. A NACK (already asleep, or
+/// part absent on some board variants) is ignored.
 pub fn atsha_sleep(i2c: &mut I2c<'static, Blocking, Master>) {
     let _ = i2c.blocking_write(ATSHA_ADDR, &[0x01]);
+}
+
+/// I²C bus wrapper that re-sleeps the on-board **ATSHA204A** (0x64) after **every**
+/// transaction to another device. The ATSHA shares the I²C2 bus and — conservatively —
+/// *any* traffic can wake it into ~200 µA idle (its watchdog only auto-sleeps it ~1.3 s
+/// after a wake), which would dwarf the µA STOP-mode floor. Wrapping the bus makes the
+/// "re-sleep after each transaction" policy automatic, so the sensor drivers and apps
+/// can't forget it. Transactions addressed to the ATSHA itself are passed through
+/// untouched, so a deliberate crypto sequence still manages its own wake/sleep.
+///
+/// It implements [`embedded_hal::i2c::I2c`], so it drops in wherever a raw bus went (the
+/// [`Tmp112`](crate::tmp112::Tmp112) / [`Lis2dh12`](crate::lis2dh12::Lis2dh12) drivers are
+/// generic over it). Use [`into_inner`](Self::into_inner) for deliberate *unguarded*
+/// access (e.g. a raw bus scan).
+pub struct AtshaGuard<T> {
+    inner: T,
+}
+
+impl<T> AtshaGuard<T> {
+    /// Wrap `inner` so every non-ATSHA transaction is followed by an ATSHA sleep.
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    /// Unwrap and return the raw (unguarded) bus.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: ErrorType> ErrorType for AtshaGuard<T> {
+    type Error = T::Error;
+}
+
+impl<T: I2cTrait> I2cTrait for AtshaGuard<T> {
+    fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Self::Error> {
+        let r = self.inner.transaction(address, operations);
+        // Re-sleep the ATSHA after traffic to any *other* device. Issued on `inner`
+        // directly (never recurses through the guard); a NACK (already asleep) is ignored.
+        if address != ATSHA_ADDR {
+            let _ = self.inner.write(ATSHA_ADDR, &[0x01]);
+        }
+        r
+    }
 }

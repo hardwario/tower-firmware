@@ -16,8 +16,9 @@ use log::info;
 use tower::{app, board::{self, Board}};
 
 async fn run(b: Board) {
-    // Take the I2C2 bus back from the TMP112 driver for raw address probing.
-    let mut i2c = b.tmp112.release();
+    // Take the *raw* (unguarded) I2C2 bus from the TMP112 driver for address probing —
+    // a bus scanner wants to see the real bus, so bypass the AtshaGuard via into_inner().
+    let mut i2c = b.tmp112.release().into_inner();
 
     info!(target: "i2c", "scanning I2C2 @ 100 kHz ...");
     let mut found = 0;

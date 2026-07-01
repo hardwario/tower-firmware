@@ -6,20 +6,22 @@
 //! (`tower logs`), which decodes the frames.
 //!
 //! Architecture (docs/console.md): the console is **dynamic** — [`manager`] owns USART1
-//! + PA9/PA10 and, gated on USB presence (`VBUS_SENSE`/PA12), builds the `BufferedUart`
-//! while plugged and **drops** it on unplug — releasing embassy's STOP refcount so an
-//! unplugged node idles at µA. While up it splits the UART and runs two halves:
-//!   * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
-//!     [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking,
-//!     drop-newest on full (a dropped count is reported by the writer); [`writer_loop`]
-//!     owns the `BufferedUartTx`, assigns the per-frame `seq` (so a gap means real wire
-//!     loss, not a queue drop), encodes, and async-writes — holding a `WakeGuard` across
-//!     each burst so the low-power executor uses WFI (USART clocked) instead of STOP,
-//!     which would gate the TXE interrupt;
-//!   * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames by type:
-//!     shell frames to [`crate::shell::dispatch_frame`], `FotaData` to [`FOTA_DATA`];
-//!   * the **panic** path can't use the (dead) executor, so it silences the buffered
-//!     ISR and blocking-writes one frame straight to the USART1 registers via the PAC.
+//! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds the
+//! `BufferedUart` while plugged and **drops** it on unplug — releasing embassy's STOP
+//! refcount so an unplugged node idles at µA. While up it splits the UART and runs two
+//! halves:
+//!
+//! * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
+//!   [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking, drop-newest
+//!   on full (a dropped count is reported by the writer); [`writer_loop`] owns the
+//!   `BufferedUartTx`, assigns the per-frame `seq` (so a gap means real wire loss, not a
+//!   queue drop), encodes, and async-writes — holding a `WakeGuard` across each burst so
+//!   the low-power executor uses WFI (USART clocked) instead of STOP, which would gate the
+//!   TXE interrupt;
+//! * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames by type:
+//!   shell frames to [`crate::shell::dispatch_frame`], `FotaData` to [`FOTA_DATA`];
+//! * the **panic** path can't use the (dead) executor, so it silences the buffered ISR
+//!   and blocking-writes one frame straight to the USART1 registers via the PAC.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
