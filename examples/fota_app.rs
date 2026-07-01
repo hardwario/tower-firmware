@@ -140,7 +140,7 @@ async fn stage_self_image<DFU: NorFlash, STATE: NorFlash>(
 
     // 1) Program DFU from the source, folding a SHA over exactly what we wrote. The writes
     //    are blocking and never yield, so log + yield ~every 25% to keep the async console
-    //    alive (else writer_task is starved and the monitor looks frozen).
+    //    alive (else the console writer is starved and the monitor looks frozen).
     let quarter = (len / 4).max(CHUNK);
     let mut next_mark = quarter;
     let mut src_hash = Sha256::new();

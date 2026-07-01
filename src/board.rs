@@ -1,11 +1,10 @@
 //! HARDWARIO TOWER Core Module board support.
 //!
-//! Most apps use [`Board::take`] via the [`app!`](crate::app) macro and never
-//! touch the lower-level [`init`]/[`console::init`](crate::console::init). `take`
-//! performs the *always
-//! on* setup — clocks, the serial console, and putting the TMP112 into shutdown
-//! (one-shot) mode so it does not free-run and waste power — then hands the app
-//! a [`Board`] of ready-to-use resources.
+//! Most apps use [`Board::take`] via the [`app!`](crate::app) macro and never touch the
+//! lower-level [`init`]. `take` performs the *always on* setup — clocks, the USB-gated
+//! serial [`console`](crate::console), and putting the TMP112 into shutdown (one-shot)
+//! mode so it does not free-run and waste power — then hands the app a [`Board`] of
+//! ready-to-use resources.
 
 use embassy_executor::Spawner;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler};
@@ -102,10 +101,10 @@ impl Board {
     /// the serial console, TMP112 shutdown, and **USB-aware power management**
     /// (see below).
     ///
-    /// A [`power::vbus_task`](crate::power::vbus_task) is spawned automatically so
-    /// every app gets the same low-power policy: stay awake (Sleep) while USB is
-    /// connected — keeping the console and interrupts responsive for debugging —
-    /// and allow STOP when running unplugged. Apps don't wire this up themselves.
+    /// The USB-presence-gated [`console::manager`](crate::console::manager) is spawned
+    /// automatically, so every app gets the same low-power policy without wiring it up:
+    /// the console UART is up (and interrupts responsive) while USB is connected, and is
+    /// torn down when unplugged so the executor can reach STOP and idle at µA.
     pub fn take(spawner: Spawner) -> Self {
         let p = init();
 
@@ -117,8 +116,10 @@ impl Board {
         // unplug (releasing the refcount → STOP). `VBUS_SENSE` (PA12) is the gate: EXTI
         // line 12 wakes the MCU out of STOP on plug-in to bring the console back.
         // Pull-down so the sense line reads a defined low when unplugged (no false "USB
-        // present" from a floating pin); the external divider drives it high when plugged
-        // (docs/console.md notes the V_IH caveat to verify on HW).
+        // present" from a floating pin). When plugged, the FT231X drives PA12 high via its
+        // CBUS3 output (a push-pull ~3.3 V logic level — not a 5 V divider), but only tens
+        // of ms after power-up; the manager's VBUS poll covers that late assertion. PA12 is
+        // also the USB DP pin, used here purely as a VBUS_SENSE GPIO (no USB peripheral).
         crate::console::install_logger(LOG_LEVEL);
         let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
         spawner.spawn(crate::console::manager(p.USART1, p.PA9, p.PA10, vbus).unwrap());
@@ -141,11 +142,10 @@ impl Board {
         // configures the part.
         let _ = i2c.blocking_write(ACCEL_ADDR, &[LIS2DH12_CTRL_REG1, 0x00]);
 
-        // ATSHA204A crypto → Sleep (word address 0x01, ~30 nA). Its idle draw is ~200 µA
-        // and any bus activity can wake it; the on-chip watchdog auto-sleeps it ~1.3 s
-        // after a wake, but we sleep it explicitly here (the last bus op) so it's down
-        // immediately. Apps that poll the I2C bus should re-sleep it after each batch.
-        let _ = i2c.blocking_write(ATSHA_ADDR, &[0x01]);
+        // ATSHA204A crypto → Sleep (the last bus op, since any I2C traffic can re-wake it).
+        // Apps that poll the shared I2C bus must re-sleep it after each batch — see
+        // [`atsha_sleep`].
+        atsha_sleep(&mut i2c);
 
         // Re-wrap the (already shut-down) TMP112 for the app's one-shot reads.
         let sensor = Tmp112::new(i2c, tmp112::ADDR_VPLUS);
@@ -196,16 +196,40 @@ pub fn init() -> Peripherals {
     config.enable_debug_during_sleep = false;
     let p = embassy_stm32::init(config);
 
-    // STOP-mode regulator: embassy's L0 low-power `enter_stop` sets only PDDS/CWUF,
-    // leaving the *main* voltage regulator powered in STOP (tens–hundreds of µA).
-    // Switch the regulator to low-power mode in deep sleep (PWR_CR.LPSDSR) and
-    // disable VREFINT in Stop (PWR_CR.ULP) for the datasheet ~µA STOP current.
-    // embassy's later read-modify-write of PWR_CR (PDDS/CWUF on stop entry)
-    // preserves these bits, and the fast-wakeup path re-enables VREFINT as needed.
+    apply_stop_tuning();
+
+    p
+}
+
+/// Assert the STM32L0 STOP-mode power tuning in `PWR_CR`:
+/// - **LPSDSR** — put the voltage regulator in *low-power* mode during deep sleep
+///   (embassy's L0 `enter_stop` sets only PDDS/CWUF, otherwise leaving the *main*
+///   regulator powered in STOP — tens–hundreds of µA of avoidable draw);
+/// - **ULP** — disable VREFINT in Stop (its buffer costs ~1.5 µA).
+///
+/// **Must be re-applied after every wake.** embassy's `exit_stop` re-inits RCC on each
+/// wake (`rcc::reinit_saved` → `rcc/l.rs` voltage-scale step), which does a *full-register*
+/// `PWR.cr().write(set_vos)` — that zeroes LPSDSR (bit 0) and ULP (bit 9). So a single
+/// init-time write only holds for the first STOP; from the second STOP on the bits are
+/// gone. [`crate::console::manager`] re-calls this on each wake of its VBUS-poll loop, so
+/// the idle (unplugged) STOP always re-enters with the bits set. Caveat: with `ULP` set,
+/// VREFINT is unavailable for a short window after wake (regulator/VREFINT startup) — fine
+/// here as the SDK uses no ADC/VREFINT; code that adds battery sensing must account for it.
+pub(crate) fn apply_stop_tuning() {
     embassy_stm32::pac::PWR.cr().modify(|w| {
         w.set_lpsdsr(embassy_stm32::pac::pwr::vals::Mode::LOW_POWER_MODE);
         w.set_ulp(true);
     });
+}
 
-    p
+/// Put the on-board **ATSHA204A** crypto (I²C 0x64) back to Sleep (word address `0x01`,
+/// idle ~30 nA). Awake it draws far more (up to ~200 µA idle) — enough to dwarf the µA
+/// STOP-mode floor. It wakes on a *wake token* (SDA held low ≥ ~60 µs): code that uses
+/// the ATSHA obviously wakes it, but so can a zero-heavy byte on the shared I²C2 bus at
+/// 100 kHz (8 low bits ≈ 80 µs). Its on-chip watchdog auto-sleeps it ~1.3 s after a wake,
+/// so an occasional accidental wake self-heals — but an app that *deliberately* uses the
+/// part must call this after each batch, or it stays awake. A NACK (part absent on some
+/// board variants) is ignored.
+pub fn atsha_sleep(i2c: &mut I2c<'static, Blocking, Master>) {
+    let _ = i2c.blocking_write(ATSHA_ADDR, &[0x01]);
 }

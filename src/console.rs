@@ -5,19 +5,21 @@
 //! 115200. A raw serial monitor therefore shows binary — use the `tower` host CLI
 //! (`tower logs`), which decodes the frames.
 //!
-//! Architecture (docs/console.md):
-//!   * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an
-//!     owned [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking,
-//!     drop-newest on full (a dropped count is reported by the writer);
-//!   * one [`writer_task`] **owns** the interrupt-buffered `BufferedUartTx`, assigns the
-//!     per-frame `seq` (so a gap means real wire loss, not a queue drop), encodes, and
-//!     async-writes — holding a `WakeGuard` across each burst so the low-power executor
-//!     uses WFI (USART clocked) instead of STOP, which would gate the TXE interrupt;
+//! Architecture (docs/console.md): the console is **dynamic** — [`manager`] owns USART1
+//! + PA9/PA10 and, gated on USB presence (`VBUS_SENSE`/PA12), builds the `BufferedUart`
+//! while plugged and **drops** it on unplug — releasing embassy's STOP refcount so an
+//! unplugged node idles at µA. While up it splits the UART and runs two halves:
+//!   * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
+//!     [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking,
+//!     drop-newest on full (a dropped count is reported by the writer); [`writer_loop`]
+//!     owns the `BufferedUartTx`, assigns the per-frame `seq` (so a gap means real wire
+//!     loss, not a queue drop), encodes, and async-writes — holding a `WakeGuard` across
+//!     each burst so the low-power executor uses WFI (USART clocked) instead of STOP,
+//!     which would gate the TXE interrupt;
+//!   * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames by type:
+//!     shell frames to [`crate::shell::dispatch_frame`], `FotaData` to [`FOTA_DATA`];
 //!   * the **panic** path can't use the (dead) executor, so it silences the buffered
 //!     ISR and blocking-writes one frame straight to the USART1 registers via the PAC.
-//!
-//! The full-duplex `BufferedUart` is built and split by the board; TX goes to the
-//! writer task, RX is **parked** here ([`take_rx`]) for the shell, which reads it async.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
@@ -58,7 +60,13 @@ const FOTA_CHUNK: usize = 128;
 /// `FotaData` frames received on RX are decoded by the manager and routed here for the
 /// FOTA host-proxy ([`crate::fota::HostProxySource`]) to consume — so the host-proxy no
 /// longer needs to own the raw RX half (the dynamic console manager owns it).
-pub(crate) static FOTA_DATA: Channel<CriticalSectionRawMutex, Vec<u8, FOTA_CHUNK>, 1> =
+///
+/// Depth 2: the host contract is **one `FotaData` per `FotaReq`**, and the proxy both
+/// drains stale chunks before each request and filters incoming chunks by offset, so a
+/// single slot suffices in the steady state. The extra slot absorbs a late reply to a
+/// just-timed-out request colliding with the reply to the retry, so neither is dropped
+/// before the proxy's offset filter can pick the right one.
+pub(crate) static FOTA_DATA: Channel<CriticalSectionRawMutex, Vec<u8, FOTA_CHUNK>, 2> =
     Channel::new();
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
@@ -260,8 +268,14 @@ pub async fn manager(
         // edge — the FT231X (which drives PA12 via CBUS3) only asserts it tens of ms
         // after power-up, i.e. after the executor has already armed the wait, so relying
         // on the edge alone can hang. The ~500 ms RTC wake while unplugged costs sub-µA.
+        //
+        // Each wake also re-asserts the STOP power tuning: embassy's `exit_stop` re-inits
+        // RCC on wake and its full-register PWR_CR write clears LPSDSR/ULP, so re-apply
+        // before re-entering STOP. This poll is the idle wake source, so idle STOP always
+        // re-enters with the low-power regulator + VREFINT-off bits set.
         while !vbus.is_high() {
             let _ = select(vbus.wait_for_high(), Timer::after(Duration::from_millis(500))).await;
+            crate::board::apply_stop_tuning();
         }
         Timer::after(Duration::from_millis(50)).await; // debounce
         if !vbus.is_high() {
@@ -428,13 +442,10 @@ async fn route_frame(inner: &[u8]) {
             let mut v: Vec<u8, FOTA_CHUNK> = Vec::new();
             let take = payload.len().min(FOTA_CHUNK);
             let _ = v.extend_from_slice(&payload[..take]);
-            // Drop-oldest: replace any stale chunk so the host-proxy sees the freshest.
-            if FOTA_DATA.try_send(v).is_err() {
-                let _ = FOTA_DATA.try_receive();
-                let mut v2: Vec<u8, FOTA_CHUNK> = Vec::new();
-                let _ = v2.extend_from_slice(&payload[..take]);
-                let _ = FOTA_DATA.try_send(v2);
-            }
+            // One FotaData per FotaReq (see FOTA_DATA): the proxy matches chunks by
+            // offset, so if the depth-2 queue is somehow full we drop the *incoming*
+            // frame rather than evict a queued chunk the proxy may still need to match.
+            let _ = FOTA_DATA.try_send(v);
         }
         _ => {}
     }

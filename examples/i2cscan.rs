@@ -13,7 +13,7 @@
 
 use embassy_time::Timer;
 use log::info;
-use tower::{app, board::Board};
+use tower::{app, board::{self, Board}};
 
 async fn run(b: Board) {
     // Take the I2C2 bus back from the TMP112 driver for raw address probing.
@@ -29,6 +29,11 @@ async fn run(b: Board) {
         }
     }
     info!(target: "i2c", "scan complete - {} device(s)", found);
+
+    // The scan probes every address (incl. the ATSHA204A at 0x64) — re-sleep it
+    // defensively so a probed/woken crypto part can't hold ~200 µA. Good hygiene after
+    // any batch of transactions on the shared I2C bus. See `board::atsha_sleep`.
+    board::atsha_sleep(&mut i2c);
 
     loop {
         Timer::after_secs(60).await;

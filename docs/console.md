@@ -119,8 +119,13 @@ node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is
   powered/plugged anyway.
 - **USB absent** → **drops** the UART, which disables USART1 and releases the STOP
   refcount, so the executor reaches STOP and the node idles at µA (~32 µA @3 V measured,
-  vs 3527 µA with a permanently-on console). It then parks on the PA12 EXTI edge; EXTI
-  works in STOP, so a plug-in wakes the MCU to rebuild the console — **no reset, no polling**.
+  vs 3527 µA with a permanently-on console). It then waits for USB on the **PA12 EXTI
+  edge plus a ~500 ms RTC poll**: EXTI works in STOP and brings the console up the instant
+  VBUS rises — **no reset** — while the poll is a fallback for a *missed* edge. PA12 is
+  driven by the FT231X's **CBUS3** output (a push-pull ~3.3 V logic level, *not* a 5 V
+  divider), which asserts only tens of ms after power-up, i.e. after the executor may have
+  already armed the edge wait — so relying on the edge alone can hang; the poll closes that
+  gap. The periodic wake costs sub-µA (STOP floor unchanged).
 
 RX is owned by the manager and **routed by frame type**: `ShellCommand`/`ShellComplete`
 go to the shell (`shell::dispatch_frame`; the shell registers its command tree + settings
@@ -149,23 +154,25 @@ runs before the app's console.)
 | **A — console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`/system/resource print`, TAB) |
 | **B — live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
 | **B (no-reset check)** | across the unplug/replug in B, watch the log **uptime timestamps** | Uptime is **continuous / increasing** (device kept running+sleeping). If it resets to 0 → the device rebooted, i.e. *not* the dynamic path |
-| **C — headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI wakes the MCU; console appears in `tower logs` within a fraction of a second |
+| **C — headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI (or the ~500 ms poll fallback) wakes the MCU; console appears in `tower logs` within ~½ s |
 | **D — FOTA host-proxy** | node `just flash-fota fota_ota` (role-node); gateway (USB) `role-gateway`; host `tower fota serve …`; trigger a pull | node fetches manifest + image via the gateway and swaps (exercises the `FotaData → console::FOTA_DATA` route) |
 
 **If a test fails — where to look:**
 
-- **Console never appears on plug** → most likely `VBUS_SENSE`/PA12 isn't reaching the
-  STM32's V_IH when USB is plugged (see the caveat below). Scope PA12 on plug — it must
-  read logic-high, or the manager never sees "USB present." (Hardware-threshold issue,
-  not the firmware logic.)
+- **Console never appears on plug** → PA12 isn't reading logic-high when USB is plugged.
+  It's driven by the FT231X CBUS3 push-pull output (see the caveat below), which the
+  ~500 ms poll already tolerates being late — so if it *never* appears, scope PA12 on
+  plug: it must reach the STM32's V_IH, or the manager never sees "USB present." (Hardware
+  issue — e.g. CBUS3 mis-configured in the FTDI EEPROM — not the firmware logic.)
 - **Logs appear but garbled** → framing / the reused static `TX_BUF`/`RX_BUF` across rebuilds.
 - **Shell silent, logs fine** → the RX router (`dispatch_frame`) or `SHELL_PARAMS` not set
   (a `no_shell` app has no shell by design).
 - **FOTA pull stalls** → the `FotaData → FOTA_DATA` routing (`console::route_frame`).
 - **Current doesn't drop on unplug** → the UART isn't being dropped; check the manager's
   unplug branch (`select3`) fires (VBUS debounce is 50 ms).
-- **Host reports a `seq` gap on re-plug** → benign: the writer's `seq` resets per USB
-  session; `tower` resyncs from the `Hello`.
+- **Host reports a `seq` gap on re-plug** → should not occur: the writer's `seq` resets
+  per USB session and `tower` resets its per-link `seq` tracking when it decodes the fresh
+  `Hello`. (Older CLI builds printed a benign one-line gap warning here and kept going.)
 
 ### The panic path
 
@@ -248,7 +255,7 @@ serving it with the board's EEPROM storage:
 ```rust
 use tower::{app, board::Board, shell};
 async fn run(b: Board) {
-    shell::serve(b.spawner, b.storage);   // base tree + settings
+    shell::serve(b.spawner, b.kv);   // base tree + settings
     // … your app; logs/events keep flowing on the same link …
 }
 app!(run);
@@ -286,16 +293,18 @@ example.
 
 Settings are **declarative**: an app provides a `&'static [Setting]` table and the
 shell derives `print` / `set` / `get` / `export` and completion from it — no
-per-setting code. Each setting is persisted in the EEPROM key-value store under its
-key (the console reserves `0x5500+`).
+per-setting code. Each `Setting.key` is a **`u8` local** within the shell's EEPROM
+namespace (`NS_SHELL`) — the shell prefixes it, so app keys can't collide with other
+subsystems. The SDK base table uses `0x00` (`identity`); pick any other `u8` for your
+app settings.
 
 ```rust
 use tower::shell::{Setting, Kind};
 static SETTINGS: &[Setting] = &[
-    Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
-    Setting { key: 0x5511, name: "verbose",  kind: Kind::Bool,                       default: "false" },
-    Setting { key: 0x5512, name: "mode",     kind: Kind::Enum(&["p2p","star","mesh"]),default: "star" },
-    Setting { key: 0x5513, name: "tx_power", kind: Kind::Int { min: -30, max: 20 },   default: "14" },
+    Setting { key: 0x10, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+    Setting { key: 0x11, name: "verbose",  kind: Kind::Bool,                       default: "false" },
+    Setting { key: 0x12, name: "mode",     kind: Kind::Enum(&["p2p","star","mesh"]),default: "star" },
+    Setting { key: 0x13, name: "tx_power", kind: Kind::Int { min: -30, max: 20 },   default: "14" },
 ];
 ```
 
@@ -327,7 +336,7 @@ static SETTINGS: &[Setting] = &[
   ```
 - Unset / unreadable / out-of-range stored values fall back to the `default`.
 
-`identity` is just an SDK `Str` setting (key `0x5500`, ≤32 chars) — nothing special.
+`identity` is just an SDK `Str` setting (key `0x00`, ≤32 chars) — nothing special.
 
 ---
 
@@ -358,17 +367,18 @@ static APP_COMMANDS: &[Entry] = &[
 ];
 
 static APP_SETTINGS: &[Setting] = &[
-    Setting { key: 0x5510, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
+    Setting { key: 0x10, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
 ];
 
 async fn run(b: Board) {
-    shell::serve_ext(b.spawner, b.storage, APP_COMMANDS, APP_SETTINGS);
+    shell::serve_ext(b.spawner, b.kv, APP_COMMANDS, APP_SETTINGS);
 }
 ```
 
 The handler context (`Ctx`) exposes:
 - `write!(ctx, …)` — `Ctx` implements `core::fmt::Write` (the response text);
-- `ctx.kv` — the EEPROM key-value store (apps own keys outside the `0x5500` range);
+- `ctx.kv` — the shell-namespaced (`NS_SHELL`) EEPROM handle; settings are keyed by `u8`
+  within it, so use keys other than the SDK base's `0x00` (`identity`);
 - `ctx.settings` — the merged settings table (`iter()` / `find(name)`).
 
 Merge rules: a menu shadows a same-named command (menus stay descendable); on a
@@ -457,12 +467,14 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 | `Hello` | 0 | T→H | protocol + firmware version (boot announce) |
 | `Log` | 1 | T→H | level, uptime_us, module, message |
 | `Print` | 2 | T→H | raw text |
-| `Event` | 3 | T→H | name + up to 8 (key, value) pairs |
+| `Event` | 3 | T→H | name + (key, value) pairs (wire allows 8; the SDK emits ≤6) |
 | `ShellResponse` | 4 | T→H | cmd_id, result, chunk, last, text |
 | `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
 | `Dropped` | 6 | T→H | count of dropped frames |
+| `FotaReq` | 7 | T→H | fixed binary: offset + length (node → host, pull request) |
 | `ShellCommand` | 16 | H→T | cmd_id, line |
 | `ShellComplete` | 17 | H→T | req_id, line, cursor |
+| `FotaData` | 18 | H→T | fixed binary: offset + image/manifest bytes (host → node) |
 
 A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
 `decode_frame` checks version + type + CRC and returns `(MsgType, seq, payload)`.
@@ -500,7 +512,7 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 - `FOTA_DATA` — channel of decoded `FotaData` payloads the manager routes to the FOTA host-proxy
 
 `tower::shell`:
-- `serve(spawner, storage)` / `serve_ext(spawner, storage, app_commands, app_settings)`
+- `serve(spawner, kv)` / `serve_ext(spawner, kv, app_commands, app_settings)`
 - types: `Entry` (`::cmd` / `::menu`), `Command`, `Args` (`None` / `Names` / `Settings`),
   `Setting`, `Kind`, `SettingsTable`, `Ctx`, `Outcome` (`::ok` / `::code`), `Handler`
 - constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`
@@ -545,12 +557,16 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   console rebuilds), not on host connect. The TUI
   header otherwise shows the **`tower` CLI** version; the firmware version is in
   `/system/resource print`.
-- **`VBUS_SENSE` (PA12) V_IH:** the dynamic console gates on PA12 reading logic-high when
-  USB is plugged (the external divider drives it from USB 5 V). Verify on your hardware
-  that the divider clears the STM32's V_IH — scope PA12 on plug. If it doesn't, the console
-  won't come up on plug-in (the manager never sees "USB present"), and an unplugged node
-  might falsely read "present" and stay out of STOP. The pin uses an internal pull-down so
-  it reads a defined low when unplugged.
+- **`VBUS_SENSE` (PA12):** the dynamic console gates on PA12 reading logic-high when USB
+  is plugged. PA12 is driven by the FT231X's **CBUS3** pin (a push-pull ~3.3 V logic
+  output configured in the FTDI EEPROM — e.g. `DRIVE1` on the Core Module, `SLEEP#` on the
+  Radio Dongle) — *not* a resistor divider off USB 5 V. Two consequences: (1) CBUS3 asserts
+  only tens of ms after power-up, which is why the manager also **polls VBUS every ~500 ms**
+  (a missed rising edge still brings the console up within ½ s); (2) if CBUS3 is
+  mis-configured in the EEPROM, PA12 won't reach the STM32's V_IH and the console won't come
+  up — scope PA12 on plug to confirm. The pin uses an internal pull-down so it reads a
+  defined low when unplugged (no false "present"). PA12 is also the USB DP pin, used here
+  purely as a VBUS-sense GPIO (no USB device peripheral is enabled).
 - **Setting values can't contain `/`, space, or tab** — those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire

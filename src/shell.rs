@@ -3,12 +3,17 @@
 //! command tree**.
 //!
 //! Opt-in: an app calls [`serve`] (base only) or [`serve_ext`] (with its own
-//! commands + settings). A task async-reads the console's `BufferedUartRx`
-//! (interrupt-driven; while USB is present `vbus_task` holds STOP off so the RX
-//! interrupt fires — see docs/console.md), reassembles frames via
-//! [`FrameDecoder`], and handles two request types against one command tree:
+//! commands + settings), which just registers the command tree + settings + KV in a
+//! static — there is **no shell task**. The console [`manager`](crate::console::manager)
+//! owns the RX half and calls [`dispatch_frame`] for each decoded shell frame (see
+//! docs/console.md), which handles two request types against one command tree:
 //!   * `ShellCommand` → walk the tree → run the command's handler → `ShellResponse`;
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
+//!
+//! Dispatch runs inline on the console RX task: handlers must be short and their
+//! `ShellResponse`s go through the bounded `TX_CHANNEL`, so a handler that emits many
+//! frames while TX is backed up briefly stalls RX draining (and FOTA-frame routing).
+//! Fine for a request/response shell; not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest
 //! something execution won't accept.
@@ -388,7 +393,12 @@ async fn dispatch(
             };
             console::shell_response(cmd_id, outcome.result, out.as_str()).await;
             if outcome.reboot {
-                Timer::after_millis(150).await; // let the response flush before reset
+                // Let the response flush before reset. This runs on the console RX task,
+                // so a USB unplug within this 150 ms window cancels it (the manager tears
+                // the console down) and the reset is skipped — acceptable: a reboot issued
+                // and then immediately unplugged is a no-op, and the node reboots on demand
+                // only while a host is attached.
+                Timer::after_millis(150).await;
                 cortex_m::peripheral::SCB::sys_reset();
             }
         }

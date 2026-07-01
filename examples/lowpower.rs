@@ -10,8 +10,12 @@
 //!       target/thumbv6m-none-eabi/release/examples/lowpower
 //!   probe-rs reset --chip STM32L083CZTx      # detach so the core runs free
 //!
-//! Uses `no_shell`: nothing reads the console RX, nothing holds a WakeGuard, so
-//! this is the cleanest possible measurement of the idle floor.
+//! Uses `no_shell` (shell RX frames are ignored). Note the console `manager` is still
+//! spawned by `Board::take` and, while unplugged, polls VBUS every ~500 ms — that RTC
+//! poll is the active wake source here, and it re-applies the STOP power tuning
+//! (`PWR_CR.LPSDSR`/`ULP`, which embassy's wake path clears) on each wake. So this measures
+//! the realistic unplugged idle floor (~32 µA @3 V *including* the attached probe; ~12 µA
+//! true DUT), not a "nothing ever runs" floor.
 
 #![no_std]
 #![no_main]

@@ -13,7 +13,7 @@
 //!   framework; pairs with [`console`] and the `tower` host CLI.
 //! - [`led`] — non-blocking single-LED blink dispatcher (background + instant).
 //! - [`button`] — debounced button (click/hold), EXTI-gated or polled.
-//! - [`power`] — USB-presence-gated STOP via `WakeGuard`.
+//! - [`power`] — the SDK's USB-presence-gated STOP policy (implemented in `console`).
 //! - [`radio`] — SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
 //! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.

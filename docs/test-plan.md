@@ -315,8 +315,8 @@ tweak or fault injection (note them as separate experiments, don't leave the tre
 - Pairing window expiry with no joiner; joiner-ID collision (later add_peer overwrites).
 
 **Power / low-power**
-- USB present → STOP inhibited (`STOP inhibited (Sleep/WFI only)` line from `vbus_task`); console + EXTI live.
-- Unplugged → STOP reached when idle; UART flush-on-complete prevents truncated lines (regression: last log line not cut off).
+- USB present → console UART up, so the enabled USART holds embassy's STOP refcount → STOP inhibited (plain Sleep/WFI); console + EXTI live.
+- Unplugged → `console::manager` drops the UART → STOP reached when idle (~32 µA @3 V); a PA12 edge or the ~500 ms VBUS poll brings the console back on plug-in. UART flush-on-complete prevents truncated lines (regression: last log line not cut off).
 
 ---
 

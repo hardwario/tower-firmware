@@ -51,14 +51,14 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`); apps deep-merge their own commands + settings via `serve_ext` — see [`docs/console.md`](docs/console.md) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1–6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
-| `src/power.rs` | `vbus_task` — gates STOP on USB presence via a `WakeGuard` |
+| `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`) — values as raw scalars or postcard structs, CRC-framed, updated in place |
 | `src/strip.rs` | LED-strip effects over `ws2812`: solid/compound/gradient + rainbow, chase, breathe, scanner, sparkle; brightness 0–100 % with gamma |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing — see [`docs/radio.md`](docs/radio.md) |
 | `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + image-digest install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
-| `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns `vbus_task`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
+| `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
 Also in the workspace: `crates/bootloader/` (the embassy-boot A/B FOTA bootloader) and
 `tools/fota-sign/` (host signer, out-of-workspace). The shared wire-format crate
@@ -102,12 +102,14 @@ to fire the wake-up. So during an idle gap the MCU draws ~µA rather than
 running continuously (~hundreds of µA). The TMP112 is independently low-power:
 one-shot + shutdown keeps it at ~1 µA between conversions.
 
-While USB is connected the board keeps itself awake instead:
-[`Board::take`](src/board.rs) auto-spawns [`power::vbus_task`](src/power.rs),
-which holds a `WakeGuard` whenever VBUS (PA12) is high — dropping idle to plain
-Sleep (clocks live, so the console and EXTI stay responsive) rather than STOP.
-Unplug and it returns to STOP. Every app gets this for free, so a debug session
-never has to fight STOP latency or a clock-gated UART.
+While USB is connected the board keeps itself awake instead — but via the console
+rather than a separate task: [`Board::take`](src/board.rs) auto-spawns the USB-gated
+[`console::manager`](src/console.rs), which builds the console UART whenever VBUS (PA12)
+is high. On the STM32L0 an enabled USART holds embassy's STOP refcount, so idle drops to
+plain Sleep (clocks live, so the console and EXTI stay responsive) rather than STOP.
+Unplug and the manager **drops** the UART, releasing the refcount so the executor returns
+to STOP; a PA12 edge (or the manager's ~500 ms poll) brings the console back on plug-in.
+Every app gets this for free — see [`docs/console.md`](docs/console.md).
 
 Two settings in [`board::init`](src/board.rs) matter here:
 
