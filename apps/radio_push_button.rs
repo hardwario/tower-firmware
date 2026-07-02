@@ -6,7 +6,8 @@
 //!
 //! This is a starting skeleton — button events are handled and logged; the radio send is
 //! marked TODO. The `net_*` examples and `docs/radio.md` (the `net` node role) show the
-//! full pattern (`radio::init` from `b.radio_*`, pair with a gateway, then `send`).
+//! full pattern: build the radio with `Spirit1::new(b.radio_*)`, then `Net::new(radio, b.kv,
+//! NetConfig { .. })`, pair with a gateway, and `net.send(..)`.
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -38,7 +39,11 @@ async fn run(b: Board) {
     );
 
     // TODO: bring up the SPIRIT1 radio as a node and pair with the gateway. See the
-    // `net_*` examples + the `net` node role in `docs/radio.md`.
+    // `net_*` examples + the `net` node role in `docs/radio.md`, e.g.:
+    //   let radio = tower::radio::Spirit1::new(b.radio_spi, b.radio_sck, b.radio_mosi,
+    //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
+    //   let mut net = tower::radio::net::Net::new(radio, b.kv,
+    //                   NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await?;
     info!(target: "button", "radio_push_button skeleton — press the button");
 
     loop {

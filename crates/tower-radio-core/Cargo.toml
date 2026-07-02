@@ -1,0 +1,18 @@
+[package]
+name = "tower-radio-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "no_std pure-integer radio-timing core extracted from the HARDWARIO TOWER firmware SDK: the EU/US/FHSS duty token-bucket math (DutyGovernor refill/consume + residue carry), frame time-on-air, and the fixed FHSS hop permutation. Split out so the regulatory (FCC §15.247 / EU duty) arithmetic can be unit-tested on the host — the firmware itself is no_std and can't cargo test."
+
+# Leaf crate: NO dependency on embassy_time (the real-time `Instant` wrapper stays in
+# src/radio/duty.rs and delegates here). That keeps this crate host-buildable AND host-testable
+# with plain `cargo test`, exactly like crates/tower-kv. The firmware re-exports these types from
+# src/radio so no external API changes.
+[dependencies]
+
+[dev-dependencies]
+# Pure-Rust AES-128, used ONLY by the host CCM tests as the `AesBlock` block cipher (the device
+# uses the L0 hardware AES — the other `AesBlock` impl). A dev-dependency, so it never links into
+# the firmware or adds flash. Verifies the CCM core against RFC 3610 Packet Vector #1.
+aes = "0.8"

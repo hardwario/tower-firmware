@@ -140,11 +140,12 @@ Flashable programs come in two kinds:
 - **Examples** — each file in [`examples/`](examples) is a complete program that demonstrates
   one block. Add your own by dropping a `.rs` there — it's picked up automatically
   (`just examples`). Built as Cargo examples (`just build example <name>`).
-- **Applications** — ready-made TOWER IoT Kit product firmwares in [`apps/`](apps) (e.g.
-  `radio_dongle_gateway`, `radio_push_button`, `radio_climate_monitor`). These are full
-  applications, so they're Cargo binaries: list them with `just apps`, build with
-  `just build app <name>`. Add one by dropping `apps/<name>.rs` and a matching `[[bin]]` in
-  `Cargo.toml`.
+- **Applications** — TOWER IoT Kit **product skeletons** in [`apps/`](apps) (e.g.
+  `radio_dongle_gateway`, `radio_push_button`, `radio_climate_monitor`). Each boots and runs
+  its non-radio logic (button/measure/heartbeat over the console); the **radio wiring is
+  a TODO** you fill in following the `net_*` examples. They're Cargo binaries: list them with
+  `just apps`, build with `just build app <name>`. Add one by dropping `apps/<name>.rs` and a
+  matching `[[bin]]` in `Cargo.toml`.
 
 | Example | Demonstrates |
 |---|---|
@@ -155,6 +156,7 @@ Flashable programs come in two kinds:
 | `strip` | `ws2812` + `strip` — a scrolling rainbow on PA1 |
 | `storage` | `storage` — a key-value store in EEPROM: a raw boot counter + a postcard settings struct, surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
+| `lowpower` | Measure the SDK's STOP-mode idle floor — VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |
 
 The radio stack adds ~20 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`) — the
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
@@ -175,7 +177,7 @@ then hands you a [`Board`](src/board.rs) of ready resources. A whole app is just
 use tower::{app, board::Board};
 
 async fn run(mut b: Board) {
-    // b.spawner, b.tmp112 (shut down), b.led, b.button, b.accel_int, b.storage, b.strip_* …
+    // b.spawner, b.tmp112 (shut down), b.led, b.button, b.accel_int, b.kv (EEPROM), b.strip_* …
     loop {
         if let Ok(raw) = b.tmp112.oneshot().await {
             log::info!("{} raw", raw);
@@ -232,11 +234,12 @@ live in each `examples/*.rs` and are meant to be edited or copied. Common knobs:
   `b.tmp112.release()`.
 - **Strip** — `Strip::new(.., LedKind::Rgb | Rgbw, brightness)`; effects take a
   frame counter you advance.
-- **Storage** — wrap `b.storage` in `Kv::new(..)` for keyed values:
-  `kv.set_bytes(key, &x.to_le_bytes())` / `kv.get_bytes` for scalars, or
-  `kv.set(key, &value)` / `kv.get::<T>(key)` (postcard) for structs. Add a new
-  `u16` key to persist new data without disturbing existing keys. Or use
-  `b.storage.read/write(offset, ..)` for a raw byte layout.
+- **Storage** — `b.kv` is a shared `Nv` handle over the EEPROM; take your app's own
+  namespaced view with `let kv = b.kv.scope(NS_APP);` (a `Scoped`, keyed by a `u8`
+  local so it can't collide with the SDK's namespaces). Then `kv.set_bytes(local,
+  &x.to_le_bytes())` / `kv.get_bytes` for scalars, or `kv.set(local, &value)` /
+  `kv.get::<T>(local)` (postcard) for structs. Add a new `u8` local to persist new
+  data without disturbing existing keys. See `examples/storage.rs`.
 - **I2C speed / pull-ups** — `i2c_config.frequency`, `scl_pullup`/`sda_pullup`.
 - **Clock & low power** — all in [`board::init`](src/board.rs): sysclk, RTC
   source, `min_stop_pause`, debug-during-sleep.

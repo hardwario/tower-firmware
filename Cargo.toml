@@ -10,11 +10,11 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/bootloader", "crates/tower-kv"]
-# The FOTA host signing tool is a std host binary — excluded so workspace builds (which
-# target thumbv6m via .cargo/config.toml) don't try to cross-compile it. Run it with an
-# explicit host target: `just fota-sign ...` (see the justfile).
-exclude = ["tools/fota-sign"]
+members = ["crates/bootloader", "crates/tower-kv", "crates/tower-radio-core", "crates/fota-layout"]
+# The FOTA host signing tool and the HIL harness are std host crates — excluded so workspace
+# builds (which target thumbv6m via .cargo/config.toml) don't try to cross-compile them. Run them
+# with an explicit host target: `just fota-sign ...` / `just hil` (see the justfile).
+exclude = ["tools/fota-sign", "tools/hil"]
 resolver = "2"
 
 [dependencies]
@@ -89,6 +89,12 @@ postcard = { version = "1.0", default-features = false }
 # is the thin adapter that implements `tower_kv::Eeprom` over the L0 data EEPROM.
 tower-kv = { path = "crates/tower-kv" }
 
+# The pure integer radio-timing/compliance core (EU/US/FHSS duty token-bucket math, frame
+# time-on-air, the fixed FHSS hop permutation). Extracted like `tower-kv` so the regulatory
+# arithmetic can be unit-tested on the host (`just test`); the firmware re-exports it from
+# `src/radio` (the `Instant`-based `try_tx` wrapper stays in src/radio/duty.rs). no_std.
+tower-radio-core = { path = "crates/tower-radio-core" }
+
 # Shared console wire protocol (framing + CRC + message schema) + the shared FOTA `Manifest`
 # (`tower_protocol::fota`) so the host signer and the device cannot drift on the signed bytes.
 # Its own repo, pinned by tag (bump in lockstep with `tower-cli` on any wire change).
@@ -96,6 +102,11 @@ tower-kv = { path = "crates/tower-kv" }
 # (crates/bootloader enables `verify` → salty), keeping salty out of the duplicated A/B app
 # slots. The app uses only the crypto-free manifest pieces (`decode`/`supersedes`).
 tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
+
+# The FOTA flash partition table (offsets/sizes + embassy-boot swap guards), shared with the
+# standalone bootloader (crates/bootloader) so the two can never drift on the layout. no_std,
+# dependency-free leaf crate. Re-exported from `src/fota` — see crates/fota-layout.
+fota-layout = { path = "crates/fota-layout" }
 
 # SHA-256 for FOTA: the FlashSink folds a running hash over the staged image, and the
 # bootloader recomputes it before swap to check the staged image against the signed

@@ -171,7 +171,7 @@ impl Board {
             accel_int: ExtiInput::new(p.PB6, p.EXTI6, Pull::Down, Irqs),
             kv: Nv::install(Storage::new(Flash::new_blocking(p.FLASH))),
 
-            // SPIRIT1 radio resources. The driver (radio::init) builds the
+            // SPIRIT1 radio resources. The driver (`Spirit1::new`) builds the
             // blocking SPI and drives SDN/CS itself; here we just hand over the
             // raw peripherals and the EXTI-bound nIRQ line.
             radio_sdn: p.PB7,

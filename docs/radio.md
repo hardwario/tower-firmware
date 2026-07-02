@@ -142,7 +142,7 @@ transfer at a time. It is the layer most applications use directly:
 use tower::radio::net::{Net, NetConfig, SendResult};
 use tower::radio::config::Band;
 
-let mut net = Net::new(radio, Kv::new(b.storage),
+let mut net = Net::new(radio, b.kv,
     NetConfig { my_id: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0 }).await?;
 
 // Confirmed send: TX the DATA frame, open a 200 ms ACK window, retransmit the
@@ -151,7 +151,9 @@ match net.send(GW_ID, b"hello", /*confirmed=*/ true, /*reps=*/ 3).await {
     SendResult::Delivered    => {}                   // ACKed (or unconfirmed & sent)
     SendResult::NotDelivered => {}                   // no ACK after all reps
     SendResult::Busy | SendResult::DutyLimited => {} // CSMA / airtime budget
-    SendResult::Error(e)     => {}
+    SendResult::WrongMode    => {}                   // plain send while AFA/FHSS owns the channel
+    SendResult::NotSynced    => {}                   // FHSS: not locked to the hop schedule
+    SendResult::Error(e)     => { let _ = e; }       // bad length, radio fault, or NonceLocked (fail-closed)
 }
 
 // Receive: authenticate, apply the counter/replay rule, auto-ACK a confirmed

@@ -191,7 +191,7 @@ async fn run(b: Board) {
         let mut round: u32 = 0;
         loop {
             let t0 = Instant::now();
-            match net.bulk_fetch_into(GW_ID, &mut sink).await {
+            match net.bulk_fetch_into(GW_ID, 0, &mut sink).await {
                 Some(n) => {
                     let ms = t0.elapsed().as_millis().max(1);
                     let crc = sink.final_crc();

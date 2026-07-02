@@ -181,12 +181,15 @@ fota-sign *args:
 
 # === Tests & checks ===============================================================================
 
-# Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value codec)
-# and `fota-sign` (host<->device Ed25519 interop + the DEV_SEED<->VENDOR_PUBKEY pin). The shared
-# wire-protocol tests live in github.com/hardwario/tower-protocol. Runs `size-check` first.
+# Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
+# codec), `tower-radio-core` (the EU/US/FHSS duty token-bucket math + the fixed FHSS hop
+# permutation — the regulatory arithmetic), and `fota-sign` (host<->device Ed25519 interop + the
+# DEV_SEED<->VENDOR_PUBKEY pin). The shared wire-protocol tests live in
+# github.com/hardwario/tower-protocol. Runs `size-check` first.
 # Run the firmware's host-side unit tests.
 test *args: size-check
     cargo test -p tower-kv --target {{host}} {{args}}
+    cargo test -p tower-radio-core --target {{host}} {{args}}
     cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{args}}
 
 # The linker only hard-fails at the full 20 KB region (= brick on the SWD-less Dongle), so this trips
@@ -194,6 +197,37 @@ test *args: size-check
 # Guard the bootloader against silently eating its flash-region margin (tools/size_check.py).
 size-check:
     {{python}} tools/size_check.py {{boot_budget}}
+
+# postcard is NOT self-describing, so a tower-protocol tag mismatch silently mis-decodes the wire
+# (never a build error) — this makes it a hard failure. Local half of the CI `lockstep` job (which
+# also fetches tower-cli's pin); the golden rule in the repo CLAUDE.md. tools/protocol_pin_check.py.
+# Verify the tower-protocol git-tag pin is identical across all four in-repo manifests.
+check-protocol-pin:
+    {{python}} tools/protocol_pin_check.py
+
+
+# === Hardware-in-the-loop (HIL) ===================================================================
+#
+# The HIL harness (tools/hil, a std host crate excluded from the workspace like fota-sign) drives
+# the real bench: a TOWER Core Module (J-Link SWD + Nordic PPK2) + a TOWER Radio Dongle (USB). It
+# decodes the framed console natively (tower-protocol) and asserts on typed Log/Event + seq-gaps.
+# The bench roster lives in tools/hil/hil.toml (re-resolved against `tower devices` at startup).
+#
+# `--test-threads=1` is LOAD-BEARING: the serial ports are exclusive, so tests must not run
+# concurrently. HW-touching tests are `#[ignore]`d, so `--ignored` opts INTO the bench run; a plain
+# `cargo test` (which `cargo check`/CI would do) only COMPILES them.
+
+# Run the smoke + radio HIL groups on the bench (needs the Dongle + Core; NOT run in CI).
+hil *args:
+    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} -- --ignored --test-threads=1 {{args}}
+
+# Run the feature-gated power HIL group (needs the Core on J-Link + PPK2, FTDI UNPLUGGED).
+hil-power *args:
+    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 {{args}}
+
+# Run every HIL group (smoke + radio + power) on the fully-cabled bench.
+hil-full *args:
+    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 {{args}}
 
 
 # === Maintenance ==================================================================================

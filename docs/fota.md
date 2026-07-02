@@ -221,6 +221,18 @@ TOWER_PORT=<node-port> just logs          # → *** UPDATE CONFIRMED *** booted 
 Host signer (`tools/fota-sign`, a std host binary): `just fota-sign pubkey` /
 `just fota-sign sign --version N --in fw.bin --out fw.fmanifest`.
 
+**Dev vs. production keys.** By default fota-sign is built with the `dev-key` feature (on by
+default), which carries a **public DEV seed** so bring-up works out of the box — the images it
+signs are *not* production-trustworthy. Verification mirrors this: tower-protocol's own `dev-key`
+feature (default-on) supplies the matching DEV `VENDOR_PUBKEY`. To ship, build **both sides** with
+the dev key disabled:
+
+- **Signer:** `--no-default-features` (no built-in key → signing requires `--key <file>`, a real
+  32-byte Ed25519 seed as 32 raw bytes or 64 hex chars — keep it on an HSM export).
+- **Device/bootloader:** build tower-protocol with `default-features = false` and set
+  `TOWER_VENDOR_PUBKEY` to your key's 64-char hex (get it with `just fota-sign pubkey --hex --key
+  <file>`), so the loader's trust anchor is *your* key, not the DEV one.
+
 ---
 
 ## The signed manifest (`tower_protocol::fota`)
@@ -237,8 +249,10 @@ signed blob (116 B):  manifest (52) ‖ Ed25519 signature (64)
 - **`verify_signed(VENDOR_PUBKEY, signed) → Option<Manifest>`** (salty) runs in the
   **bootloader** (behind tower-protocol's `verify` feature — which the `tower` lib does *not*
   enable, so salty stays out of the app). `VENDOR_PUBKEY` lives in `tower_protocol::fota` (the
-  loader's trust anchor); **it's the DEV key** (`fota-sign pubkey`) — replace it + the host key
-  before shipping.
+  loader's trust anchor); with tower-protocol's default-on `dev-key` feature **it's the DEV key**
+  (`fota-sign pubkey`). For production, build tower-protocol with `default-features = false` +
+  `TOWER_VENDOR_PUBKEY=<hex>` and disable fota-sign's `dev-key` (pass `--key`) — see *Dev vs.
+  production keys* above.
 - **App-side policy is crypto-free:** `Manifest::decode` + `supersedes(installed)` (rollback
   floor, §6.2) + size-fits-ACTIVE. Rollback stays app-side because it's app EEPROM state
   (`KEY_INSTALLED_VERSION`); the bootloader gates *authenticity + integrity*.

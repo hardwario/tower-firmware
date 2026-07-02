@@ -2,8 +2,8 @@
 
 Embassy-based, `no_std` firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ,
 Cortex-M0+). The crate is a library; runnable programs come in two kinds — educational
-`examples/` (Cargo `--example`) and ready-made TOWER IoT Kit product firmwares in `apps/` (Cargo
-`[[bin]]`, `--bin`). Build/flash with `just`, which takes the kind then the name
+`examples/` (Cargo `--example`) and TOWER IoT Kit **product skeletons** in `apps/` (Cargo
+`[[bin]]`, `--bin`; each runs its non-radio logic, with the radio wiring left as a TODO). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`,
 `just logs`) over the UART bootloader via the
 `tower` CLI. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/fota.md`. Host tests:
@@ -12,18 +12,19 @@ Cortex-M0+). The crate is a library; runnable programs come in two kinds — edu
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep
 
 The console/FOTA wire format lives in a **separate repo**, github.com/hardwario/tower-protocol,
-pinned here **by git tag in three places**: `Cargo.toml`, `crates/bootloader/Cargo.toml`, and
-`tools/fota-sign/Cargo.toml` (the latter two add `features = ["verify"]`). The host CLI `tower-cli`
-pins the **same tag** — the two repos MUST move together, because postcard isn't self-describing
-(mismatched versions silently mis-decode).
+pinned here **by git tag in four places**: `Cargo.toml`, `crates/bootloader/Cargo.toml`,
+`crates/tower-kv/Cargo.toml`, and `tools/fota-sign/Cargo.toml` (the bootloader + fota-sign add
+`features = ["verify"]`). The host CLI `tower-cli` pins the **same tag** — the two repos MUST move
+together, because postcard isn't self-describing (mismatched versions silently mis-decode).
 
 **If you change the protocol, or need a newer tower-protocol:** make the change in the
 tower-protocol repo and follow its `CLAUDE.md` release runbook, then bump it here in the same
 change-set:
 
 ```sh
-# set tag = "vX.Y.Z" in Cargo.toml, crates/bootloader/Cargo.toml, tools/fota-sign/Cargo.toml
-cargo update -p tower-protocol
+# set tag = "vX.Y.Z" in Cargo.toml, crates/bootloader/Cargo.toml, crates/tower-kv/Cargo.toml,
+# tools/fota-sign/Cargo.toml
+cargo update -p tower-protocol   # covers the workspace: root, bootloader, tower-kv
 cargo update --manifest-path tools/fota-sign/Cargo.toml -p tower-protocol
 just test            # + build a FOTA example
 ```

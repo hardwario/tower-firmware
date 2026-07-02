@@ -2,18 +2,18 @@
 //! completion**, a **declarative settings framework**, and an **app-extensible
 //! command tree**.
 //!
-//! Opt-in: an app calls [`serve`] (base only) or [`serve_ext`] (with its own
-//! commands + settings), which just registers the command tree + settings + KV in a
-//! static — there is **no shell task**. The console [`manager`](crate::console::manager)
-//! owns the RX half and calls [`dispatch_frame`] for each decoded shell frame (see
-//! docs/console.md), which handles two request types against one command tree:
+//! Opt-in: an app calls [`serve`] (base only) or [`serve_ext`] (with its own commands +
+//! settings), which registers the command tree + settings + KV in a static and spawns a small
+//! **shell drain task**. The console [`manager`](crate::console::manager) owns the RX half and
+//! copies each decoded shell frame into its [`SHELL_RX`](crate::console::SHELL_RX) channel; the
+//! drain task dispatches from there (so the console depends only on `tower-protocol`, never
+//! calling up into the shell). It handles two request types against one command tree:
 //!   * `ShellCommand` → walk the tree → run the command's handler → `ShellResponse`;
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
 //!
-//! Dispatch runs inline on the console RX task: handlers must be short and their
-//! `ShellResponse`s go through the bounded `TX_CHANNEL`, so a handler that emits many
-//! frames while TX is backed up briefly stalls RX draining (and FOTA-frame routing).
-//! Fine for a request/response shell; not a place for long-running work.
+//! Because dispatch runs on its own task (not inline on the RX loop), a slow handler no longer
+//! stalls RX draining or FOTA-frame routing — but handlers should still be short, and their
+//! `ShellResponse`s go through the bounded `TX_CHANNEL`. Not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest
 //! something execution won't accept.
@@ -51,6 +51,9 @@ use crate::console;
 use crate::storage::{NS_SHELL, Nv, Scoped};
 
 const MAX_LINE: usize = 96;
+/// Max whitespace/`/`-separated tokens a command line may hold. An over-long line is rejected
+/// rather than having its tail silently dropped (see [`tokenize`] and the `ShellCommand` handler).
+const MAX_TOKENS: usize = 8;
 /// Shell-response build buffer. Must stay equal to `console::MAX_RESP` (the transport's
 /// per-message cap): `console::shell_response` re-clips to that, so if this grew larger the
 /// excess would be silently dropped there.
@@ -239,8 +242,9 @@ static BASE_ROOT: &[Entry] = &[
 
 // ---- tree walk (shared by dispatch + completion) ----------------------------
 
-/// Tokenize on `/` and whitespace (both separate path/command tokens).
-fn tokenize(line: &str) -> Vec<&str, 8> {
+/// Tokenize on `/` and whitespace (both separate path/command tokens). Capped at [`MAX_TOKENS`];
+/// the `ShellCommand` handler rejects a line with more tokens rather than reaching this cap.
+fn tokenize(line: &str) -> Vec<&str, MAX_TOKENS> {
     let mut v = Vec::new();
     for t in line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()) {
         let _ = v.push(t);
@@ -306,21 +310,43 @@ fn resolve(toks: &[&str], app: &'static [Entry]) -> Resolved {
 /// (the [`manager`](crate::console::manager)) via [`dispatch_frame`]. `None` until a
 /// shell is served — an app using `no_shell` leaves it unset, so incoming shell frames
 /// are simply ignored. `Nv` and the slices are `Copy`, so a `Cell` suffices.
+// The tuple-in-Cell-in-Mutex type reads as "complex" to clippy but is a plain shared-state cell;
+// suppress the lint here (annotation only — no logic change) so the CI clippy `-D warnings` gate
+// is green over intentional shared state.
+#[allow(clippy::type_complexity)]
 static SHELL_PARAMS: critical_section::Mutex<
     core::cell::Cell<Option<(Nv, &'static [Entry], &'static [Setting])>>,
 > = critical_section::Mutex::new(core::cell::Cell::new(None));
+
+/// Set once the shell drain task has been spawned, so repeated [`serve`]/[`serve_ext`] calls
+/// don't try to spawn it twice (which would exhaust the task's pool of 1). A critical-section
+/// cell rather than an atomic swap — Cortex-M0+ has no atomic read-modify-write.
+static SHELL_SPAWNED: critical_section::Mutex<core::cell::Cell<bool>> =
+    critical_section::Mutex::new(core::cell::Cell::new(false));
+
+/// Drain the console-owned [`SHELL_RX`](crate::console::SHELL_RX) channel and dispatch each
+/// shell frame. Running on its own task (rather than inline on the console RX loop) is what lets
+/// the console depend only on `tower-protocol` — it copies frames into the channel and never
+/// calls into the shell — and it keeps a slow handler from stalling RX draining / FOTA routing.
+#[embassy_executor::task]
+async fn shell_rx_task() {
+    loop {
+        let frame = crate::console::SHELL_RX.receive().await;
+        dispatch_frame(&frame).await;
+    }
+}
 
 /// Serve the shell with only the SDK base tree + settings.
 pub fn serve(spawner: Spawner, kv: Nv) {
     serve_ext(spawner, kv, &[], &[]);
 }
 
-/// Register the shell with the (dynamic, USB-gated) console so its RX router forwards
-/// `ShellCommand`/`ShellComplete` frames here. `app_commands`/`app_settings` add an app
-/// command tree / settings (pass `&[]` for none). No task is spawned — the console
-/// [`manager`](crate::console::manager) owns the UART RX and calls [`dispatch_frame`].
+/// Register the shell and spawn its drain task: the (dynamic, USB-gated) console routes
+/// `ShellCommand`/`ShellComplete` frames into [`SHELL_RX`](crate::console::SHELL_RX), and
+/// [`shell_rx_task`] dispatches them here. `app_commands`/`app_settings` add an app command tree
+/// / settings (pass `&[]` for none). The task is spawned at most once across repeated calls.
 pub fn serve_ext(
-    _spawner: Spawner,
+    spawner: Spawner,
     kv: Nv,
     app_commands: &'static [Entry],
     app_settings: &'static [Setting],
@@ -330,11 +356,21 @@ pub fn serve_ext(
             .borrow(cs)
             .set(Some((kv, app_commands, app_settings)));
     });
+    let first = critical_section::with(|cs| {
+        let c = SHELL_SPAWNED.borrow(cs);
+        let was = c.get();
+        c.set(true);
+        !was
+    });
+    if first {
+        // Spawn once; the guard above guarantees the pool (size 1) is free, so this can't fail.
+        spawner.spawn(shell_rx_task().unwrap());
+    }
 }
 
-/// Handle one decoded shell RX frame — called by the console's RX router. No-op if no
-/// shell was served (`no_shell` apps).
-pub(crate) async fn dispatch_frame(inner: &[u8]) {
+/// Handle one decoded shell RX frame — called by [`shell_rx_task`]. No-op if no shell was
+/// served (`no_shell` apps leave [`SHELL_PARAMS`] unset).
+async fn dispatch_frame(inner: &[u8]) {
     let Some((kv, app_commands, app_settings)) =
         critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
     else {
@@ -355,8 +391,26 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
     match mt {
         MsgType::ShellCommand => {
             if let Ok(cmd) = postcard::from_bytes::<ShellCommand>(payload) {
+                // Reject an over-long line instead of silently executing a truncated prefix. The
+                // wire allows ~240-byte lines but the shell buffer is MAX_LINE; clipping mid-value
+                // could store a truncated setting and still report success (silent corruption).
+                if cmd.line.len() > MAX_LINE {
+                    console::shell_response(cmd.cmd_id, R_BAD_ARG, "line too long").await;
+                    return;
+                }
+                // Likewise reject more tokens than `tokenize` holds, rather than dropping the tail.
+                if cmd
+                    .line
+                    .split(['/', ' ', '\t'])
+                    .filter(|s| !s.is_empty())
+                    .count()
+                    > MAX_TOKENS
+                {
+                    console::shell_response(cmd.cmd_id, R_BAD_ARG, "too many arguments").await;
+                    return;
+                }
                 let mut line = String::<MAX_LINE>::new();
-                let _ = line.push_str(&cmd.line[..clip_idx(cmd.line, MAX_LINE)]);
+                let _ = line.push_str(cmd.line); // fits: len <= MAX_LINE (checked above)
                 dispatch(kv, app, settings, cmd.cmd_id, line.as_str()).await;
             }
         }

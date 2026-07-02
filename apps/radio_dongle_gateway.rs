@@ -7,7 +7,8 @@
 //! This is a starting skeleton — it boots, sets up the SDK, and blinks a slow heartbeat
 //! so you can see it is alive. Wire up the radio gateway role where marked TODO; the
 //! `radio_gateway` / `net_*` examples and `docs/radio.md` (the `net` layer, gateway role)
-//! show the full pattern (`radio::init` from `b.radio_*`, then receive + forward).
+//! show the full pattern: build the radio with `Spirit1::new(b.radio_*)`, then
+//! `Net::new(radio, b.kv, NetConfig { .. })`, then `net.recv(..)` + forward to the console.
 //!
 //!   just build app radio_dongle_gateway
 //!   just run   app radio_dongle_gateway
@@ -36,9 +37,11 @@ async fn run(b: Board) {
 
     // TODO: bring up the SPIRIT1 radio as a gateway and forward received frames to the
     // host. See `examples/radio_gateway.rs` + the `net` gateway role in `docs/radio.md`:
-    //   let radio = tower::radio::init(b.spawner, b.radio_spi, b.radio_sck, b.radio_mosi,
-    //                                  b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq, ...);
-    //   loop { let frame = net.receive().await; /* forward to console */ }
+    //   let radio = tower::radio::Spirit1::new(b.radio_spi, b.radio_sck, b.radio_mosi,
+    //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
+    //   let mut net = tower::radio::net::Net::new(radio, b.kv,
+    //                   NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await?;
+    //   loop { if let Some(rx) = net.recv(timeout).await { /* forward rx.data() to console */ } }
     info!(target: "gateway", "radio_dongle_gateway skeleton — wire up the radio gateway role");
 
     loop {

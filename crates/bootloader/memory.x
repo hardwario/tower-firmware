@@ -1,5 +1,7 @@
 /* HARDWARIO TOWER Core Module bootloader — STM32L083CZ (192K flash / 20K RAM).
-   A/B FOTA partition table (docs/fota.md, kept in lockstep with src/fota/mod.rs). FLASH =
+   A/B FOTA partition table (docs/fota.md). These offsets/sizes MUST match the shared
+   `crates/fota-layout` crate (a linker file can't `use` it, so this is a hand-kept copy; the
+   Rust code on both sides pulls from fota-layout and its guards catch a numeric drift). FLASH =
    the BOOTLOADER region: the loader runs here, verifies a staged image (Ed25519 + a SHA-512
    image digest), swaps it in, and jumps to ACTIVE. All boundaries are 128 B-page aligned. The
    slots are NOT equal: embassy-boot's swap needs DFU larger than ACTIVE and STATE big enough for

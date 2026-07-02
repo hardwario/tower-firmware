@@ -1,0 +1,20 @@
+# HIL bench fixture (docs/test-plan.md §2). Serial names re-enumerate between sessions, so these
+# are only the STARTING guess — the harness re-resolves against the live `tower devices` roster at
+# startup (Bench::resolve) and fails fast if a board is missing. Update these to match the current
+# session's ports (or fix cabling) when the roster message fires.
+
+# TOWER Core Module — wired to a SEGGER J-Link (SWD flash via probe-rs) and a Nordic PPK2
+# (scriptable current supply/measure). The power tests flash it over SWD and cycle the PPK2.
+[core]
+serial = "/dev/cu.usbserial-2120"
+
+# TOWER Radio Dongle — USB-powered, flashed over the UART bootloader with `tower flash`. The
+# smoke + radio-peer tests use this board (it can hold a KAT example or the gateway role).
+[dongle]
+serial = "/dev/cu.usbserial-2140"
+
+# Nordic PPK2 source-measure. Measure at the 1.8 V knee, NOT 3 V: the Core's regulator/brown-out
+# knee sits near ~2 V, so a 3 V reading can read low while 1.8 V is the honest deep-sleep floor
+# (one of the three confounders the sidecar encodes — see ppk2d.py).
+[ppk2]
+supply_mv = 1800

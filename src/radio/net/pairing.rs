@@ -43,6 +43,9 @@ impl Net {
     /// `add_peer(id, key)` — or `None` on timeout / lost confirm. The host does
     /// NOT assign the ID. Pairs the first joiner only.
     pub async fn open_pairing(&mut self, timeout: Duration, key: &[u8; 16]) -> Option<u32> {
+        if self.tx_locked {
+            return None; // fail closed (nonce safety): pairing replies consume TX counters
+        }
         let deadline = Instant::now().checked_add(timeout)?;
         let mut buf = [0u8; 24];
         while Instant::now() < deadline {
@@ -92,6 +95,9 @@ impl Net {
     /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
     /// and returns the key on commit (or `None` on timeout).
     pub async fn join(&mut self, my_id: u32, timeout: Duration) -> Option<[u8; 16]> {
+        if self.tx_locked {
+            return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
+        }
         let deadline = Instant::now().checked_add(timeout)?;
         while Instant::now() < deadline {
             let req_hdr = Header {

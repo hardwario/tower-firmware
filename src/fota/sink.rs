@@ -89,7 +89,10 @@ impl<'f, 'd> FlashSink<'f, 'd> {
 }
 
 impl BulkSink for FlashSink<'_, '_> {
-    async fn begin(&mut self, total_len: usize) -> bool {
+    // Standalone one-shot staging (examples/fota_stage.rs): always a fresh transfer, so
+    // `resume_from` is ignored — it erases + re-inits every time. (The resumable path is
+    // `Net::bulk_fetch_to_flash` / `NvFlashSink`.)
+    async fn begin(&mut self, total_len: usize, _resume_from: usize) -> bool {
         let total = total_len as u32;
         if total > self.stage.size() {
             error!(target: "fota", "image {} B exceeds DFU slot {} B", total, self.stage.size());

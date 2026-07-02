@@ -15,7 +15,7 @@ use heapless::String;
 use log::{debug, error, info, trace, warn};
 use tower::{app, board::Board, console, println};
 
-async fn run(b: Board) {
+async fn run(_b: Board) {
     // The shell is served automatically by `app!` (Responses/Command panes), over the shared KV.
     info!("console_full ready — drive the shell, e.g. `/system identity print`");
 

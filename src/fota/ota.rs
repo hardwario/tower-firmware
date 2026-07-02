@@ -25,7 +25,7 @@
 
 use super::{
     ACTIVE_SIZE, DFU_OFFSET, DFU_SIZE, KEY_DOWNLOAD_HWM, KEY_DOWNLOAD_IDENT, KEY_INSTALLED_VERSION,
-    MANIFEST_LEN, MANIFEST_OFFSET, MANIFEST_SIZE, Manifest, SIGNED_LEN, Stage,
+    KEY_PENDING_VERSION, MANIFEST_LEN, MANIFEST_OFFSET, MANIFEST_SIZE, Manifest, SIGNED_LEN, Stage,
 };
 use crate::radio::net::Net;
 use crate::storage::Nv;
@@ -54,6 +54,10 @@ pub enum PullOutcome {
     Malformed,
     /// `version <= installed` — refuse the rollback (the cheap app-side policy gate).
     NotNewer { version: u32, installed: u32 },
+    /// The rollback floor ([`KEY_INSTALLED_VERSION`]) could not be read (EEPROM fault / corrupt
+    /// record). Refuse to install — **fail closed** — rather than assume floor 0 and risk
+    /// accepting a downgrade to an older, validly-signed, vulnerable image.
+    FloorUnavailable,
     /// The declared image size won't fit the ACTIVE slot.
     TooLarge { size: u32 },
     /// The manifest couldn't be stashed (a flash fault after a complete download).
@@ -64,8 +68,10 @@ pub enum PullOutcome {
     /// where it stopped, without re-downloading or re-erasing.
     InProgress { staged: u32, total: u32 },
     /// The full image is in DFU and the signed manifest is stashed — reset and the bootloader
-    /// will verify (Ed25519 + image digest) and swap. The caller persists `manifest.version` after a
-    /// confirmed boot with [`set_installed_version`].
+    /// will verify (Ed25519 + image digest) and swap. The staged image's `manifest.version` is
+    /// persisted as the *pending* version; after the swapped image confirms, promote it to the
+    /// rollback floor with [`promote_pending_version`] (do **not** persist a compile-time constant
+    /// — that can mismatch the signed `--version` and cause an endless reinstall loop).
     Staged { manifest: Manifest },
 }
 
@@ -76,6 +82,9 @@ impl core::fmt::Display for PullOutcome {
             PullOutcome::Malformed => f.write_str("manifest malformed"),
             PullOutcome::NotNewer { version, installed } => {
                 write!(f, "v{version} not newer than installed v{installed}")
+            }
+            PullOutcome::FloorUnavailable => {
+                f.write_str("rollback floor unreadable — refusing to install (fail closed)")
             }
             PullOutcome::TooLarge { size } => write!(f, "image too large ({size} B)"),
             PullOutcome::ImageFailed => f.write_str("manifest stash failed after download"),
@@ -98,7 +107,15 @@ impl core::fmt::Display for PullOutcome {
 /// needed — **call again to resume**. Touches flash only via the DFU + MANIFEST regions + the
 /// EEPROM resume keys; the caller still owns `net`.
 pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
-    let installed = installed_version(net.kv());
+    // Read the rollback floor, distinguishing an absent key (factory floor 0) from an EEPROM
+    // *fault* — on a fault we fail closed rather than assume 0 and accept a downgrade (C13).
+    let installed = match read_installed_floor(net.kv()) {
+        Ok(v) => v,
+        Err(()) => {
+            diag!("rollback floor unreadable (EEPROM fault) — refusing to install (fail closed)");
+            return PullOutcome::FloorUnavailable;
+        }
+    };
     diag!("start: installed=v{installed}, fetching manifest");
 
     // 1) Pull the signed manifest (116 B) — kept verbatim for the bootloader to verify.
@@ -150,6 +167,11 @@ pub async fn pull_update(net: &mut Net, gateway: u32) -> PullOutcome {
     if !stash_manifest(net, &signed) {
         return PullOutcome::ImageFailed;
     }
+    // Record the staged image's manifest version so the confirming image can promote it to the
+    // rollback floor (C5). After the swap+reset the running image can't see the manifest, and its
+    // own compile-time VERSION may differ from the signed `--version`; persisting it here breaks
+    // the reinstall loop that arose from setting the floor to a mismatched compile-time constant.
+    let _ = net.kv().set_bytes(KEY_PENDING_VERSION, &manifest.version.to_le_bytes());
     diag!("staged — reset to let the bootloader verify + swap");
     PullOutcome::Staged { manifest }
 }
@@ -194,14 +216,48 @@ fn stash_manifest(net: &mut Net, signed: &[u8; SIGNED_LEN]) -> bool {
 
 /// The installed firmware version from EEPROM (`KEY_INSTALLED_VERSION`, u32 LE), or `0` if
 /// never written — the rollback floor (an image must be strictly newer than this to install).
+/// Returns `0` for both an absent key and a read fault; for the install *decision* use the
+/// fail-closed [`read_installed_floor`] instead, which distinguishes the two.
 ///
 /// Takes the shared [`Nv`] handle, so it is callable at **confirm time** — pass `b.kv` in the
 /// boot-state path before the radio `Net` exists; while transceiving, pass `net.kv()`.
 pub fn installed_version(kv: Nv) -> u32 {
+    read_installed_floor(kv).unwrap_or(0)
+}
+
+/// The rollback floor for the install decision, distinguishing a genuinely *absent* key
+/// (`Ok(0)` — a factory device that has never completed an OTA) from an EEPROM read *fault* or
+/// corrupt record (`Err(())` — refuse to install, fail closed, rather than assume `0` and accept
+/// a downgrade to an older validly-signed image). See [`PullOutcome::FloorUnavailable`].
+fn read_installed_floor(kv: Nv) -> Result<u32, ()> {
     let mut buf = [0u8; 4];
     match kv.get_bytes(KEY_INSTALLED_VERSION, &mut buf) {
-        Ok(Some(n)) if n >= 4 => u32::from_le_bytes(buf),
-        _ => 0,
+        Ok(Some(n)) if n >= 4 => Ok(u32::from_le_bytes(buf)),
+        Ok(Some(_)) => Err(()), // short/corrupt record — don't trust it as a floor
+        Ok(None) => Ok(0),      // never written — genuine factory floor 0
+        Err(_) => Err(()),      // EEPROM fault — fail closed
+    }
+}
+
+/// Promote the *pending* staged version (recorded by [`pull_update`] at stash time) to the
+/// installed rollback floor, then clear it. Call this **after** a swapped image has booted and
+/// self-confirmed, instead of persisting the image's compile-time constant: the pending value is
+/// the actual signed manifest version of the running image, so the floor can't drift below what
+/// was advertised (which caused an endless reinstall loop). Returns the resulting floor. If no
+/// pending version is recorded (an ordinary boot, not a post-OTA confirm) the floor is unchanged.
+pub fn promote_pending_version(kv: Nv) -> u32 {
+    let mut buf = [0u8; 4];
+    let pending = match kv.get_bytes(KEY_PENDING_VERSION, &mut buf) {
+        Ok(Some(n)) if n >= 4 => Some(u32::from_le_bytes(buf)),
+        _ => None,
+    };
+    match pending {
+        Some(v) => {
+            let _ = kv.set_bytes(KEY_INSTALLED_VERSION, &v.to_le_bytes());
+            let _ = kv.set_bytes(KEY_PENDING_VERSION, &0u32.to_le_bytes());
+            v
+        }
+        None => installed_version(kv),
     }
 }
 

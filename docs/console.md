@@ -228,8 +228,11 @@ No sequence gap is reported, because dropped messages never consumed a `seq`.
 ## Events
 
 Structured, **self-describing** key=value records — the host renders any app's events
-with no shared per-app schema. `event()` is `async` (it applies backpressure and is
-**never dropped**), so call it from async code.
+with no shared per-app schema. `event()` is `async`: while USB is present it applies
+**backpressure** (awaits a free queue slot, so a burst is never dropped); while USB is
+unplugged there is no writer to drain the queue, so it falls back to **drop-newest with a
+count** (surfaced later as the `Dropped` marker) rather than parking the low-power executor
+forever on a full queue. Call it from async code.
 
 ```rust
 use tower::console;

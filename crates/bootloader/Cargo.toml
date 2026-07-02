@@ -35,3 +35,8 @@ tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v
 salty = "0.3"
 # NorFlash/ReadNorFlash traits for the raw manifest + DFU reads.
 embedded-storage = "0.3"
+# The FOTA flash partition table (MANIFEST/DFU/ACTIVE offsets + sizes), shared with the `tower`
+# lib (src/fota) so the loader and the app can never drift on the layout — a mismatch fails BOTH
+# builds via this crate's compile-time guards. Previously these offsets were hand-duplicated here
+# (with no guards). no_std, dependency-free leaf crate.
+fota-layout = { path = "../fota-layout" }

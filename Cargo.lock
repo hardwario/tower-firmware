@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -109,6 +120,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "cipher"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
+dependencies = [
+ "crypto-common",
+ "inout",
 ]
 
 [[package]]
@@ -590,6 +611,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fota-layout"
+version = "0.1.0"
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -668,6 +693,15 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "inout"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
+dependencies = [
+ "generic-array",
+]
 
 [[package]]
 name = "lazy_static"
@@ -1073,6 +1107,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-io-async 0.7.0",
  "embedded-storage",
+ "fota-layout",
  "heapless",
  "log",
  "postcard",
@@ -1080,6 +1115,7 @@ dependencies = [
  "sha2",
  "tower-kv",
  "tower-protocol",
+ "tower-radio-core",
 ]
 
 [[package]]
@@ -1093,6 +1129,7 @@ dependencies = [
  "embassy-stm32",
  "embassy-sync",
  "embedded-storage",
+ "fota-layout",
  "salty",
  "tower-protocol",
 ]
@@ -1114,6 +1151,13 @@ dependencies = [
  "postcard",
  "salty",
  "serde",
+]
+
+[[package]]
+name = "tower-radio-core"
+version = "0.1.0"
+dependencies = [
+ "aes",
 ]
 
 [[package]]

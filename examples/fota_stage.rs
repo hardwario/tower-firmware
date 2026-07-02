@@ -69,7 +69,8 @@ async fn run(b: Board) {
             // --- stage: stream the generated image through FlashSink into DFU ---
             let stage = Stage::new(&mut flash, DFU_OFFSET, DFU_SIZE);
             let mut sink = FlashSink::new(stage);
-            if !sink.begin(size).await {
+            if !sink.begin(size, 0).await {
+                // 0 = fresh transfer (this standalone demo never resumes)
                 error!(target: "fota", "{} B: begin refused (slot {} B)", size, DFU_SIZE);
                 all_ok = false;
                 continue;

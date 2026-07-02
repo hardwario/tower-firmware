@@ -6,37 +6,27 @@
 //! (`DutyLimited`). This approximates a rolling-hour 1 % limit (cap = 1 % of an
 //! hour = 36 000 ms) and counts **all** TX — data, ACK, bulk, retransmits, JOIN.
 //! The gateway is governed too (regulatory, independent of mains power).
+//!
+//! The **pure integer** math (refill/consume with the sub-ms residue carry, the frame
+//! time-on-air, and the EU/US/FHSS constants) lives in the host-testable
+//! [`tower_radio_core`] leaf crate; this module keeps only the thin `embassy_time::Instant`
+//! real-time wrapper ([`DutyGovernor::try_tx`]) on top of it. Splitting the arithmetic out
+//! lets `just test` unit-test the regulatory budget on the host (the firmware itself is
+//! no_std and can't `cargo test`) — with **zero** behavioural change on the target.
 
 use embassy_time::Instant;
 
-/// Nominal over-the-air bit rate.
-pub const BITRATE: u32 = 19_200;
-/// EU 1 % duty over a rolling hour → 36 000 ms of airtime budget.
-pub const EU_CAP_MS: u32 = 36_000;
-/// EU duty in parts-per-thousand (10‰ = 1 %).
-pub const EU_PERMIL: u32 = 10;
-/// FHSS per-channel airtime window (FCC §15.247 measures occupancy over 20 s).
-pub const FHSS_WINDOW_MS: u32 = 20_000;
-/// FHSS per-channel burst budget (token-bucket cap). With [`FHSS_PERMIL`], the
-/// worst-case spend in any 20 s is `cap + permil·20 s = 100 + 200 = 300 ms`.
-pub const FHSS_DWELL_BURST_MS: u32 = 100;
-/// FHSS per-channel sustained refill: 1 % (200 ms / 20 s). See [`FHSS_DWELL_BURST_MS`].
-pub const FHSS_PERMIL: u32 = 10;
+// Re-export the pure core so the rest of the firmware keeps saying `duty::frame_toa_ms`,
+// `duty::BITRATE`, etc. — no external API change from the extraction.
+pub use tower_radio_core::{
+    BITRATE, EU_CAP_MS, EU_PERMIL, FHSS_DWELL_BURST_MS, FHSS_PERMIL, FHSS_WINDOW_MS, frame_toa_ms,
+};
 
-/// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
-/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — docs/radio.md. Rounded
-/// up so the regulatory budget is never under-counted.
-#[must_use]
-pub fn frame_toa_ms(frame_len: usize) -> u32 {
-    let bytes = 4 + 4 + 1 + frame_len as u32 + 2;
-    (bytes * 8 * 1000).div_ceil(BITRATE)
-}
-
-/// Token-bucket duty governor.
+/// Token-bucket duty governor: the host-testable [`tower_radio_core::DutyGovernor`] core plus a
+/// `last`-[`Instant`] so [`try_tx`](Self::try_tx) can refill from real elapsed time. All the
+/// integer accounting (cap, permil, residue carry) is in the core; this only measures wall-clock.
 pub struct DutyGovernor {
-    budget_ms: u32,
-    cap_ms: u32,
-    permil: u32,
+    core: tower_radio_core::DutyGovernor,
     last: Instant,
 }
 
@@ -44,9 +34,7 @@ impl DutyGovernor {
     /// New governor, bucket full, with the given cap and duty (parts-per-thousand).
     pub fn new(cap_ms: u32, permil: u32) -> Self {
         Self {
-            budget_ms: cap_ms,
-            cap_ms,
-            permil,
+            core: tower_radio_core::DutyGovernor::new(cap_ms, permil),
             last: Instant::now(),
         }
     }
@@ -79,31 +67,25 @@ impl DutyGovernor {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last).as_millis() as u32;
         self.last = now;
-        self.refill_ms(elapsed);
-        self.try_consume(toa_ms)
+        self.core.refill_ms(elapsed);
+        self.core.try_consume(toa_ms)
     }
 
     /// Remaining airtime budget (ms).
     #[must_use]
     pub fn budget_ms(&self) -> u32 {
-        self.budget_ms
+        self.core.budget_ms()
     }
 
-    // --- testable core (no real-time dependency) ---
-
-    /// Add the airtime earned over `elapsed_ms` of wall-clock (capped).
+    /// Add the airtime earned over `elapsed_ms` of wall-clock (capped) — the pure-core refill,
+    /// exposed for callers that meter their own elapsed time. See the field docs on the core's
+    /// residue carry (many short intervals sum exactly to one long interval).
     pub fn refill_ms(&mut self, elapsed_ms: u32) {
-        let refill = elapsed_ms.saturating_mul(self.permil) / 1000;
-        self.budget_ms = self.budget_ms.saturating_add(refill).min(self.cap_ms);
+        self.core.refill_ms(elapsed_ms);
     }
 
     /// Consume `toa_ms` if available; returns whether it was allowed.
     pub fn try_consume(&mut self, toa_ms: u32) -> bool {
-        if self.budget_ms >= toa_ms {
-            self.budget_ms -= toa_ms;
-            true
-        } else {
-            false
-        }
+        self.core.try_consume(toa_ms)
     }
 }

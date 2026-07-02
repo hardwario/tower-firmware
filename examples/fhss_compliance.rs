@@ -65,7 +65,9 @@ async fn run(b: Board) {
 
     let mut visited = [false; FHSS_N as usize];
     for _ in 0..SLOTS {
-        let s = net.fhss_master_tick().await;
+        let Some(s) = net.fhss_master_tick().await else {
+            continue; // master mode not active (shouldn't happen here — we enabled it above)
+        };
         if (s.channel as usize) < FHSS_N as usize {
             visited[s.channel as usize] = true;
         }

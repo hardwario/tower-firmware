@@ -1,0 +1,13 @@
+[package]
+name = "fota-layout"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "no_std leaf crate defining the HARDWARIO TOWER FOTA flash partition table (BOOTLOADER/STATE/MANIFEST/ACTIVE/DFU offsets + sizes) with compile-time embassy-boot swap guards. Shared by the tower lib (src/fota) and the standalone bootloader so the two can never drift on the layout — a mismatch fails BOTH builds. See docs/fota.md."
+
+# Dependency-free leaf crate on purpose: the two consumers (the `tower` lib and the standalone
+# bootloader binary, which cannot depend on `tower`) both pull these consts from here, so the
+# layout is defined ONCE. It does NOT depend on tower-protocol — the one guard that needs
+# `SIGNED_LEN` (MANIFEST fits a signed manifest) stays in src/fota/mod.rs, which already has that
+# dep, so this crate does not add a fifth tower-protocol pin to the lockstep set.
+[dependencies]

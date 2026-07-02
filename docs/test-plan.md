@@ -35,27 +35,36 @@ section for a focused regression. Companion guides: `docs/console.md`, `docs/rad
 |---|---|
 | MCU | STM32L083CZ (Cortex-M0+), chip id `0x447` |
 | Target | `thumbv6m-none-eabi` |
-| Flash transport | STM32 UART bootloader via `tower flash` (jolt engine). ~30 s per image. |
+| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (jolt engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link) — doesn't need the FTDI, so the Core can be measured with USB unplugged. |
 | Console | USART1 PA9/PA10, 115200 8N1, COBS+CRC32+postcard framed (`tower-protocol`) |
 | Radio | SPIRIT1 / SPSGRF, SPI1 PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 |
 | Reset/boot | NRST/BOOT0 on FTDI **aux** lines (not DTR/RTS) → opening a port does **not** reset |
 
-**Current boards (re-confirm every session — names re-enumerate):**
+**The bench (re-confirm every session — names re-enumerate):**
 
-| Port | Identity | I2C scan | Notes |
+| Port | Board | Instruments | Role |
 |---|---|---|---|
-| `/dev/cu.usbserial-120` | bare Core Module, radio-capable | `0x64` only | no TMP112/accel module |
-| `/dev/cu.usbserial-140` | bare Core Module, radio-capable | `0x64` only | no TMP112/accel module |
+| `/dev/cu.usbserial-2120` | **TOWER Core Module** | SEGGER **J-Link** (SWD flash via `probe-rs`) + Nordic **PPK2** (scriptable current supply/measure) | radio NODE; the **power** target (STOP-floor measurements) |
+| `/dev/cu.usbserial-2140` | **TOWER Radio Dongle** | USB-powered (VBUS); flashed via `tower flash` | radio GATEWAY; the **smoke** target (one-shot KAT verdicts) |
 
-Confirm ports with `tower devices`; confirm I2C population by flashing `i2cscan`. With no sensor
-module attached, **`thermometer` and `accelerometer` will report a sensor-absent error** — that
-is the *expected* result on these boards, not a firmware fault. If a sensor module is attached,
-`i2cscan` will additionally show `0x49` (TMP112) and `0x19` (LIS2DH12).
+Confirm ports with `tower devices`; the automated harness (`tools/hil`, run via `just hil` /
+`just hil-power` / `just hil-full`) reads this roster from `tools/hil/hil.toml` and re-resolves it
+at startup, failing fast if a board is absent. Confirm I2C population by flashing `i2cscan`: with
+no sensor module attached, **`thermometer` and `accelerometer` report a sensor-absent error** —
+expected on a bare Core, not a fault. A sensor module additionally shows `0x49` (TMP112) and `0x19`
+(LIS2DH12).
 
-Pick a default radio role assignment for two-board tests (either board works for either role):
+Default radio role assignment for two-board tests:
 
-- **NODE / sender / peer-a** → `/dev/cu.usbserial-120`
-- **GATEWAY / receiver / peer-b** → `/dev/cu.usbserial-140`
+- **NODE / sender / peer-a** → `/dev/cu.usbserial-2120` (Core Module)
+- **GATEWAY / receiver / peer-b** → `/dev/cu.usbserial-2140` (Radio Dongle)
+
+> **Power measurements need the FTDI UNPLUGGED from the Core.** USB/VBUS present keeps the SDK's
+> console alive, which inhibits STOP by design — so a plugged-in board never reaches the µA floor.
+> The PPK2 supplies the Core at **1.8 V** (the regulator/brown-out knee, not 3 V) after a
+> power-cycle (clears the ~200 µA debug-domain residual a probe leaves); readings are never sampled
+> mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). The `just hil-power`
+> test enforces all three, and skips with an "unplug the FTDI" message if the console still answers.
 
 ## 3. Capture methodology (read this before running)
 

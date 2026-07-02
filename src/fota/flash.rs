@@ -78,6 +78,29 @@ impl<'f, 'd> Stage<'f, 'd> {
             .map_err(Error::Flash)
     }
 
+    /// Program `bytes` at `rel_off`, then read them back and confirm they landed — guarding
+    /// against a *silent* programming failure. The embassy-stm32 L0 flash driver checks
+    /// WRPERR/PGAERR/SIZERR but not the L0-specific NOTZEROERR/FWWERR, so programming a
+    /// non-erased word can be aborted by hardware yet still return `Ok`; a resume that
+    /// re-programs over stale/torn data would otherwise keep garbage undetected until the
+    /// bootloader's whole-image hash fails (forcing a full re-download). Returns
+    /// [`Error::Verify`] on a read-back mismatch. Verifies in ≤64-byte pieces to bound the
+    /// stack buffer.
+    pub fn program_verified(&mut self, rel_off: u32, bytes: &[u8]) -> Result<(), Error> {
+        self.program(rel_off, bytes)?;
+        let mut back = [0u8; 64];
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let n = (bytes.len() - done).min(back.len());
+            self.read(rel_off + done as u32, &mut back[..n])?;
+            if back[..n] != bytes[done..done + n] {
+                return Err(Error::Verify);
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Read `buf.len()` bytes from `rel_off` within the slot (a memory-mapped copy).
     pub fn read(&mut self, rel_off: u32, buf: &mut [u8]) -> Result<(), Error> {
         if rel_off + buf.len() as u32 > self.size {

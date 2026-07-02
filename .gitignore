@@ -1,4 +1,8 @@
 .DS_Store
 /target
-# tools/fota-sign is an out-of-workspace std binary with its own build dir.
+# Out-of-workspace std tools with their own build dirs (not covered by /target).
 /tools/fota-sign/target
+/tools/hil/target
+# Python sidecar bytecode (tools/hil/ppk2d.py).
+__pycache__/
+*.pyc

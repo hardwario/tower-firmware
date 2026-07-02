@@ -5,16 +5,21 @@
 //! clock (an [`Instant`] epoch) and, each 300 ms slot, retunes to that slot's
 //! pseudo-random channel and broadcasts a **Beacon** (slot index), then listens.
 //! A node blind-rendezvous: it parks on a fixed channel ([`FHSS_RENDEZVOUS_CH`]),
-//! and since the per-cycle permutation visits every channel exactly once, the
+//! and since the permutation visits every channel exactly once per cycle, the
 //! gateway sweeps onto the rendezvous channel within ≤ 1 cycle — guaranteed. From
 //! the beacon's slot index + arrival time the node reconstructs the gateway's
 //! epoch, then hops in lockstep, re-aligning on each beacon.
 //!
 //! **Compliance (sized for margin, not the limit):** 80 channels × 300 ms slot →
-//! cycle 24 s > 20 s, so any channel is *tuned* at most once per 20 s window =
-//! ≤ 0.3 s (25 % under the 0.4 s/20 s limit, strict reading) — occupancy is bounded
-//! *by the hop schedule*, not a governor; per-channel airtime is recorded only for
-//! the compliance histogram. GUARD = 10 ms
+//! cycle 24 s > 20 s. The hop permutation is **fixed across cycles** (see
+//! [`hop_channel`]), so a channel recurs at the *same* slot offset every cycle and its
+//! successive visits are exactly 24 s apart — strictly more than the 20 s averaging
+//! window — so it is *tuned* at most once per window = ≤ 0.3 s (25 % under the
+//! 0.4 s/20 s limit, strict reading). This spacing is the load-bearing invariant: a
+//! *per-cycle-reshuffled* schedule would NOT bound cross-boundary spacing and could
+//! double a channel's occupancy inside one window (the defect this design fixes).
+//! Occupancy is thus bounded *by the hop schedule*, not a governor; per-channel airtime
+//! is still recorded for the compliance histogram / diagnostics. GUARD = 10 ms
 //! (measured retune+lock was 762 µs; floor dominates) ≫ the ~30 µs/slot clock drift.
 //! (Exact §15.247 numbers are FCC-KDB config to **verify** before any product claim.)
 
@@ -146,31 +151,27 @@ pub struct NodeSlot {
 }
 
 /// Channel for slot index `i` (0..[`FHSS_N`)) of `cycle` under `seed`: a seeded
-/// Fisher-Yates shuffle of `0..FHSS_N` → a perfect permutation each cycle (every
-/// channel exactly once ⇒ equal use, by construction), deterministic at both ends.
+/// Fisher-Yates shuffle of `0..FHSS_N` → a perfect permutation (every channel exactly
+/// once ⇒ equal use, by construction), deterministic at both ends.
+///
+/// The permutation is **fixed across cycles** — it is seeded from `seed` alone and does
+/// **not** mix in `cycle`. This is a §15.247 compliance requirement, not a stylistic
+/// choice: a fresh per-cycle shuffle gives *no* minimum spacing across a cycle boundary,
+/// so a channel could fall in the last slot of one cycle and the first slot of the next
+/// (~300 ms apart) and thus be occupied twice inside a single 20 s averaging window,
+/// exceeding the 0.4 s/20 s per-channel limit. With one fixed permutation every channel
+/// recurs at the *same* slot offset each cycle — exactly one cycle
+/// (`FHSS_N · FHSS_SLOT_MS` = 24 s > 20 s) apart — so it is tuned at most once per window
+/// by construction. `cycle` is kept in the signature (both ends still pass it) for
+/// call-site symmetry with the slot decomposition and to leave room for a future
+/// schedule that re-keys per cycle *without* reintroducing the adjacency hazard.
 #[must_use]
 pub fn hop_channel(seed: u32, cycle: u32, i: u8) -> u8 {
-    let mut perm = [0u8; FHSS_N as usize];
-    let mut k = 0usize;
-    while k < FHSS_N as usize {
-        perm[k] = k as u8;
-        k += 1;
-    }
-    // xorshift32 seeded from (seed, cycle) — same idiom as net::backoff_ms.
-    let mut x = seed ^ cycle.wrapping_mul(0x9E37_79B9);
-    if x == 0 {
-        x = 0xA5A5_A5A5;
-    }
-    let mut j = FHSS_N as usize - 1;
-    while j >= 1 {
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        let r = (x as usize) % (j + 1);
-        perm.swap(j, r);
-        j -= 1;
-    }
-    perm[i as usize]
+    // The permutation math lives in the host-testable `tower_radio_core` leaf crate (generic
+    // over the channel count), where the perfect-permutation + fixed-cycle-spacing §15.247
+    // properties are unit-tested; here we just bind it to this radio's `FHSS_N`. No behavioural
+    // change — the algorithm (seeded xorshift32 Fisher-Yates, cycle-invariant) is identical.
+    tower_radio_core::hop_channel::<{ FHSS_N as usize }>(seed, cycle, i)
 }
 
 /// Beacon time-on-air (ms): a sealed beacon is HDR_LEN + payload + tag bytes.
@@ -257,9 +258,17 @@ impl Net {
     /// **Master:** run one slot — retune to the next slot's channel during the
     /// guard, beacon exactly at the slot boundary, then listen the rest of the slot
     /// for an uplink (decoded + auto-ACKed via [`recv`](Self::recv)). Call in a loop.
-    pub async fn fhss_master_tick(&mut self) -> MasterSlot {
+    ///
+    /// Returns `None` if FHSS master mode is not active (no clock anchor) — e.g. called
+    /// before `enable_fhss(FhssRole::Master, …)` or on a node-role `Net`. This mirrors the
+    /// typed refusal of [`send`](Self::send) (`WrongMode`) / [`fhss_send`](Self::fhss_send)
+    /// (`NotSynced`) rather than panicking the device on API misuse.
+    pub async fn fhss_master_tick(&mut self) -> Option<MasterSlot> {
+        if self.fhss.role != FhssRole::Master {
+            return None;
+        }
         let seed = self.fhss.seed;
-        let anchor = self.fhss.anchor.expect("master anchor");
+        let anchor = self.fhss.anchor?;
         let now = Instant::now();
         let slot = Self::fhss_cur_slot(anchor, now) + 1; // beacon the upcoming slot at its boundary
         let ch = Self::fhss_channel_for(seed, slot);
@@ -280,11 +289,11 @@ impl Net {
         } else {
             None
         };
-        MasterSlot {
+        Some(MasterSlot {
             channel: ch,
             slot,
             received,
-        }
+        })
     }
 
     /// **Node:** run one slot. Whenever a clock anchor is held (Synced, or riding
@@ -383,6 +392,9 @@ impl Net {
     /// gates the TX; consumed airtime is recorded for the compliance histogram. One
     /// TX counter is consumed.
     pub async fn fhss_send(&mut self, dest: u32, data: &[u8], confirmed: bool) -> SendResult {
+        if self.tx_locked {
+            return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
+        }
         if self.access != Access::Fhss {
             return SendResult::WrongMode;
         }
@@ -461,6 +473,9 @@ impl Net {
     /// Build + transmit the beacon for `slot_abs` (already tuned to `ch`), sealed
     /// under the network (default) key so every node can sync; dwell-metered.
     async fn fhss_tx_beacon(&mut self, slot_abs: u32, ch: u8) {
+        if self.tx_locked {
+            return; // fail closed: can't safely allocate a beacon counter (nonce safety)
+        }
         let cycle = slot_abs / FHSS_N as u32;
         let i = (slot_abs % FHSS_N as u32) as u8;
         let mut pl = [0u8; BEACON_PL_LEN];

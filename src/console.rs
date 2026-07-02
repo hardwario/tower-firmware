@@ -18,8 +18,10 @@
 //!   queue drop), encodes, and async-writes — holding a `WakeGuard` across each burst so
 //!   the low-power executor uses WFI (USART clocked) instead of STOP, which would gate the
 //!   TXE interrupt;
-//! * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames by type:
-//!   shell frames to [`crate::shell::dispatch_frame`], `FotaData` to [`FOTA_DATA`];
+//! * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames into the
+//!   console-owned RX channels by type — shell frames to [`SHELL_RX`], `FotaData` to [`FOTA_DATA`];
+//!   the shell / FOTA host-proxy drain their channel on their own task. The console never calls
+//!   up into those layers, so the transport depends only on `tower-protocol`;
 //! * the **panic** path can't use the (dead) executor, so it silences the buffered ISR
 //!   and blocking-writes one frame straight to the USART1 registers via the PAC.
 
@@ -27,6 +29,7 @@ use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex;
 use embassy_futures::select::{select, select3};
@@ -127,6 +130,17 @@ enum Outgoing {
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
 static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channel::new();
+/// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
+/// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
+/// RX buffer — exactly like [`FOTA_DATA`] — and never calls into the shell, so the transport
+/// layer doesn't depend on the (higher) shell layer. `MAX_WIRE`-sized so any inner frame fits.
+pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, MAX_WIRE>, 2> = Channel::new();
+/// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
+/// [`manager`] around the writer's lifetime. The "async, never dropped" producers
+/// ([`event`], [`shell_response`], …) apply queue backpressure only while this is true; while
+/// it is false they fall back to drop-newest, so a task emitting events on a battery node with
+/// USB unplugged is never parked forever on a full queue that has no writer to drain it.
+static CONSOLE_UP: AtomicBool = AtomicBool::new(false);
 /// Count of messages dropped because [`TX_CHANNEL`] was full; reported by the writer
 /// as a [`Dropped`] marker before the next real frame.
 static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
@@ -155,6 +169,24 @@ fn take_dropped() -> u32 {
 fn try_enqueue(item: Outgoing) {
     if TX_CHANNEL.try_send(item).is_err() {
         bump_dropped();
+    }
+}
+
+/// Enqueue an outgoing message for the "async, never dropped" producers ([`event`],
+/// [`shell_response`], [`shell_completions`], [`send_fota_req`]).
+///
+/// While the console is up ([`CONSOLE_UP`]) this applies real backpressure — awaiting a free
+/// slot so a burst is never dropped. While it is **down** it falls back to non-blocking
+/// drop-newest: with no [`writer_loop`] draining [`TX_CHANNEL`], a plain `send().await` on a
+/// full queue would park the calling task until the next USB plug-in, silently stalling e.g. a
+/// battery node's measure loop. If USB is unplugged *during* a backpressured send, [`manager`]'s
+/// unplugged poll drains the queue (counting drops), which frees a slot and wakes the parked
+/// sender within one poll cycle — so the stall is bounded, never indefinite.
+async fn enqueue(item: Outgoing) {
+    if CONSOLE_UP.load(Ordering::Relaxed) {
+        TX_CHANNEL.send(item).await;
+    } else {
+        try_enqueue(item);
     }
 }
 
@@ -278,6 +310,12 @@ pub async fn manager(
         while !vbus.is_high() {
             let _ = select(vbus.wait_for_high(), Timer::after(Duration::from_millis(500))).await;
             crate::board::apply_stop_tuning();
+            // Drain anything left in the queue while there's no writer (counting it as dropped):
+            // frees slots so a producer that raced the unplug (checked CONSOLE_UP just before it
+            // cleared) can't stay parked on a full queue — it wakes within one poll cycle.
+            while TX_CHANNEL.try_receive().is_ok() {
+                bump_dropped();
+            }
         }
         Timer::after(Duration::from_millis(50)).await; // debounce
         if !vbus.is_high() {
@@ -302,6 +340,10 @@ pub async fn manager(
         };
         let (mut tx, mut rx) = uart.split();
 
+        // Console is up: the writer below drains TX_CHANNEL, so producers may now apply
+        // backpressure (see `enqueue`). Set this before the Hello so it takes the same path.
+        CONSOLE_UP.store(true, Ordering::Relaxed);
+
         // Re-announce the link so the host resyncs its per-session `seq` / header.
         let name = critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone());
         try_enqueue(Outgoing::Hello(name));
@@ -313,6 +355,9 @@ pub async fn manager(
             Timer::after(Duration::from_millis(50)).await;
         };
         let _ = select3(writer_loop(&mut tx), rx_loop(&mut rx), unplug).await;
+        // Console is down: no writer will drain the queue until the next plug-in, so producers
+        // must fall back to drop-newest (see `enqueue`). Clear this before dropping the UART.
+        CONSOLE_UP.store(false, Ordering::Relaxed);
         // tx/rx drop → USART1 disabled → STOP re-enabled while unplugged.
     }
 }
@@ -411,9 +456,9 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
     }
 }
 
-/// Read `rx` and route decoded frames (until cancelled): shell frames go to the
-/// [`shell`](crate::shell) dispatcher; `FotaData` frames go to [`FOTA_DATA`] for the
-/// FOTA host-proxy. Owning RX here (instead of the shell/host-proxy owning it) is what
+/// Read `rx` and route decoded frames (until cancelled): shell frames go to [`SHELL_RX`],
+/// `FotaData` frames go to [`FOTA_DATA`] — both console-owned channels the higher layers drain
+/// on their own tasks. Owning RX here (instead of the shell/host-proxy owning it) is what
 /// lets the console be torn down and rebuilt across USB plug/unplug.
 async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
     let mut dec = FrameDecoder::new();
@@ -431,14 +476,23 @@ async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
     }
 }
 
-/// Route one decoded inner frame by message type.
+/// Route one decoded inner frame by message type. The console (the lowest, transport layer)
+/// does **not** call up into the shell or FOTA: it copies each frame into the console-owned RX
+/// channel for that traffic ([`SHELL_RX`] / [`FOTA_DATA`]) and the higher layer drains it on its
+/// own task. So this module depends only on `tower-protocol`, and adding a new host→device
+/// consumer means adding a channel here, not a hard call into another subsystem.
 async fn route_frame(inner: &[u8]) {
     let Ok((mt, _seq, payload)) = decode_frame(inner) else {
         return;
     };
     match mt {
         MsgType::ShellCommand | MsgType::ShellComplete => {
-            crate::shell::dispatch_frame(inner).await;
+            // Copy the whole frame for the shell to re-decode on its drain task. Depth-2 queue;
+            // a request/response shell sends one command at a time, so it rarely holds >1, and a
+            // drop (queue full) just makes the host retry — never stalls the RX loop.
+            let mut v: Vec<u8, MAX_WIRE> = Vec::new();
+            let _ = v.extend_from_slice(inner);
+            let _ = SHELL_RX.try_send(v);
         }
         MsgType::FotaData => {
             let mut v: Vec<u8, FOTA_CHUNK> = Vec::new();
@@ -522,9 +576,10 @@ async fn send_shell_response(
 }
 
 /// Emit a self-describing event (key=value pairs) to the host — rendered by
-/// `tower events` without any per-app schema. **Async**: applies backpressure and is
-/// never dropped, so call it from an async context. Extra fields beyond [`EV_FIELDS`]
-/// and over-long strings are clipped.
+/// `tower events` without any per-app schema. **Async**: while USB is present it applies
+/// backpressure (never dropped); while unplugged — no host, no writer — it drops (counted in
+/// the [`Dropped`] marker) rather than parking the caller, so a battery node's measure loop
+/// keeps running. Extra fields beyond [`EV_FIELDS`] and over-long strings are clipped.
 ///
 /// ```ignore
 /// console::event("measurement", &[("temp", "23.5"), ("rh", "41")]).await;
@@ -534,40 +589,40 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
     for &(k, v) in fields.iter().take(EV_FIELDS) {
         let _ = f.push((clip(k), clip(v)));
     }
-    TX_CHANNEL
-        .send(Outgoing::Event {
-            name: clip(name),
-            fields: f,
-        })
-        .await;
+    enqueue(Outgoing::Event {
+        name: clip(name),
+        fields: f,
+    })
+    .await;
 }
 
 /// Send a shell command response. The writer splits `text` into `chunk`/`last` frames
 /// the host reassembles, so it may exceed one frame (up to [`MAX_RESP`], clipped past
-/// that). Async — never dropped. Used by the shell engine ([`crate::shell`]).
+/// that). Async — backpressured while USB is present (a shell command only arrives over a
+/// live console, so the writer is up to drain it). Used by the shell engine ([`crate::shell`]).
 pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
-    TX_CHANNEL
-        .send(Outgoing::ShellResponse {
-            cmd_id,
-            result,
-            text: clip(text),
-        })
-        .await;
+    enqueue(Outgoing::ShellResponse {
+        cmd_id,
+        result,
+        text: clip(text),
+    })
+    .await;
 }
 
 /// Send a completion result. The candidates borrow the `'static` command tree, so
 /// nothing is copied. Async — never dropped. Used by the shell engine.
 pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
-    TX_CHANNEL.send(Outgoing::Completions(c)).await;
+    enqueue(Outgoing::Completions(c)).await;
 }
 
 /// Send a FOTA host-proxy request to the host (a gateway asking for image/manifest bytes).
 /// Goes through the writer task as a raw `FotaReq` frame; the host replies with a `FotaData`
-/// frame the caller reads off the RX half (see `fota::HostProxySource`). Async — applies
-/// backpressure and is never dropped (so the request always goes out). `offset ==
+/// frame the caller reads off the RX half (see `fota::HostProxySource`). Async — backpressured
+/// while USB is present (host-proxy FOTA only runs over a live console); drops rather than parks
+/// if the console is down. `offset ==
 /// `[`tower_protocol::fota::FOTA_MANIFEST_OFFSET`] requests the signed manifest.
 pub async fn send_fota_req(offset: u32, len: u16) {
-    TX_CHANNEL.send(Outgoing::FotaReq { offset, len }).await;
+    enqueue(Outgoing::FotaReq { offset, len }).await;
 }
 
 /// Record the firmware name and emit the boot `Hello` + a banner log. Called by the

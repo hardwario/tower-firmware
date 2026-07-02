@@ -19,6 +19,14 @@ sha2 = "0.10"
 # feature pulls salty so the interop test can confirm dalek-signed -> salty-verified.
 tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0", features = ["verify"] }
 
+[features]
+# Carry the built-in DEV signing seed (bring-up only — it is public in this file, so anyone can
+# forge). ON by default so `fota-sign pubkey`/`sign` work out of the box. A production signer
+# turns it off (`--no-default-features`) and MUST pass `--key <file>` (a real seed / HSM export),
+# else signing errors out — mirroring tower-protocol's `dev-key` guard on the verify side.
+dev-key = []
+default = ["dev-key"]
+
 [dev-dependencies]
 # Device-side SHA-512, to assert the host (sha2) and device (salty) image digests agree
 # (`host_and_device_image_digest_agree`). The same crate + version the bootloader uses.

@@ -115,6 +115,9 @@ impl Net {
     /// every channel was busy/in-off-time for a whole attempt. One TX counter is
     /// consumed (docs/radio.md), matching [`send`](Self::send).
     pub async fn afa_send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
+        if self.tx_locked {
+            return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
+        }
         if self.access != Access::Afa {
             return SendResult::WrongMode;
         }

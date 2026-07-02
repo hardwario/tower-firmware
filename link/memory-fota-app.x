@@ -1,5 +1,7 @@
 /* FOTA app layout — for an app linked into the ACTIVE slot, booted by crates/bootloader
-   (docs/fota.md, kept in lockstep with src/fota/mod.rs). Selected by the `fota-active` cargo
+   (docs/fota.md). These offsets/sizes MUST match the shared `crates/fota-layout` crate (a linker
+   file can't `use` it, so this is a hand-kept copy; the Rust code pulls from fota-layout and its
+   guards catch a numeric drift). Selected by the `fota-active` cargo
    feature; see build.rs. FLASH = ACTIVE, so the reset vector lands where the bootloader
    jumps. Partition symbols are offsets from the flash base (ORIGIN(BOOTLOADER) =
    0x0800_0000), which embassy-boot's FirmwareUpdater/FirmwareState from_linkerfile reads

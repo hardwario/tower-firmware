@@ -88,7 +88,9 @@ async fn run(b: Board) {
         }
         info!(target: "fhss", "MASTER: hopping 80 ch, beacon+listen per 300 ms slot");
         loop {
-            let s = net.fhss_master_tick().await;
+            let Some(s) = net.fhss_master_tick().await else {
+                continue; // master mode not active (shouldn't happen — enabled above)
+            };
             if let Some(rx) = s.received {
                 info!(
                     target: "fhss",

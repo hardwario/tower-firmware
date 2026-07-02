@@ -41,7 +41,7 @@ use {
     embassy_sync::blocking_mutex::raw::NoopRawMutex,
     embassy_time::Timer,
     log::warn,
-    tower::fota::{PullOutcome, pull_update, set_installed_version},
+    tower::fota::{PullOutcome, promote_pending_version, pull_update},
     tower::radio::net::SendResult,
     tower::storage::Nv,
 };
@@ -94,11 +94,15 @@ async fn node(b: Board) -> ! {
     // Kv + whether this is a fresh boot (vs a just-confirmed swap / revert).
     let fresh = check_boot_state(b.kv);
     if !fresh {
-        // We just confirmed (or reverted) — record the running version (the rollback floor an
-        // offered image must strictly supersede) via the typed helper, then idle (no
-        // self-update loop). `set_installed_version` takes the shared `Nv` directly, since
+        // We just confirmed (or reverted) — promote the *pending* version recorded when this
+        // image was staged (the actual signed manifest version) to the rollback floor an offered
+        // image must strictly supersede, then idle. Promoting the pending value rather than this
+        // image's compile-time `VERSION` keeps the floor aligned with what was advertised, so a
+        // manifest whose `--version` differs from the baked constant can't cause an endless
+        // reinstall loop (C5). `promote_pending_version` takes the shared `Nv` directly, since
         // `Net` does not exist yet on this path.
-        let _ = set_installed_version(b.kv, VERSION);
+        let floor = promote_pending_version(b.kv);
+        info!(target: "fota-ota", "confirmed — rollback floor now v{floor}");
         idle().await;
     }
 
@@ -168,6 +172,9 @@ async fn node(b: Board) -> ! {
                 }
                 PullOutcome::NoManifest | PullOutcome::ImageFailed => {
                     warn!(target: "fota-ota", "pull failed (host serving?) — retry")
+                }
+                PullOutcome::FloorUnavailable => {
+                    error!(target: "fota-ota", "rollback floor unreadable — refusing (fail closed)")
                 }
             }
         }

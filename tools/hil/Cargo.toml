@@ -1,0 +1,37 @@
+[package]
+name = "tower-hil"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER firmware SDK: drives a bench of a TOWER Core Module (J-Link SWD + Nordic PPK2) and a TOWER Radio Dongle (USB) — flashes via probe-rs / `tower flash`, decodes the framed console NATIVELY (tower-protocol, so tests assert on typed Log/Event + seq-gaps, not `strings | grep`), and asserts smoke / radio / power behaviour. The hardware tests are `#[ignore]`d so `cargo test` still COMPILES them without a bench. See docs/test-plan.md."
+
+# Standalone HOST tool — like tools/fota-sign it is NOT a workspace member (the workspace targets
+# thumbv6m via .cargo/config.toml). Build/test it with an explicit host target, e.g.
+#   cargo build  --manifest-path tools/hil/Cargo.toml --target <host>
+#   cargo test   --manifest-path tools/hil/Cargo.toml --target <host>   # compiles the #[ignore]d
+#                                                                        # HW tests; runs none
+# The `just hil*` recipes wrap these. This crate NEVER runs against hardware in CI.
+
+[dependencies]
+# Decode the framed console natively — the whole point of the harness over `strings | grep`. Same
+# tower-protocol tag the firmware + CLI pin (golden-rule lockstep): a mismatch here would silently
+# mis-decode exactly the frames we assert on. `alloc`/`std` come for free on the host; no `verify`.
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
+# Deserialize the decoded postcard payloads (Log/Event/Hello/…). Same major as tower-protocol's,
+# with std/alloc on the host (the harness owns copies of the borrowed message fields).
+postcard = { version = "1", features = ["use-std"] }
+# Serial I/O to both boards' FTDI ports.
+serialport = "4.9"
+# jolt as a LIBRARY (default-features=false → no clap/anyhow/indicatif): its `port::Port` drives
+# the tuned NRST/BOOT0 pulses (reset-into-app / reset-into-bootloader) we use to reset the Core.
+jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.2.0", default-features = false }
+# Parse the hil.toml bench fixture (core/dongle serials, ppk2 supply). Tiny, std-only.
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# Gate the current-measurement tests. They need the PPK2 sidecar (tools/hil/ppk2d.py) + a Core on
+# battery/PPK2 supply with the FTDI UNPLUGGED (USB present inhibits STOP by design — see the power
+# test's guard). Off by default so `just hil` (smoke/radio) never pulls the power path in.
+power = []

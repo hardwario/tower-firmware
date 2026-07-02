@@ -15,8 +15,10 @@
 use embassy_time::{Duration, Instant, Timer};
 
 use super::{ACK_TURNAROUND, Net, TX_TIMEOUT};
+use crate::fota::{Stage, WRITE_SIZE};
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
+use crate::storage::Nv;
 
 /// Bulk chunk size (docs/radio.md).
 pub const BULK_CHUNK: usize = 64;
@@ -50,11 +52,13 @@ pub trait BulkSource {
 /// requester never holds the whole transfer in RAM. Implement it to verify, hash,
 /// or — for FOTA — stream straight to a flash staging slot.
 pub trait BulkSink {
-    /// Called once after the announce with the total length, before any chunk is
-    /// pulled. Return `false` to refuse the transfer (e.g. too large for the
-    /// destination, or the flash slot can't be erased), aborting the fetch.
+    /// Called once after the announce with the total length and the byte offset the fetch will
+    /// **resume from** (`0` for a fresh transfer), before any chunk is pulled. A resuming sink
+    /// (`resume_from > 0`) should keep what it already has and skip re-initialising (e.g. not
+    /// re-erase a flash slot); a fresh sink should set up / erase. Return `false` to refuse the
+    /// transfer (too large for the destination, or the slot can't be erased), aborting the fetch.
     #[allow(async_fn_in_trait)]
-    async fn begin(&mut self, total_len: usize) -> bool;
+    async fn begin(&mut self, total_len: usize, resume_from: usize) -> bool;
     /// Called for each chunk in increasing-`offset` order with its plaintext bytes
     /// (`chunk.len()` ≤ [`BULK_CHUNK`]). Return `false` to abort the transfer
     /// (e.g. a flash write failed).
@@ -78,6 +82,9 @@ impl Net {
     /// bounded by neither RAM nor (the 24-bit index aside) the protocol. Returns
     /// whether the last chunk was served.
     pub async fn bulk_serve_from<S: BulkSource>(&mut self, dest: u32, source: &mut S) -> bool {
+        if self.tx_locked {
+            return false; // fail closed (nonce safety): can't reserve the session counter
+        }
         let key = self.key_for(dest);
         let total_len = source.total_len();
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
@@ -167,7 +174,7 @@ impl Net {
     /// received, or `None` on announce/chunk failure or `out` too small.
     pub async fn bulk_fetch(&mut self, src: u32, out: &mut [u8]) -> Option<usize> {
         let mut sink = SliceSink { out };
-        self.bulk_fetch_into(src, &mut sink).await
+        self.bulk_fetch_into(src, 0, &mut sink).await
     }
 
     /// Fetch a bulk transfer from `src`, streaming each chunk to `sink`: receive the
@@ -177,7 +184,15 @@ impl Net {
     /// one chunk, so the transfer size is bounded by neither RAM nor (the 24-bit
     /// index aside) the protocol. Returns the total length received, or `None` on
     /// announce/chunk failure or a sink that refused (`begin`/`consume` → `false`).
-    pub async fn bulk_fetch_into<S: BulkSink>(&mut self, src: u32, sink: &mut S) -> Option<usize> {
+    pub async fn bulk_fetch_into<S: BulkSink>(
+        &mut self,
+        src: u32,
+        resume_from: usize,
+        sink: &mut S,
+    ) -> Option<usize> {
+        if self.tx_locked {
+            return None; // fail closed (nonce safety): BULK_REQ frames consume TX counters
+        }
         let key = self.key_for(src);
         // Wait for the bulk-announce.
         let mut abuf = [0u8; 8];
@@ -194,13 +209,16 @@ impl Net {
                 break (len, s);
             }
         };
-        if !sink.begin(total_len).await {
+        if !sink.begin(total_len, resume_from).await {
             return None; // sink refused the transfer (e.g. too large / can't stage)
         }
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
 
-        let mut received = 0usize;
-        for k in 0..n_chunks {
+        // Resume: skip whole chunks already staged (only the flash sink passes resume_from > 0;
+        // the slice sinks pass 0). `received` counts total bytes, resume start included.
+        let start_chunk = resume_from / BULK_CHUNK;
+        let mut received = start_chunk * BULK_CHUNK;
+        for k in start_chunk..n_chunks {
             let req_counter = self.tx_counter; // one counter per chunk; retransmits reuse it
             let req_hdr = Header {
                 frame_type: FrameType::BulkReq,
@@ -277,110 +295,16 @@ impl Net {
         start: u32,
         progress_key: Option<u16>,
     ) -> usize {
-        use crate::fota::{Stage, WRITE_SIZE};
-
-        let w = WRITE_SIZE as usize;
-        let key = self.key_for(src);
-        // Wait for the bulk-announce (identical handshake to bulk_fetch_into).
-        let mut abuf = [0u8; 8];
-        let (total_len, session) = loop {
-            let Some((hdr, plen)) = self.rx_frame(&key, Duration::from_secs(5), &mut abuf).await else {
-                return start as usize; // no announce — no progress, resume next time
-            };
-            if hdr.frame_type == FrameType::Data
-                && hdr.flags & flags::BULK_ANNOUNCE != 0
-                && hdr.src == src
-                && hdr.dest == self.my_id
-                && plen >= 8
-            {
-                let len = u32::from_le_bytes([abuf[0], abuf[1], abuf[2], abuf[3]]) as usize;
-                let s = u32::from_le_bytes([abuf[4], abuf[5], abuf[6], abuf[7]]);
-                break (len, s);
-            }
-        };
-        if total_len as u32 > size {
-            return start as usize; // image too large for the slot
-        }
-        let start = (start as usize).min(total_len); // clamp a stale HWM
-        if start == 0 {
-            // Fresh start: erase the destination for the announced length (one short flash
-            // borrow, released before the radio loop). A resume keeps the staged bytes.
-            if self
-                .kv
-                .with_flash(|f| Stage::new(f, base, size).erase(total_len as u32))
-                .is_err()
-            {
-                return 0;
-            }
-        }
-
-        let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
-        let mut received = start;
-        let mut since_persist = 0usize;
-        for k in (start / BULK_CHUNK)..n_chunks {
-            let req_counter = self.tx_counter; // one counter per chunk; retransmits reuse it
-            let req_hdr = Header {
-                frame_type: FrameType::BulkReq,
-                flags: 0,
-                src: self.my_id,
-                dest: src,
-                counter: req_counter,
-                bulk_index: Some(k as u32),
-            };
-            let req_payload = session.to_le_bytes();
-            let mut got = false;
-            for _ in 0..BULK_REQ_REPS {
-                if !self.tx_frame(&key, &req_hdr, &req_payload).await {
-                    continue;
-                }
-                let mut dbuf = [0u8; BULK_CHUNK];
-                if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await
-                    && dhdr.frame_type == FrameType::BulkData
-                    && dhdr.src == src
-                    && dhdr.dest == self.my_id
-                    && dhdr.counter == session
-                    && dhdr.bulk_index == Some(k as u32)
-                {
-                    let off = k * BULK_CHUNK;
-                    // Require exactly the expected chunk length (full BULK_CHUNK, or the
-                    // remainder for the last chunk). Rejecting a short/long chunk — e.g. a
-                    // host-proxy serve that couldn't fetch the bytes in time — makes the node
-                    // retransmit its BULK_REQ rather than program a gap into the image.
-                    if dlen != (total_len - off).min(BULK_CHUNK) {
-                        continue; // wrong-size chunk; retry within reps
-                    }
-                    // Program the chunk — padding a partial tail up to a flash word.
-                    let mut padded = [0u8; BULK_CHUNK];
-                    padded[..dlen].copy_from_slice(&dbuf[..dlen]);
-                    let plen = dlen.div_ceil(w) * w;
-                    if self
-                        .kv
-                        .with_flash(|f| Stage::new(f, base, size).program(off as u32, &padded[..plen]))
-                        .is_err()
-                    {
-                        break; // flash write failed — stop; the HWM lets a retry resume
-                    }
-                    received += dlen;
-                    got = true;
-                    break;
-                }
-            }
-            self.advance_tx_counter();
-            if !got {
-                break; // chunk stalled (duty / loss) — stop; resume from the HWM next time
-            }
-            since_persist += 1;
-            if since_persist >= HWM_PERSIST_CHUNKS {
-                since_persist = 0;
-                if let Some(k) = progress_key {
-                    let _ = self.kv.set_bytes(k, &(received as u32).to_le_bytes());
-                }
-            }
-        }
-        if let Some(k) = progress_key {
-            let _ = self.kv.set_bytes(k, &(received as u32).to_le_bytes());
-        }
-        received
+        // Thin wrapper over [`bulk_fetch_into`](Self::bulk_fetch_into) with a resume-aware flash
+        // sink — previously a near-verbatim duplicate of the announce + per-chunk loop, which had
+        // already drifted from the original. `NvFlashSink` holds a `Copy` `Nv` (not a borrow of
+        // `self`), so it programs flash *between* the radio receives without a borrow conflict.
+        let mut sink = NvFlashSink::new(self.kv, base, size, start as usize, progress_key);
+        // Ignore the Some/None: progress is read back from the sink (it programs + persists the
+        // HWM as chunks land), so a mid-transfer stall still reports what was staged, for resume.
+        let _ = self.bulk_fetch_into(src, start as usize, &mut sink).await;
+        sink.persist(); // final HWM, matching the old end-of-loop persist
+        sink.received()
     }
 
     /// Seal `hdr`+`payload` under `key` and transmit it (no ACK), metered by the
@@ -440,14 +364,89 @@ struct SliceSink<'a> {
 }
 
 impl BulkSink for SliceSink<'_> {
-    async fn begin(&mut self, total_len: usize) -> bool {
-        total_len <= self.out.len()
+    async fn begin(&mut self, total_len: usize, _resume_from: usize) -> bool {
+        total_len <= self.out.len() // in-RAM slice never resumes
     }
     async fn consume(&mut self, offset: usize, chunk: &[u8]) -> bool {
         if offset + chunk.len() > self.out.len() {
             return false;
         }
         self.out[offset..offset + chunk.len()].copy_from_slice(chunk);
+        true
+    }
+}
+
+/// A resume-aware [`BulkSink`] that streams the received image straight into a program-flash slot
+/// (the FOTA staging pull, docs/fota.md), backing [`Net::bulk_fetch_to_flash`]. It holds a `Copy`
+/// [`Nv`] — the network layer's own EEPROM/flash handle — rather than borrowing `Net`, so it can
+/// program flash *between* the radio receives with no borrow conflict. On a fresh start it erases
+/// the slot; each chunk is programmed with read-back verification ([`Stage::program_verified`],
+/// the C12 guard against silent L0 write aborts), and the contiguous high-water mark is persisted
+/// every [`HWM_PERSIST_CHUNKS`] chunks so a stall/power-cut resumes instead of restarting.
+struct NvFlashSink {
+    nv: Nv,
+    base: u32,
+    size: u32,
+    progress_key: Option<u16>,
+    /// Total contiguous bytes staged (resume start + newly programmed) — also the persisted HWM.
+    received: usize,
+    since_persist: usize,
+}
+
+impl NvFlashSink {
+    fn new(nv: Nv, base: u32, size: u32, start: usize, progress_key: Option<u16>) -> Self {
+        Self { nv, base, size, progress_key, received: start, since_persist: 0 }
+    }
+
+    /// Total bytes contiguously staged so far (what [`bulk_fetch_to_flash`](Net::bulk_fetch_to_flash)
+    /// returns — the HWM the caller resumes from).
+    fn received(&self) -> usize {
+        self.received
+    }
+
+    /// Persist the current high-water mark to `progress_key` (u32 LE), if set.
+    fn persist(&self) {
+        if let Some(k) = self.progress_key {
+            let _ = self.nv.set_bytes(k, &(self.received as u32).to_le_bytes());
+        }
+    }
+}
+
+impl BulkSink for NvFlashSink {
+    async fn begin(&mut self, total_len: usize, resume_from: usize) -> bool {
+        if total_len as u32 > self.size {
+            return false; // image too large for the slot
+        }
+        if resume_from == 0 {
+            // Fresh start: erase the destination for the announced length (one short flash borrow,
+            // released before the radio loop). A resume keeps the already-staged bytes.
+            self.nv
+                .with_flash(|f| Stage::new(f, self.base, self.size).erase(total_len as u32))
+                .is_ok()
+        } else {
+            true // resuming: the slot's pages were erased on the fresh call
+        }
+    }
+
+    async fn consume(&mut self, offset: usize, chunk: &[u8]) -> bool {
+        // Program the chunk, padding a partial tail up to a flash word, with read-back verify.
+        let w = WRITE_SIZE as usize;
+        let mut padded = [0u8; BULK_CHUNK];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        let plen = chunk.len().div_ceil(w) * w;
+        if self
+            .nv
+            .with_flash(|f| Stage::new(f, self.base, self.size).program_verified(offset as u32, &padded[..plen]))
+            .is_err()
+        {
+            return false; // write failed OR didn't read back (silent L0 abort) — abort; HWM resumes
+        }
+        self.received += chunk.len();
+        self.since_persist += 1;
+        if self.since_persist >= HWM_PERSIST_CHUNKS {
+            self.since_persist = 0;
+            self.persist();
+        }
         true
     }
 }

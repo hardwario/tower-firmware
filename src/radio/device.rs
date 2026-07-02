@@ -42,6 +42,12 @@ pub enum RadioError {
     FifoError,
     /// Frame longer than the 96-byte FIFO.
     TooLong,
+    /// TX is locked because the reserve-ahead TX-counter watermark could not be
+    /// durably persisted (EEPROM full/faulted). Transmitting past the last durable
+    /// watermark would, after a reboot that resumes at the stale watermark, reuse a
+    /// CCM nonce — so we fail **closed** rather than risk it. Recovers on the next
+    /// boot once the watermark persists (free EEPROM space) or after a re-key.
+    NonceLocked,
 }
 
 impl From<SpiError> for RadioError {
@@ -63,6 +69,9 @@ impl core::fmt::Display for RadioError {
             RadioError::CrcError => f.write_str("CRC error"),
             RadioError::FifoError => f.write_str("FIFO under/overflow"),
             RadioError::TooLong => f.write_str("frame longer than the 96-byte FIFO"),
+            RadioError::NonceLocked => {
+                f.write_str("TX locked: could not persist the nonce watermark (EEPROM full/faulted)")
+            }
         }
     }
 }

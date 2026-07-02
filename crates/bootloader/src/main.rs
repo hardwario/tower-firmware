@@ -21,8 +21,13 @@
 //! swap already in progress (`State::Swap`/`Revert`) is resumed/reverted by embassy-boot
 //! without re-verifying (the manifest was already cleared when the swap was armed).
 //!
-//! The single-bank L0 concern (docs/fota.md) is handled by embassy-boot-stm32. **DEV vendor
-//! key** — replace `tower_protocol::fota::VENDOR_PUBKEY` before shipping.
+//! The single-bank L0 concern (docs/fota.md) is handled by embassy-boot-stm32. **Vendor key:**
+//! [`VENDOR_PUBKEY`] is selected in tower-protocol by its `dev-key` feature — a default-off-in-
+//! production guard. A bring-up build (default features) bakes the public DEV key (forgeable —
+//! its seed ships in `tools/fota-sign`); a **production** build pins tower-protocol with
+//! `default-features = false` and supplies the real key via the `TOWER_VENDOR_PUBKEY` env var
+//! (`fota-sign pubkey --hex`), or the crate fails to compile. So shipping the dev key is a
+//! mechanical error, not a silent omission — nothing to remember to "replace" here.
 
 #![no_std]
 #![no_main]
@@ -38,17 +43,20 @@ use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use salty::Sha512;
 use tower_protocol::fota::{SIGNED_LEN, VENDOR_PUBKEY, split_signed, verify_signed};
 
-// Flash offsets — kept in lockstep with src/fota/mod.rs and the memory.x files (the
-// bootloader can't depend on the `tower` lib, so the layout is duplicated here, like
-// memory.x). The DFU image is read raw; the MANIFEST region holds the staged signed manifest.
-const MANIFEST_OFFSET: u32 = 0x0_8000;
-const MANIFEST_SIZE: u32 = 256;
-const DFU_OFFSET: u32 = 0x1_B800;
+// Flash offsets come from the shared `fota-layout` crate (which the `tower` lib's src/fota also
+// re-exports), so the loader and the app can never drift on the layout — a mismatch fails BOTH
+// builds via fota-layout's compile-time guards. (These were previously hand-duplicated here with
+// no guards; the guards now live in one place.) The DFU image is read raw; the MANIFEST region
+// holds the staged signed manifest.
+//
+// NB: `memory.x` (the linker input, FLASH origin = BOOTLOADER region) can't `use` this crate, so
+// it stays a separate copy — its comments cite fota-layout's table.
+//
 // The image is *staged* in DFU (78 KB, deliberately one page larger than ACTIVE for the
 // embassy-boot swap) but *runs* from ACTIVE after the swap, so the real bound on image size is
 // the ACTIVE slot, not the DFU slot. Verifying against ACTIVE_SIZE rejects an image in the
 // (ACTIVE_SIZE, DFU_SIZE] gap that would pass the hash yet be truncated when copied to ACTIVE.
-const ACTIVE_SIZE: u32 = 79_616;
+use fota_layout::{ACTIVE_SIZE, DFU_OFFSET, MANIFEST_OFFSET, MANIFEST_SIZE};
 
 /// Per-product hardware id this loader accepts images for. `0` (the default) accepts an image
 /// with **any** `manifest.hw_id` — the single-product case (the Core Module). Set this to a
