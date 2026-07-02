@@ -58,7 +58,7 @@ TOWER_PORT=/dev/cu.usbserial-140 just flash example console_demo
 # Host: build the CLI once, then stream the device.
 cd ../tower-cli && cargo build --release      # produces `tower`
 tower logs                                    # auto-detects a single USB serial port
-tower -p /dev/cu.usbserial-140 logs           # or name the port explicitly
+tower -d /dev/cu.usbserial-140 logs           # or name the device explicitly
 ```
 
 Every app gets the console for free: `Board::take` (via the `app!` macro) starts it
@@ -393,11 +393,11 @@ any host changes — `tower` is target-authoritative.
 ## The `tower` host CLI
 
 ```
-tower [-p <port>] <command>
+tower [-d <device>] <command>
 ```
 
-The port auto-detects when exactly one USB serial device is present; otherwise pass
-`-p`/`--port`. Subcommands:
+The device auto-detects when exactly one USB serial device is present; otherwise pass
+`-d`/`--device`. Subcommands:
 
 | Command | What |
 |---|---|

@@ -213,7 +213,7 @@ TOWER_FEATURES=fota-no-confirm just flash-fota fota_app   # auto-revert test →
 just fota-update                          # build + sign the update the host serves
 TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota   # node v1 (merged)
 TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash example fota_ota    # gateway
-tower -p <gw-port> fota serve --image target/fota-update.bin \
+tower -d <gw-port> fota serve --image target/fota-update.bin \
                               --manifest target/fota-update.fmanifest    # host-proxy
 TOWER_PORT=<node-port> just logs          # → *** UPDATE CONFIRMED *** booted swapped v2
 ```

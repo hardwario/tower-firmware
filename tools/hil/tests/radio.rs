@@ -29,7 +29,7 @@ fn build_and_flash(port: &str, features: &str) -> Result<(), String> {
     }
     let bin = format!("{repo}/target/firmware.bin");
     let out = Command::new("tower")
-        .args(["-p", port, "flash", &bin])
+        .args(["-d", port, "flash", &bin])
         .output()
         .map_err(|e| format!("HIL: spawn tower flash: {e}"))?;
     if out.status.success() {

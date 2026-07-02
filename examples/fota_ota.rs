@@ -7,7 +7,7 @@
 //!   # 3) gateway (normal app; proxies the image from the host over USB):
 //!   TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash example fota_ota
 //!   # 4) host (streams the signed update image to the gateway on demand):
-//!   tower -p <gw-port> fota serve --image target/fota-update.bin \
+//!   tower -d <gw-port> fota serve --image target/fota-update.bin \
 //!                                 --manifest target/fota-update.fmanifest
 //!
 //! This serves a **real signed firmware** the host holds, and the node actually swaps to it.

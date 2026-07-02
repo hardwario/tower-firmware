@@ -4,5 +4,5 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 port="$1"; bin="$2"; secs="$3"; out="$4"
-tower -p "$port" flash "$bin" > "${out}.flash" 2>&1
-python3 "$HERE/cap.py" "$secs" jolt monitor --reset -p "$port" > "$out" 2>&1
+tower -d "$port" flash "$bin" > "${out}.flash" 2>&1
+python3 "$HERE/cap.py" "$secs" jolt monitor --reset -d "$port" > "$out" 2>&1

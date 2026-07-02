@@ -15,14 +15,14 @@ use tower_hil::{Frame, bench_or_fail, frame_text, reset_into_app, Console};
 /// tools/hwtest/README.md). Returns the CLI's combined output on failure.
 fn tower_flash(port: &str, bin: &str) -> Result<(), String> {
     let out = Command::new("tower")
-        .args(["-p", port, "flash", bin])
+        .args(["-d", port, "flash", bin])
         .output()
         .map_err(|e| format!("HIL: spawn `tower flash`: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "HIL: `tower -p {port} flash {bin}` failed:\n{}\n{}",
+            "HIL: `tower -d {port} flash {bin}` failed:\n{}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ))

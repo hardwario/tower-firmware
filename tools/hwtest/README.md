@@ -30,12 +30,12 @@ just test
 
 # a one-shot KAT (mode B): flash + capture-from-reset + grep the verdict
 tools/hwtest/build.sh crypto_ccm_kat /tmp/ccm.bin
-tower -p "$P1" flash /tmp/ccm.bin
-python3 tools/hwtest/cap.py 5 jolt monitor --reset -p "$P1" | strings -n 3 | grep -iE 'PASS|FAIL'
+tower -d "$P1" flash /tmp/ccm.bin
+python3 tools/hwtest/cap.py 5 jolt monitor --reset -d "$P1" | strings -n 3 | grep -iE 'PASS|FAIL'
 
 # a continuous example (mode A): flash, then decoded logs
-tower -p "$P1" flash /tmp/x.bin
-python3 tools/hwtest/cap.py 6 tower -p "$P1" logs --no-colors
+tower -d "$P1" flash /tmp/x.bin
+python3 tools/hwtest/cap.py 6 tower -d "$P1" logs --no-colors
 
 # two-board: one board role-node, the other default (role-gateway is a no-op == default)
 tools/hwtest/build.sh net_secure_ping /tmp/nsp_n.bin role-node
@@ -43,8 +43,8 @@ tools/hwtest/build.sh net_secure_ping /tmp/nsp_d.bin
 tools/hwtest/tb.sh /tmp/nsp_n.bin "$P1" /tmp/nsp_d.bin "$P2" 9 /tmp/n.txt /tmp/g.txt
 
 # interactive shell, headless
-tower -p "$P1" exec "/system/settings print"
-tower -p "$P1" complete "/system settings set m"
+tower -d "$P1" exec "/system/settings print"
+tower -d "$P1" complete "/system settings set m"
 ```
 
 ## Notes

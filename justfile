@@ -32,9 +32,10 @@ bin := "target/firmware.bin"
 # Python launcher: `python3` on Unix, `python` on Windows (the python.org installer name).
 python := if os() == "windows" { "python" } else { "python3" }
 
-# Optional serial port; empty => let `tower` auto-detect the only USB serial device present.
+# Optional serial device; empty => let `tower` auto-detect the only USB serial device present.
+# (The env var stays TOWER_PORT for continuity; it's passed to `tower`/`jolt` as `-d`.)
 port := env_var_or_default("TOWER_PORT", "")
-_port_flag := if port == "" { "" } else { "-p " + port }
+_port_flag := if port == "" { "" } else { "-d " + port }
 
 # Optional cargo features, e.g. a radio example's role selection:
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed

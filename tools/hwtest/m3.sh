@@ -12,12 +12,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 P1="$1"; P2="$2"; V1="$3"; GW="$4"; V2="$5"; MAN="$6"; OUT="${7:-/tmp/m3}"; SECS="${8:-340}"
 mkdir -p "$OUT"
-echo "[1] flash v1 node (merged) -> $P1"; tower -p "$P1" flash "$V1" >"$OUT/node.flash" 2>&1; tail -1 "$OUT/node.flash"
-echo "[2] flash gateway        -> $P2"; tower -p "$P2" flash "$GW" >"$OUT/gw.flash" 2>&1; tail -1 "$OUT/gw.flash"
+echo "[1] flash v1 node (merged) -> $P1"; tower -d "$P1" flash "$V1" >"$OUT/node.flash" 2>&1; tail -1 "$OUT/node.flash"
+echo "[2] flash gateway        -> $P2"; tower -d "$P2" flash "$GW" >"$OUT/gw.flash" 2>&1; tail -1 "$OUT/gw.flash"
 echo "[3] serve v2 on $P2 (background)"
-tower -p "$P2" fota serve --image "$V2" --manifest "$MAN" >"$OUT/serve.log" 2>&1 &
+tower -d "$P2" fota serve --image "$V2" --manifest "$MAN" >"$OUT/serve.log" 2>&1 &
 SERVE=$!
 echo "[4] watch node $P1 for ${SECS}s (pull -> verify -> swap -> confirm)"
-python3 "$HERE/cap.py" "$SECS" tower -p "$P1" logs --no-colors >"$OUT/node.txt" 2>&1
+python3 "$HERE/cap.py" "$SECS" tower -d "$P1" logs --no-colors >"$OUT/node.txt" 2>&1
 kill "$SERVE" 2>/dev/null; kill -9 "$SERVE" 2>/dev/null
 echo "[done] node confirm line:"; grep -iE 'confirm|NODE v|staged' "$OUT/node.txt" | tail -3

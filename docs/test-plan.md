@@ -82,7 +82,7 @@ For examples that keep printing (radio links, net, `console_demo`, `events_demo`
 reference apps). Attach after flashing; you'll catch the steady-state stream.
 
 ```sh
-python3 tools/hwtest/cap.py <seconds> tower -p <PORT> logs --no-colors
+python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --no-colors
 ```
 
 ### Mode B — `jolt monitor --reset` (raw bytes) + `strings` — for *one-shot* output
@@ -92,7 +92,7 @@ zero bytes; ASCII has none), so `strings` recovers every log/event message verba
 fields (uptime, level, seq, CRC) become noise — irrelevant for verdict checking.
 
 ```sh
-python3 tools/hwtest/cap.py <seconds> jolt monitor --reset -p <PORT> > raw.bin
+python3 tools/hwtest/cap.py <seconds> jolt monitor --reset -d <PORT> > raw.bin
 strings -n 3 raw.bin            # human-readable log/event text, incl. the verdict line
 ```
 
@@ -108,17 +108,17 @@ own path first:
 
 ```sh
 tools/hwtest/build.sh <example> /tmp/twr/bin/<example>.bin "<features>"
-tower -p /dev/cu.usbserial-120 flash /tmp/twr/bin/A.bin &   # concurrent flashes OK
-tower -p /dev/cu.usbserial-140 flash /tmp/twr/bin/B.bin &
+tower -d /dev/cu.usbserial-120 flash /tmp/twr/bin/A.bin &   # concurrent flashes OK
+tower -d /dev/cu.usbserial-140 flash /tmp/twr/bin/B.bin &
 ```
 
 ### Interactive shell tests (no TUI needed)
 `shell_demo` and any shell-serving app are fully drivable headless:
 
 ```sh
-tower -p <PORT> exec "/system/resource print"
-tower -p <PORT> exec "/system settings set interval=60"
-tower -p <PORT> complete "/system settings set m"   # TAB-completion candidates
+tower -d <PORT> exec "/system/resource print"
+tower -d <PORT> exec "/system settings set interval=60"
+tower -d <PORT> complete "/system settings set m"   # TAB-completion candidates
 ```
 
 ## 4. The role/feature matrix
@@ -281,7 +281,7 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 |---|---|---|---|---|
 | M1 | fota_stage | 1 (FOTA-linked) | `just flash-fota fota_stage` ; mode B (longer window — stages several sizes) | `fota_stage: … ALL PASS ***` (write/read-back/digest of staged images) |
 | M2 | fota_app | 1 (FOTA-linked) | `just flash-fota fota_app`; observe self-swap + confirm, then revert path | `*** SWAP CONFIRMED ***` (and revert on unconfirmed boot) |
-| M3 | fota_ota E2E | 2 | node: `TOWER_FEATURES=role-node just flash-fota fota_ota`; GW: `TOWER_FEATURES=role-gateway just flash example fota_ota`; build+sign the update `just fota-update`; serve `tower -p <GW> fota serve --image target/fota-update.bin --manifest target/fota-update.fmanifest`; watch node | node pulls → bootloader verifies Ed25519+SHA → swap → `*** UPDATE CONFIRMED ***` running v2 |
+| M3 | fota_ota E2E | 2 | node: `TOWER_FEATURES=role-node just flash-fota fota_ota`; GW: `TOWER_FEATURES=role-gateway just flash example fota_ota`; build+sign the update `just fota-update`; serve `tower -d <GW> fota serve --image target/fota-update.bin --manifest target/fota-update.fmanifest`; watch node | node pulls → bootloader verifies Ed25519+SHA → swap → `*** UPDATE CONFIRMED ***` running v2 |
 
 FOTA happy-path detail and the bootloader verify gate live in `docs/fota.md`.
 
