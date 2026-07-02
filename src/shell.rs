@@ -12,7 +12,7 @@
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
 //!
 //! Because dispatch runs on its own task (not inline on the RX loop), a slow handler no longer
-//! stalls RX draining or FOTA-frame routing — but handlers should still be short, and their
+//! stalls RX draining — but handlers should still be short, and their
 //! `ShellResponse`s go through the bounded `TX_CHANNEL`. Not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest
@@ -327,7 +327,7 @@ static SHELL_SPAWNED: critical_section::Mutex<core::cell::Cell<bool>> =
 /// Drain the console-owned [`SHELL_RX`](crate::console::SHELL_RX) channel and dispatch each
 /// shell frame. Running on its own task (rather than inline on the console RX loop) is what lets
 /// the console depend only on `tower-protocol` — it copies frames into the channel and never
-/// calls into the shell — and it keeps a slow handler from stalling RX draining / FOTA routing.
+/// calls into the shell — and it keeps a slow handler from stalling RX draining.
 #[embassy_executor::task]
 async fn shell_rx_task() {
     loop {

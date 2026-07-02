@@ -7,11 +7,9 @@ framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated 
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer —
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
-[`just`](https://just.systems). It also has an **opt-in** signed, A/B **firmware-over-the-air**
-update path (`tower::fota` + an embassy-boot bootloader); without it an app links to the full
-192 KB flash (no bootloader, no A/B). Each subsystem has a guide:
-[`docs/console.md`](docs/console.md), [`docs/radio.md`](docs/radio.md), and
-[`docs/fota.md`](docs/fota.md).
+[`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
+Each subsystem has a guide: [`docs/console.md`](docs/console.md) and
+[`docs/radio.md`](docs/radio.md).
 
 | | |
 |---|---|
@@ -57,11 +55,9 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1) — TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing — see [`docs/radio.md`](docs/radio.md) |
-| `src/fota/` | Firmware-over-the-air: program-flash staging (`Stage`/`FlashSink`), the node OTA driver (`pull_update`: advertise → pull → stage → stash signed manifest), and the host-proxy image source (`HostProxySource`). The Ed25519 + image-digest install gate runs in the **A/B bootloader** (`crates/bootloader/`, so salty stays out of the duplicated app slots); see [`docs/fota.md`](docs/fota.md) |
 | `src/board.rs` | `Board::take()` + `app!` — the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
-Also in the workspace: `crates/bootloader/` (the embassy-boot A/B FOTA bootloader) and
-`tools/fota-sign/` (host signer, out-of-workspace). The shared wire-format crate
+The shared wire-format crate
 **`tower-protocol`** lives in [its own repo](https://github.com/hardwario/tower-protocol),
 pinned here by git tag (and shared with the [`tower-cli`](https://github.com/hardwario/tower-cli)
 host). To co-develop it locally without re-tagging, add a `paths` override to your
@@ -192,8 +188,8 @@ See `thermometer.rs` (≈12 lines of logic) for the minimal real example.
 ## Build / flash / logs
 
 Prerequisites (one-time): `cargo install just cargo-binutils probe-rs-tools`
-and `rustup component add llvm-tools`. `just test` and the FOTA recipes also need
-`python3` (`python` on Windows) — see [`docs/fota.md`](docs/fota.md).
+and `rustup component add llvm-tools`. `just check-protocol-pin` also needs
+`python3` (`python` on Windows).
 
 `build`/`flash`/`run`/`size` take a kind (`example` or `app`) then the name:
 

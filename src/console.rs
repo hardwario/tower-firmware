@@ -19,9 +19,9 @@
 //!   the low-power executor uses WFI (USART clocked) instead of STOP, which would gate the
 //!   TXE interrupt;
 //! * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames into the
-//!   console-owned RX channels by type — shell frames to [`SHELL_RX`], `FotaData` to [`FOTA_DATA`];
-//!   the shell / FOTA host-proxy drain their channel on their own task. The console never calls
-//!   up into those layers, so the transport depends only on `tower-protocol`;
+//!   console-owned RX channels by type — shell frames to [`SHELL_RX`]; the shell drains its
+//!   channel on its own task. The console never calls up into that layer, so the transport
+//!   depends only on `tower-protocol`;
 //! * the **panic** path can't use the (dead) executor, so it silences the buffered ISR
 //!   and blocking-writes one frame straight to the USART1 registers via the PAC.
 
@@ -51,7 +51,7 @@ use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
 use tower_protocol::msg::{Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse};
 use tower_protocol::{
-    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame, encode_frame_raw,
+    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame,
 };
 
 // USART1 interrupt for the console UART. Bound here (not in `board`) because the console
@@ -59,20 +59,6 @@ use tower_protocol::{
 bind_interrupts!(pub struct ConsoleIrqs {
     USART1 => BufferedInterruptHandler<USART1>;
 });
-
-/// Max bytes of a routed `FotaData` payload (offset(4) + up to a manifest/chunk read).
-const FOTA_CHUNK: usize = 128;
-/// `FotaData` frames received on RX are decoded by the manager and routed here for the
-/// FOTA host-proxy ([`crate::fota::HostProxySource`]) to consume — so the host-proxy no
-/// longer needs to own the raw RX half (the dynamic console manager owns it).
-///
-/// Depth 2: the host contract is **one `FotaData` per `FotaReq`**, and the proxy both
-/// drains stale chunks before each request and filters incoming chunks by offset, so a
-/// single slot suffices in the steady state. The extra slot absorbs a late reply to a
-/// just-timed-out request colliding with the reply to the retry, so neither is dropped
-/// before the proxy's offset filter can pick the right one.
-pub(crate) static FOTA_DATA: Channel<CriticalSectionRawMutex, Vec<u8, FOTA_CHUNK>, 2> =
-    Channel::new();
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
 const MAX_MSG: usize = 192;
@@ -120,20 +106,14 @@ enum Outgoing {
     },
     /// Completion result — all fields borrow the `'static` command tree, so no copy.
     Completions(ShellCompletions<'static>),
-    /// FOTA host-proxy request (a gateway asks the host for image/manifest bytes). Sent as
-    /// a **raw** frame; the reply arrives as a `FotaData` frame on RX. See `docs/fota.md`.
-    FotaReq {
-        offset: u32,
-        len: u16,
-    },
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
 static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channel::new();
 /// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
 /// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
-/// RX buffer — exactly like [`FOTA_DATA`] — and never calls into the shell, so the transport
-/// layer doesn't depend on the (higher) shell layer. `MAX_WIRE`-sized so any inner frame fits.
+/// RX buffer and never calls into the shell, so the transport layer doesn't depend on the
+/// (higher) shell layer. `MAX_WIRE`-sized so any inner frame fits.
 pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, MAX_WIRE>, 2> = Channel::new();
 /// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
 /// [`manager`] around the writer's lifetime. The "async, never dropped" producers
@@ -173,7 +153,7 @@ fn try_enqueue(item: Outgoing) {
 }
 
 /// Enqueue an outgoing message for the "async, never dropped" producers ([`event`],
-/// [`shell_response`], [`shell_completions`], [`send_fota_req`]).
+/// [`shell_response`], [`shell_completions`]).
 ///
 /// While the console is up ([`CONSOLE_UP`]) this applies real backpressure — awaiting a free
 /// slot so a burst is never dropped. While it is **down** it falls back to non-blocking
@@ -443,12 +423,6 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
                 send_shell_response(tx, &mut seq, *cmd_id, *result, text.as_str()).await
             }
             Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
-            Outgoing::FotaReq { offset, len } => {
-                let mut payload = [0u8; 6];
-                payload[0..4].copy_from_slice(&offset.to_le_bytes());
-                payload[4..6].copy_from_slice(&len.to_le_bytes());
-                send_raw(tx, &mut seq, MsgType::FotaReq, &payload).await
-            }
         }
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
@@ -456,10 +430,9 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
     }
 }
 
-/// Read `rx` and route decoded frames (until cancelled): shell frames go to [`SHELL_RX`],
-/// `FotaData` frames go to [`FOTA_DATA`] — both console-owned channels the higher layers drain
-/// on their own tasks. Owning RX here (instead of the shell/host-proxy owning it) is what
-/// lets the console be torn down and rebuilt across USB plug/unplug.
+/// Read `rx` and route decoded frames (until cancelled): shell frames go to [`SHELL_RX`], a
+/// console-owned channel the shell drains on its own task. Owning RX here (instead of the
+/// shell owning it) is what lets the console be torn down and rebuilt across USB plug/unplug.
 async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 64];
@@ -477,12 +450,12 @@ async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
 }
 
 /// Route one decoded inner frame by message type. The console (the lowest, transport layer)
-/// does **not** call up into the shell or FOTA: it copies each frame into the console-owned RX
-/// channel for that traffic ([`SHELL_RX`] / [`FOTA_DATA`]) and the higher layer drains it on its
-/// own task. So this module depends only on `tower-protocol`, and adding a new host→device
-/// consumer means adding a channel here, not a hard call into another subsystem.
+/// does **not** call up into the shell: it copies each frame into the console-owned RX
+/// channel for that traffic ([`SHELL_RX`]) and the higher layer drains it on its own task.
+/// So this module depends only on `tower-protocol`, and adding a new host→device consumer
+/// means adding a channel here, not a hard call into another subsystem.
 async fn route_frame(inner: &[u8]) {
-    let Ok((mt, _seq, payload)) = decode_frame(inner) else {
+    let Ok((mt, _seq, _payload)) = decode_frame(inner) else {
         return;
     };
     match mt {
@@ -494,15 +467,6 @@ async fn route_frame(inner: &[u8]) {
             let _ = v.extend_from_slice(inner);
             let _ = SHELL_RX.try_send(v);
         }
-        MsgType::FotaData => {
-            let mut v: Vec<u8, FOTA_CHUNK> = Vec::new();
-            let take = payload.len().min(FOTA_CHUNK);
-            let _ = v.extend_from_slice(&payload[..take]);
-            // One FotaData per FotaReq (see FOTA_DATA): the proxy matches chunks by
-            // offset, so if the depth-2 queue is somehow full we drop the *incoming*
-            // frame rather than evict a queued chunk the proxy may still need to match.
-            let _ = FOTA_DATA.try_send(v);
-        }
         _ => {}
     }
 }
@@ -513,19 +477,6 @@ async fn route_frame(inner: &[u8]) {
 async fn send<T: Serialize>(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg_type: MsgType, payload: &T) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame(msg_type, *seq, payload, &mut buf) {
-        Ok(n) => {
-            *seq = seq.wrapping_add(1);
-            let _ = tx.write_all(&buf[..n]).await;
-        }
-        Err(_) => bump_dropped(),
-    }
-}
-
-/// Like [`send`] but for a **raw** (non-postcard) payload — used by `FotaReq`, whose
-/// payload is a fixed binary layout the host parses without postcard.
-async fn send_raw(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg_type: MsgType, payload: &[u8]) {
-    let mut buf = [0u8; MAX_WIRE];
-    match encode_frame_raw(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
             *seq = seq.wrapping_add(1);
             let _ = tx.write_all(&buf[..n]).await;
@@ -613,16 +564,6 @@ pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
 /// nothing is copied. Async — never dropped. Used by the shell engine.
 pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
     enqueue(Outgoing::Completions(c)).await;
-}
-
-/// Send a FOTA host-proxy request to the host (a gateway asking for image/manifest bytes).
-/// Goes through the writer task as a raw `FotaReq` frame; the host replies with a `FotaData`
-/// frame the caller reads off the RX half (see `fota::HostProxySource`). Async — backpressured
-/// while USB is present (host-proxy FOTA only runs over a live console); drops rather than parks
-/// if the console is down. `offset ==
-/// `[`tower_protocol::fota::FOTA_MANIFEST_OFFSET`] requests the signed manifest.
-pub async fn send_fota_req(offset: u32, len: u16) {
-    enqueue(Outgoing::FotaReq { offset, len }).await;
 }
 
 /// Record the firmware name and emit the boot `Hello` + a banner log. Called by the

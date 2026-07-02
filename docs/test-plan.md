@@ -2,10 +2,10 @@
 
 A **reusable**, end-to-end validation suite for the TOWER firmware SDK (STM32L083CZ +
 SPIRIT1). It covers every subsystem — drivers, console/shell, crypto, storage, the full
-radio/network stack, spectrum-access (EU AFA / US FHSS), and signed A/B FOTA — with concrete
+radio/network stack, and spectrum-access (EU AFA / US FHSS) — with concrete
 **pass signals** and a catalogue of **edge cases**. Run it whole for a release gate, or pick a
-section for a focused regression. Companion guides: `docs/console.md`, `docs/radio.md`,
-`docs/fota.md`. Host-only unit tests: `just test`.
+section for a focused regression. Companion guides: `docs/console.md`, `docs/radio.md`.
+Host-only unit tests: `just test`.
 
 > This document is intended to be re-run by a human or by an agent. Section 3 explains the
 > capture mechanics that make the firmware's "print once at boot" examples observable; the
@@ -166,11 +166,10 @@ Radio examples select node/gateway/peer behaviour at **compile time** via cargo 
 | edge_rapid | `role-node` | `role-gateway` checker | 2 |
 | radio_interop | `role-node` | `role-gateway` | 2 |
 | radio_gateway / radio_node | (separate examples) | | 2 |
-| fota_ota | `role-node,fota-active` (+`fota-v2` for v2 image) | `role-gateway` | 2 |
 
 KAT/single-board radio examples that need **no** feature and **no** peer: `net_persist`,
 `net_duty_kat`, `fhss_kat`, `fhss_sweep`, `fhss_compliance`, `edge_recovery`,
-`crypto_*`, `edge_frame_limits`, `fota_stage`, `fota_app`.
+`crypto_*`, `edge_frame_limits`.
 
 ---
 
@@ -183,8 +182,7 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | ID | What | Pass |
 |---|---|---|
 | H1 | `tower-kv` codec (12 tests: append/latest-wins, torn-append, torn-flip, torn-superblock fail-closed, compaction, full, migrate legacy/fresh, key-zero reserved) | `test result: ok. 12 passed` |
-| H2 | `fota-sign` interop (3 tests: dalek↔salty verify, DEV_SEED↔VENDOR_PUBKEY pin, host/device digest agree) | `test result: ok. 3 passed` |
-| H3 | bootloader size-check (≤18432 B budget; hard limit 20480) | prints `B used / … region` and exits 0 |
+| H2 | `tower-radio-core` (11 tests: duty token-bucket math + FHSS hop permutation) | `test result: ok. 11 passed` |
 
 ### B. Board bring-up & peripheral drivers
 | ID | Example | Mode | Pass / observable | Edge cases |
@@ -276,15 +274,6 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | L1 | edge_rapid | node `sent N (delivered=N other=0)`; GW `violations=0 (monotonic OK)` — never `ORDER VIOLATION` | back-to-back confirms; strict-monotonic accept; no double-accept |
 | L2 | radio_interop | GW `VERDICT: PASS`; node logs `seed=…` (replayable); invariants: CRC, order, duty, confirm-resolution, oversize-rejected | run long (minutes–hours); `LATCHED FAIL` lights LED solid |
 
-### M. FOTA (signed A/B OTA)
-| ID | Example | Boards | How | Pass |
-|---|---|---|---|---|
-| M1 | fota_stage | 1 (FOTA-linked) | `just flash-fota fota_stage` ; mode B (longer window — stages several sizes) | `fota_stage: … ALL PASS ***` (write/read-back/digest of staged images) |
-| M2 | fota_app | 1 (FOTA-linked) | `just flash-fota fota_app`; observe self-swap + confirm, then revert path | `*** SWAP CONFIRMED ***` (and revert on unconfirmed boot) |
-| M3 | fota_ota E2E | 2 | node: `TOWER_FEATURES=role-node just flash-fota fota_ota`; GW: `TOWER_FEATURES=role-gateway just flash example fota_ota`; build+sign the update `just fota-update`; serve `tower -d <GW> fota serve --image target/fota-update.bin --manifest target/fota-update.fmanifest`; watch node | node pulls → bootloader verifies Ed25519+SHA → swap → `*** UPDATE CONFIRMED ***` running v2 |
-
-FOTA happy-path detail and the bootloader verify gate live in `docs/fota.md`.
-
 ---
 
 ## 6. Cross-cutting edge-case catalogue
@@ -293,12 +282,6 @@ These are higher-value "be creative" cases to fold into runs as time allows. Man
 tweak or fault injection (note them as separate experiments, don't leave the tree dirty):
 
 **Security / crypto**
-- FOTA tampered image: flip one byte of the served `.bin` → bootloader must reject (no swap).
-- FOTA wrong key: sign with a non-DEV_SEED key → reject.
-- FOTA downgrade: serve a *lower* version than installed → rollback policy refuses.
-- FOTA interrupted download: power-cut the node mid-pull → resumes from the EEPROM high-water mark.
-- FOTA power-loss during swap: reset during bootloader swap → A/B leaves a consistent slot (no brick).
-- FOTA unconfirmed boot: app doesn't call confirm → next boot reverts to the old slot.
 - Replay: re-send a captured frame (cnt ≤ last_seen) → dropped; forged high counter → CCM-rejected *before* it can poison last_seen.
 - Counter saturation: near 2³²−1 the link fails closed (no nonce reuse / wrap).
 

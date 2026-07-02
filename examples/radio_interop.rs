@@ -43,7 +43,7 @@ const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
 /// EEPROM locals for cumulative soak tallies, in the app namespace (`NS_APP`) — structurally
-/// clear of every SDK namespace (net/fota/shell), so no manual range-picking.
+/// clear of every SDK namespace (net/shell), so no manual range-picking.
 const KV_COUNT: u8 = 0x00; // node: tx_ok / gateway: accepted
 const KV_FAIL: u8 = 0x01; // either role: latched failures
 

@@ -113,7 +113,7 @@ Little-endian frame, fits the 96-byte FIFO:
 
 - `ver_type`: bits[7:5] protocol version (=1), bits[4:0] frame type
   (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`).
-- `flags`: `CONFIRMED`, `DOWNLINK_PENDING`, `LAST_CHUNK`, `BULK_ANNOUNCE`.
+- `flags`: `CONFIRMED`, `LAST_CHUNK`, `BULK_ANNOUNCE`.
 - The whole cleartext header is the CCM **AAD**; the payload is encrypted.
 - **Nonce** (13 B, not transmitted, reconstructed from the header):
   `nonce_for(src, counter, bulk_index)` = `src ‖ counter ‖ bulk_index ‖ 0x0000`.
@@ -211,15 +211,14 @@ wrappers over `bulk_serve_from(dest, &mut source)` / `bulk_fetch_into(src, &mut
 sink)`, which pull each chunk from a [`BulkSource`] and hand each chunk to a
 [`BulkSink`] as it arrives. Neither side buffers the whole transfer, so RAM is
 **constant regardless of size** (only the slice wrappers are bounded, by their
-slice). This removes the old monolithic-buffer ceiling (~6 KB on this 20 KB part)
-and is the path a flash-backed FOTA needs: serve an image from a flash reader,
-stream the received image straight into a staging slot. Verified on hardware to
-**64 KB (1024 chunks, firmware-sized)** with constant RAM — see `net_bulk_stream`.
+slice). This removes the old monolithic-buffer ceiling (~6 KB on this 20 KB part).
+Verified on hardware to
+**64 KB (1024 chunks)** with constant RAM — see `net_bulk_stream`.
 
 ```rust
-// FOTA-shaped usage: implement the two traits over flash instead of a slice.
-net.bulk_serve_from(NODE_ID, &mut image_reader).await;   // BulkSource: read flash → chunk
-net.bulk_fetch_into(GW_ID, &mut flash_writer).await;     // BulkSink: chunk → write flash + hash
+// Streaming usage: implement the two traits over any backing store.
+net.bulk_serve_from(NODE_ID, &mut source).await;   // BulkSource: read store → chunk
+net.bulk_fetch_into(GW_ID, &mut sink).await;       // BulkSink: verify/hash/store each chunk
 ```
 
 **OTA pairing.** A 3-way JOIN under a fixed, **publicly-known** pairing key

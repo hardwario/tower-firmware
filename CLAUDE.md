@@ -6,38 +6,39 @@ Cortex-M0+). The crate is a library; runnable programs come in two kinds — edu
 `[[bin]]`, `--bin`; each runs its non-radio logic, with the radio wiring left as a TODO). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`,
 `just logs`) over the UART bootloader via the
-`tower` CLI. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/fota.md`. Host tests:
-`just test` (the `fota-sign` signer — the firmware itself is `no_std` and can't `cargo test`).
+`tower` CLI. Subsystem guides: `docs/radio.md`, `docs/console.md`. Host tests:
+`just test` (the `tower-kv` + `tower-radio-core` crates — the firmware itself is `no_std`
+and can't `cargo test`).
 
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep
 
-The console/FOTA wire format lives in a **separate repo**, github.com/hardwario/tower-protocol,
-pinned here **by git tag in four places**: `Cargo.toml`, `crates/bootloader/Cargo.toml`,
-`crates/tower-kv/Cargo.toml`, and `tools/fota-sign/Cargo.toml` (the bootloader + fota-sign add
-`features = ["verify"]`). The host CLI `tower-cli` pins the **same tag** — the two repos MUST move
+The console wire format lives in a **separate repo**, github.com/hardwario/tower-protocol,
+pinned here **by git tag in three places**: `Cargo.toml`, `crates/tower-kv/Cargo.toml`, and
+`tools/hil/Cargo.toml` (the out-of-workspace HIL harness, which decodes frames natively).
+The host CLI `tower-cli` pins the **same tag** — the two repos MUST move
 together, because postcard isn't self-describing (mismatched versions silently mis-decode).
+`just check-protocol-pin` verifies all the in-repo pins agree.
 
 **If you change the protocol, or need a newer tower-protocol:** make the change in the
 tower-protocol repo and follow its `CLAUDE.md` release runbook, then bump it here in the same
 change-set:
 
 ```sh
-# set tag = "vX.Y.Z" in Cargo.toml, crates/bootloader/Cargo.toml, crates/tower-kv/Cargo.toml,
-# tools/fota-sign/Cargo.toml
-cargo update -p tower-protocol   # covers the workspace: root, bootloader, tower-kv
-cargo update --manifest-path tools/fota-sign/Cargo.toml -p tower-protocol
-just test            # + build a FOTA example
+# set tag = "vX.Y.Z" in Cargo.toml, crates/tower-kv/Cargo.toml, tools/hil/Cargo.toml
+cargo update -p tower-protocol   # covers the workspace: root, tower-kv
+cargo update --manifest-path tools/hil/Cargo.toml -p tower-protocol
+just test            # + build an example
 ```
 
-…and bump **tower-cli** to the same tag too. The protocol's own codec/manifest tests run in the
+…and bump **tower-cli** to the same tag too. The protocol's own codec tests run in the
 tower-protocol repo, not here. For local protocol co-dev, add `paths = ["/abs/path/to/tower-protocol"]`
 to your `~/.cargo/config.toml` (this repo's `.cargo/config.toml` is committed for the build target,
 so the override can't live there).
 
 ## Conventions
 
-- The whole FOTA subsystem and `tower-protocol` were developed here; design rationale + hard-won
-  caveats live in the `docs/*.md` guides and in code comments (don't strip them).
+- `tower-protocol` was developed here; design rationale + hard-won caveats live in the
+  `docs/*.md` guides and in code comments (don't strip them).
 - Radio is regulatory-sensitive: FCC `§15.247` / EU duty citations in code are real — keep them.
 
 ## Git workflow

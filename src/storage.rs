@@ -94,25 +94,6 @@ impl<'d> Storage<'d> {
         Self { flash }
     }
 
-    /// Reclaim the underlying blocking [`Flash`] handle.
-    ///
-    /// The L0 has a single `Flash` peripheral that drives **both** the data EEPROM
-    /// (this module) and the **program flash** (where FOTA stages an image). They are
-    /// disjoint regions on the same handle, so a program-flash writer (see
-    /// [`crate::fota::Stage`]) borrows the very handle `Storage` owns. Use this to hand
-    /// it over — e.g. for FOTA staging that does not also need the EEPROM KV store.
-    pub fn into_flash(self) -> Flash<'d, Blocking> {
-        self.flash
-    }
-
-    /// Borrow the underlying blocking [`Flash`] handle (program-flash + EEPROM live on
-    /// the same peripheral; see [`into_flash`](Self::into_flash)). Lets a FOTA
-    /// [`Stage`](crate::fota::Stage) write program flash while `Storage` retains
-    /// ownership of the EEPROM KV state.
-    pub fn flash_mut(&mut self) -> &mut Flash<'d, Blocking> {
-        &mut self.flash
-    }
-
     /// Total EEPROM size in bytes.
     pub const fn len(&self) -> usize {
         EEPROM_SIZE
@@ -160,16 +141,14 @@ pub struct Ns(pub u8);
 
 /// Radio [`net`](crate::radio::net) layer (TX-counter watermark, last-seen lanes).
 pub const NS_NET: Ns = Ns(0x52);
-/// [`fota`](crate::fota) (download high-water mark / ident, installed-version rollback floor).
-pub const NS_FOTA: Ns = Ns(0x54);
 /// Console/shell settings (one local per declared [`Setting`](crate::shell)).
 pub const NS_SHELL: Ns = Ns(0x55);
 /// Application-owned state — apps pick any locals here, clear of every SDK namespace.
 pub const NS_APP: Ns = Ns(0x60);
 
 /// Compose a full [`Kv`] key from a namespace + an 8-bit local key. Use it for `const` keys and at
-/// API boundaries that take a raw `u16` (e.g. `Net::bulk_fetch_to_flash`'s progress key); for live
-/// get/set prefer a [`Scoped`] handle ([`Nv::scope`]), which applies this automatically.
+/// API boundaries that take a raw `u16`; for live get/set prefer a [`Scoped`] handle
+/// ([`Nv::scope`]), which applies this automatically.
 pub const fn key(ns: Ns, local: u8) -> u16 {
     ((ns.0 as u16) << 8) | local as u16
 }
@@ -199,14 +178,6 @@ impl<'d> Kv<'d> {
     /// Reclaim the underlying [`Storage`] for raw access.
     pub fn into_storage(self) -> Storage<'d> {
         self.storage
-    }
-
-    /// Borrow the underlying [`Storage`] — lets the network layer reach **program flash**
-    /// (via [`Storage::flash_mut`]) during a FOTA download while `Net` keeps owning the KV
-    /// store for its counter state. The EEPROM (this KV) and program flash are disjoint
-    /// regions on the one `Flash` peripheral, so they don't interfere.
-    pub fn storage_mut(&mut self) -> &mut Storage<'d> {
-        &mut self.storage
     }
 
     /// Store raw bytes under `key`. Use this for scalars (`&x.to_le_bytes()`) or
@@ -250,15 +221,14 @@ impl<'d> Kv<'d> {
 
 /// The one process-wide [`Kv`] over the EEPROM, behind a blocking mutex + `RefCell`, parked in a
 /// `'static` (see [`Nv::install`]). Every subsystem — radio [`net`](crate::radio::net), the
-/// [`shell`](crate::shell), [`fota`](crate::fota), and apps — borrows it through an [`Nv`] handle.
+/// [`shell`](crate::shell), and apps — borrows it through an [`Nv`] handle.
 ///
 /// A *blocking* (non-async) mutex suffices: EEPROM access is synchronous and is never held across
 /// `.await` on this single-core cooperative executor, and no EEPROM access happens in an interrupt.
-/// The `Option` lets a sole-owner FOTA app reclaim the raw `Flash` via [`Nv::into_owned_flash`].
-pub type SharedKv = Mutex<CriticalSectionRawMutex, RefCell<Option<Kv<'static>>>>;
+pub type SharedKv = Mutex<CriticalSectionRawMutex, RefCell<Kv<'static>>>;
 
 /// A cheap, `Copy` handle to the one shared [`Kv`]. Hand the same handle to `Net`, the shell, and
-/// FOTA at once (it is [`Board::kv`](crate::board::Board)); each method locks + borrows the store
+/// apps at once (it is [`Board::kv`](crate::board::Board)); each method locks + borrows the store
 /// for that one call, so the subsystems coexist over the single EEPROM. They stay non-colliding by
 /// each taking a [`Scoped`] view of their own namespace ([`Nv::scope`]).
 #[derive(Copy, Clone)]
@@ -270,18 +240,15 @@ impl Nv {
     /// panics). The sole caller is [`Board::take`](crate::board::Board::take).
     pub fn install(storage: Storage<'static>) -> Self {
         let cell: &'static SharedKv = cortex_m::singleton!(
-            : SharedKv = Mutex::new(RefCell::new(Some(Kv::new(storage))))
+            : SharedKv = Mutex::new(RefCell::new(Kv::new(storage)))
         )
         .expect("Nv::install called more than once");
         Nv(cell)
     }
 
-    /// Run `f` against the one [`Kv`] under the lock. Panics only if the `Kv` was reclaimed by
-    /// [`into_owned_flash`](Self::into_owned_flash) — which a sole-owner FOTA app does, and it
-    /// serves no shell / builds no `Net`, so nothing else calls this afterwards.
+    /// Run `f` against the one [`Kv`] under the lock.
     fn with<R>(&self, f: impl FnOnce(&mut Kv<'static>) -> R) -> R {
-        self.0
-            .lock(|c| f(c.borrow_mut().as_mut().expect("Nv used after into_owned_flash")))
+        self.0.lock(|c| f(&mut c.borrow_mut()))
     }
 
     /// Store raw bytes under `key` (see [`Kv::set_bytes`]).
@@ -309,27 +276,6 @@ impl Nv {
         self.with(|kv| kv.compact())
     }
 
-    /// Borrow the underlying **program-flash** handle for a *synchronous* op (FOTA staging, or a
-    /// boot-state read/confirm), while the EEPROM [`Kv`] stays parked behind the lock. The EEPROM
-    /// and program flash are disjoint regions of the one `Flash` peripheral (see
-    /// [`Storage::flash_mut`]). The lock is held for the whole closure — do **not** `.await` and do
-    /// **not** call other [`Nv`] methods inside `f`.
-    pub fn with_flash<R>(&self, f: impl FnOnce(&mut Flash<'static, Blocking>) -> R) -> R {
-        self.with(|kv| f(kv.storage_mut().flash_mut()))
-    }
-
-    /// Reclaim the owned program `Flash`, consuming the shared [`Kv`]. **Sound only for a
-    /// sole-owner FOTA app** that serves no shell and builds no `Net` — e.g. a staging / A-B
-    /// updater that must hold `Flash` across `.await` (which the locked
-    /// [`with_flash`](Self::with_flash) cannot give). After this, any other [`Nv`] call panics, so
-    /// use `app!(run, no_shell)`.
-    pub fn into_owned_flash(self) -> Flash<'static, Blocking> {
-        self.0
-            .lock(|c| c.borrow_mut().take().expect("Nv flash already reclaimed"))
-            .into_storage()
-            .into_flash()
-    }
-
     /// A namespace-scoped view: every get/set is keyed by an 8-bit `local`, silently prefixed with
     /// `ns`. A subsystem holding the returned [`Scoped`] **cannot** address another namespace's
     /// keys, so cross-subsystem collisions are impossible by construction. Hand each subsystem
@@ -354,7 +300,7 @@ impl Scoped {
         ((self.ns as u16) << 8) | local as u16
     }
 
-    /// The underlying unscoped handle (e.g. for [`Nv::with_flash`], or to re-`scope`).
+    /// The underlying unscoped handle (e.g. to re-`scope`).
     pub fn raw(&self) -> Nv {
         self.nv
     }

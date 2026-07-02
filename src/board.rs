@@ -74,9 +74,8 @@ pub struct Board {
     /// with the TMP112; reclaim it with [`tmp112`](Self::tmp112)`.release()`.
     pub accel_int: ExtiInput<'static, Async>,
     /// The one shared key-value store over the data EEPROM — see [`storage`](crate::storage).
-    /// `Copy`; hand the same handle to `Net`, the [`shell`](crate::shell), and FOTA at once (each
-    /// call locks the one store). For raw program-flash access (FOTA staging) use
-    /// [`Nv::with_flash`](crate::storage::Nv::with_flash).
+    /// `Copy`; hand the same handle to `Net`, the [`shell`](crate::shell), and the app at once
+    /// (each call locks the one store).
     pub kv: Nv,
 
     // --- SPIRIT1 sub-GHz radio (SPSGRF module) — see [`radio`](crate::radio). ---

@@ -64,12 +64,10 @@ impl FrameType {
     }
 }
 
-/// Frame flag bits (docs/radio.md).
+/// Frame flag bits (docs/radio.md). Bit 1 is unassigned (free for a future flag).
 pub mod flags {
     /// bit0: confirmed delivery requested.
     pub const CONFIRMED: u8 = 1 << 0;
-    /// bit1: downlink-pending (set in an ACK).
-    pub const DOWNLINK_PENDING: u8 = 1 << 1;
     /// bit2: last chunk (BULK_DATA).
     pub const LAST_CHUNK: u8 = 1 << 2;
     /// bit3: bulk-announce (DATA frame announcing a pending bulk).

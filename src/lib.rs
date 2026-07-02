@@ -18,7 +18,6 @@
 //! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
 //! - [`storage`] — EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
-//! - [`fota`] — firmware-over-the-air image staging (program-flash sink + layout + state).
 //! - [`ws2812`] — WS2812B/SK6812 strip driver (timer PWM + DMA).
 //! - [`strip`] — addressable-LED effects (rainbow, chase, …) with brightness+gamma.
 
@@ -27,7 +26,6 @@
 pub mod board;
 pub mod button;
 pub mod console;
-pub mod fota;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;
@@ -45,7 +43,7 @@ pub use embassy_executor::Spawner;
 /// Wraps your `async fn run(b: Board)` with the STOP-mode executor + reset entry and the
 /// always-on board setup ([`board::Board::take`] — clock, console, TMP112 one-shot). It also
 /// **serves the interactive [`shell`](crate::shell) by default**, over the shared EEPROM
-/// [`Nv`](crate::storage::Nv) handle, so the app can drive `Net`/FOTA on the same `b.kv`
+/// [`Nv`](crate::storage::Nv) handle, so the app can drive `Net` on the same `b.kv`
 /// alongside it. The whole app is then just:
 ///
 /// ```ignore
@@ -62,7 +60,7 @@ pub use embassy_executor::Spawner;
 /// ```
 ///
 /// The shell is served **before** `run`, so it claims the console RX while still free; an app
-/// that reads the console RX itself (e.g. a host-proxy gateway) must use `no_shell`.
+/// that reads the console RX itself must use `no_shell`.
 #[macro_export]
 macro_rules! app {
     // Default: serve the base SDK shell (over the shared EEPROM KV), then run.

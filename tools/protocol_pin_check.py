@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """Verify the tower-protocol git-tag pin is identical everywhere (the golden lockstep rule).
 
-The console/FOTA wire format lives in the separate `tower-protocol` repo, pinned here by git
-tag in FOUR manifests. postcard is NOT self-describing, so a tag mismatch does not error at
+The console wire format lives in the separate `tower-protocol` repo, pinned here by git
+tag in THREE manifests. postcard is NOT self-describing, so a tag mismatch does not error at
 build time — it silently mis-decodes bytes on the wire. This guard turns that latent hazard
 into a hard failure.
 
 Usage:
-    protocol_pin_check.py                       # local half: the 4 firmware manifests agree
+    protocol_pin_check.py                       # local half: the firmware manifests agree
     protocol_pin_check.py --cli-url <raw-url>   # also fetch tower-cli's Cargo.toml and compare
 
-The four in-repo manifests (see the repo CLAUDE.md lockstep note):
+The in-repo manifests (see the repo CLAUDE.md lockstep note):
     Cargo.toml
-    crates/bootloader/Cargo.toml
     crates/tower-kv/Cargo.toml
-    tools/fota-sign/Cargo.toml
+    tools/hil/Cargo.toml
 
 Plain python3/python (no shell, no coreutils) so it runs the same on Linux, macOS, Windows —
 matching the justfile's cross-platform convention. `just check-protocol-pin` runs the local
@@ -29,9 +28,8 @@ import urllib.request
 # The tower-protocol pins that MUST all carry the same tag (relative to the repo root).
 MANIFESTS = [
     "Cargo.toml",
-    "crates/bootloader/Cargo.toml",
     "crates/tower-kv/Cargo.toml",
-    "tools/fota-sign/Cargo.toml",
+    "tools/hil/Cargo.toml",
 ]
 
 # Match e.g.:  tower-protocol = { git = "...", tag = "v1.0.0", features = [...] }
@@ -70,7 +68,7 @@ def main() -> None:
         sys.exit(
             "ERROR: tower-protocol tag MISMATCH across firmware manifests "
             f"({sorted(distinct)}). postcard is not self-describing — a mismatch silently "
-            "mis-decodes the wire. Align all four pins in the same change-set."
+            "mis-decodes the wire. Align both pins in the same change-set."
         )
     firmware_tag = distinct.pop()
     print(f"firmware tower-protocol pin: {firmware_tag} (all {len(MANIFESTS)} manifests agree)")

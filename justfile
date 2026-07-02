@@ -17,8 +17,8 @@
 # `cargo install --path ../github/tower-cli`, or grab a release binary).
 #
 # CROSS-PLATFORM: every recipe is a single program invocation (no bash, no sed/awk/ls pipelines),
-# so the same `just` recipes run on Linux, macOS, and Windows. The two genuinely script-shaped
-# steps live in Python (tools/size_check.py, tools/fota_merge.py) rather than inline shell.
+# so the same `just` recipes run on Linux, macOS, and Windows. The one genuinely script-shaped
+# step lives in Python (tools/protocol_pin_check.py) rather than inline shell.
 # Windows uses cmd.exe (below) so exit codes propagate to CI; the one directory listing that must
 # differ per-OS has [unix] / [windows] variants.
 
@@ -41,18 +41,11 @@ _device_flag := if device == "" { "" } else { "-d " + device }
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
-# A FOTA build always needs `fota-active` (link the app into the ACTIVE slot); append any extras.
-_fota_features := if features == "" { "fota-active" } else { "fota-active," + features }
 
 # Host triple — host-side tests must build for the host, since the workspace default target
 # (thumbv6m, see .cargo/config.toml) has no libtest / panic handler. `--print host-tuple` avoids
 # parsing `rustc -vV` and works on every OS.
 host := trim(`rustc --print host-tuple`)
-
-# Bootloader code budget (bytes) for `size-check`: the 20 KB BOOTLOADER region (BOOTLOADER_SIZE in
-# src/fota/mod.rs) minus a 2 KB reserve. The loader is ≈16 KB today; this warns well before it could
-# overflow its partition — which on the SWD-less Radio Dongle is an unrecoverable brick.
-boot_budget := "18432"
 
 # NOTE on comments below: `just --list` shows the LAST comment line above a recipe, so each recipe
 # ends its comment block with a one-line summary (examples/detail, if any, come first).
@@ -107,24 +100,12 @@ size kind name:
 # TOWER_FEATURES for cargo features:
 #   just flash example blinky --no-verify
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed
-# Build + flash a target (plain full-flash at 0x0800_0000, no bootloader) — erase/write/verify/reset.
+# Build + flash a target — erase/write/verify/reset.
 flash kind name *args: (build kind name)
     tower {{_device_flag}} flash {{bin}} {{args}}
 
-# The app links into the ACTIVE slot (@0x0800_8100), merged with the bootloader (@0x0800_0000) into
-# one image (see `fota-image`); `fota-active` is added automatically, TOWER_FEATURES appended:
-#   just flash-fota fota_app                              # FOTA self-swap demo
-#   TOWER_FEATURES=role-node just flash-fota fota_ota     # the real OTA node (v1)
-# Build + flash the FOTA-capable (bootloader + ACTIVE-linked app) image; read it with `just logs`.
-flash-fota name *args: (fota-image name _fota_features)
-    tower {{_device_flag}} flash target/fota-merged.bin {{args}}
-
 # Build + flash a target (kind example|app), then stream its framed console logs (resets first).
 run kind name: (flash kind name)
-    tower {{_device_flag}} logs
-
-# Build + flash a FOTA image, then stream its framed console logs (watch the swap + confirm).
-run-fota name: (flash-fota name)
     tower {{_device_flag}} logs
 
 
@@ -151,65 +132,28 @@ devices:
     tower devices
 
 
-# === FOTA tooling =================================================================================
-
-# Combines the bootloader (@0x0800_0000) + the ACTIVE-linked app (@0x0800_8100) into
-# target/fota-merged.bin via tools/fota_merge.py. `flash-fota` calls this for you:
-#   just fota-image                                  # fota_app (swap+confirm)
-#   just fota-image fota_ota role-node,fota-active   # the real OTA node (v1)
-# Build the merged FOTA image WITHOUT flashing (e.g. for CI).
-fota-image example="fota_app" features="fota-active":
-    cargo objcopy --release -p tower-bootloader -- -O binary target/fota-boot.bin
-    cargo objcopy --release --example {{example}} --features "{{features}}" -- -O binary target/fota-app.bin
-    {{python}} tools/fota_merge.py target/fota-boot.bin target/fota-app.bin target/fota-merged.bin
-
-# A newer fota_ota build (version 2 by default, via the `fota-v2` feature) that supersedes the v1
-# a device received from `flash-fota`. App-only + a signed manifest — the on-device bootloader
-# verifies & swaps it; nothing is flashed here. Produces target/fota-update.{bin,fmanifest},
-# served with `tower fota serve` (see docs/fota.md).
-# Build + sign the over-the-air firmware update the host serves to a node (real-firmware swap E2E).
-fota-update version="2":
-    cargo objcopy --release --example fota_ota --features role-node,fota-active,fota-v2 -- -O binary target/fota-update.bin
-    just fota-sign sign --version {{version}} --in target/fota-update.bin --out target/fota-update.fmanifest
-
-# Signs a firmware image into a signed FOTA manifest (docs/fota.md):
-#   just fota-sign pubkey
-#   just fota-sign sign --version 2 --in target/firmware.bin --out target/fw.fmanifest
-# Run the host signer (tools/fota-sign, a std host binary built for the host triple).
-fota-sign *args:
-    cargo run --quiet --manifest-path tools/fota-sign/Cargo.toml --target {{host}} -- {{args}}
-
-
 # === Tests & checks ===============================================================================
 
 # Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
-# codec), `tower-radio-core` (the EU/US/FHSS duty token-bucket math + the fixed FHSS hop
-# permutation — the regulatory arithmetic), and `fota-sign` (host<->device Ed25519 interop + the
-# DEV_SEED<->VENDOR_PUBKEY pin). The shared wire-protocol tests live in
-# github.com/hardwario/tower-protocol. Runs `size-check` first.
+# codec) and `tower-radio-core` (the EU/US/FHSS duty token-bucket math + the fixed FHSS hop
+# permutation — the regulatory arithmetic). The shared wire-protocol tests live in
+# github.com/hardwario/tower-protocol.
 # Run the firmware's host-side unit tests.
-test *args: size-check
+test *args:
     cargo test -p tower-kv --target {{host}} {{args}}
     cargo test -p tower-radio-core --target {{host}} {{args}}
-    cargo test --manifest-path tools/fota-sign/Cargo.toml --target {{host}} {{args}}
-
-# The linker only hard-fails at the full 20 KB region (= brick on the SWD-less Dongle), so this trips
-# ~2 KB earlier (`boot_budget`) as an early warning. Wired into `just test`; also run it in CI.
-# Guard the bootloader against silently eating its flash-region margin (tools/size_check.py).
-size-check:
-    {{python}} tools/size_check.py {{boot_budget}}
 
 # postcard is NOT self-describing, so a tower-protocol tag mismatch silently mis-decodes the wire
 # (never a build error) — this makes it a hard failure. Local half of the CI `lockstep` job (which
 # also fetches tower-cli's pin); the golden rule in the repo CLAUDE.md. tools/protocol_pin_check.py.
-# Verify the tower-protocol git-tag pin is identical across all four in-repo manifests.
+# Verify the tower-protocol git-tag pin is identical across all in-repo manifests.
 check-protocol-pin:
     {{python}} tools/protocol_pin_check.py
 
 
 # === Hardware-in-the-loop (HIL) ===================================================================
 #
-# The HIL harness (tools/hil, a std host crate excluded from the workspace like fota-sign) drives
+# The HIL harness (tools/hil, a std host crate excluded from the workspace) drives
 # the real bench: a TOWER Core Module (J-Link SWD + Nordic PPK2) + a TOWER Radio Dongle (USB). It
 # decodes the framed console natively (tower-protocol) and asserts on typed Log/Event + seq-gaps.
 # The bench roster lives in tools/hil/hil.toml (re-resolved against `tower devices` at startup).

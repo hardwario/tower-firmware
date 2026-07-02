@@ -672,7 +672,7 @@ dependencies = [
 [[package]]
 name = "tower-protocol"
 version = "1.0.0"
-source = "git+https://github.com/hardwario/tower-protocol?tag=v1.0.0#48149fabebd1c595eb891d48f05752eff193e1a9"
+source = "git+https://github.com/hardwario/tower-protocol?tag=v1.0.0#e96500dc0e2c35c3de6832d9682e874206cfd39a"
 dependencies = [
  "cobs",
  "heapless 0.9.3",

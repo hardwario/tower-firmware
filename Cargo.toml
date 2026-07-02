@@ -10,11 +10,11 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/bootloader", "crates/tower-kv", "crates/tower-radio-core", "crates/fota-layout"]
-# The FOTA host signing tool and the HIL harness are std host crates — excluded so workspace
-# builds (which target thumbv6m via .cargo/config.toml) don't try to cross-compile them. Run them
-# with an explicit host target: `just fota-sign ...` / `just hil` (see the justfile).
-exclude = ["tools/fota-sign", "tools/hil"]
+members = ["crates/tower-kv", "crates/tower-radio-core"]
+# The HIL harness is a std host crate — excluded so workspace builds (which target thumbv6m via
+# .cargo/config.toml) don't try to cross-compile it. Run it with an explicit host target:
+# `just hil` (see the justfile).
+exclude = ["tools/hil"]
 resolver = "2"
 
 [dependencies]
@@ -95,23 +95,9 @@ tower-kv = { path = "crates/tower-kv" }
 # `src/radio` (the `Instant`-based `try_tx` wrapper stays in src/radio/duty.rs). no_std.
 tower-radio-core = { path = "crates/tower-radio-core" }
 
-# Shared console wire protocol (framing + CRC + message schema) + the shared FOTA `Manifest`
-# (`tower_protocol::fota`) so the host signer and the device cannot drift on the signed bytes.
-# Its own repo, pinned by tag (bump in lockstep with `tower-cli` on any wire change).
-# NOTE: NO `verify` feature here — the Ed25519 signature check runs in the **bootloader**
-# (crates/bootloader enables `verify` → salty), keeping salty out of the duplicated A/B app
-# slots. The app uses only the crypto-free manifest pieces (`decode`/`supersedes`).
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.1.0" }
-
-# The FOTA flash partition table (offsets/sizes + embassy-boot swap guards), shared with the
-# standalone bootloader (crates/bootloader) so the two can never drift on the layout. no_std,
-# dependency-free leaf crate. Re-exported from `src/fota` — see crates/fota-layout.
-fota-layout = { path = "crates/fota-layout" }
-
-# SHA-256 for FOTA: the FlashSink folds a running hash over the staged image, and the
-# bootloader recomputes it before swap to check the staged image against the signed
-# manifest (docs/fota.md). no_std, no-alloc, pure-Rust — builds for thumbv6m.
-sha2 = { version = "0.10", default-features = false }
+# Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
+# (bump in lockstep with `tower-cli` on any wire change).
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
 
 # Bounded buffers for the framed console (the TX queue item, log/print scratch).
 # Matches the version already in the lockfile (pulled transitively by embassy).
@@ -120,20 +106,6 @@ heapless = "0.9"
 # Async IO traits for the interrupt-buffered console UART (BufferedUart). Version must
 # match embassy-stm32's (0.7) or the trait impls won't line up.
 embedded-io-async = "0.7"
-
-[dev-dependencies]
-# embassy-boot for the FOTA app example only (examples/fota_app.rs) — it links into the
-# ACTIVE slot under crates/bootloader and uses the blocking FirmwareUpdater to self-confirm
-# a good boot. A dev-dependency, NOT a library dependency: the core SDK does not depend on
-# the bootloader; only the FOTA app does. Version matches the locked embassy stack (0.8.0).
-embassy-boot-stm32 = "0.8.0"
-# STM32L0 program flash erases to 0x00 (not 0xFF). embassy-boot's swap-progress marker logic
-# depends on the erased value, so the app's FirmwareUpdater must agree with the bootloader —
-# enable `flash-erase-zero` on the shared embassy-boot (embassy-boot-stm32 doesn't forward it).
-embassy-boot = { version = "0.7.0", features = ["flash-erase-zero"] }
-# Lets the FOTA app's staging helper name the `NorFlash` bound on the updater's flash
-# (already in the tree transitively via embassy-stm32/embassy-boot). Example-only.
-embedded-storage = "0.3"
 
 # Build-time role selection for the two-board radio examples: one source file is
 # built twice with different roles — e.g. `TOWER_FEATURES=role-gateway just flash
@@ -151,23 +123,6 @@ role-peer-a = []
 role-peer-b = []
 node-1 = []
 node-2 = []
-# FOTA: link an example into the ACTIVE flash slot (0x0800_B800) so it boots under
-# crates/bootloader instead of directly at 0x0800_0000. When set, build.rs puts an
-# ACTIVE-origin memory.x on the link path (it wins over embassy-stm32's auto-generated
-# one). Build the FOTA app with it: `TOWER_FEATURES=fota-active just flash fota_app`.
-fota-active = []
-# Version bump (1 -> 2) for the FOTA examples: fota_app's reported version, and the fota_ota
-# node's VERSION (so `just fota-update` builds an image that supersedes the v1 the host serves
-# over). Pair with fota-active.
-fota-v2 = []
-# Revert test: fota_app skips mark_booted after a swap, so power-cycling rolls the
-# unconfirmed image back (bootloader auto-revert). Pair with fota-active.
-fota-no-confirm = []
-# Diagnostics for the OTA pull (`fota::pull_update` + the fota_ota node): log each stage and
-# drain the console between stages, and add a boot countdown to the node, so a halt/fault on
-# real hardware is localized to the last stage printed (the task-based console can't flush
-# after a fault). Bench-only — never ship it.
-fota-diag = []
 
 # Ready-made product firmwares for the TOWER IoT Kit — distinct from the educational
 # `examples/` (which demonstrate one block each). These are full applications, so they are

@@ -2,11 +2,11 @@
 #
 # The crate is an embedded `no_std` library for the STM32L083CZ (Cortex-M0+), so the workspace
 # default target is thumbv6m-none-eabi (see .cargo/config.toml). There is no hardware in CI, so we
-# BUILD the firmware (lib + examples + product bins) and the FOTA image, but the actual host-side
-# unit tests live in the extracted no_std leaf crates (tower-kv, tower-radio-core) + the fota-sign
-# host signer — run via `just test`, which builds those for the host triple.
+# BUILD the firmware (lib + examples + product bins), but the actual host-side unit tests live in
+# the extracted no_std leaf crates (tower-kv, tower-radio-core) — run via `just test`, which
+# builds those for the host triple.
 #
-# The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in FOUR
+# The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in THREE
 # manifests here AND in tower-cli, and postcard is not self-describing, so a tag mismatch silently
 # mis-decodes the wire rather than erroring. It must be caught in CI.
 
@@ -37,45 +37,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv6m-none-eabi
-      - name: Install cargo-binutils + llvm-tools
-        run: |
-          rustup component add llvm-tools
-          cargo install cargo-binutils
       - uses: Swatinem/rust-cache@v2
-      # Lib + product bins. Target defaults to thumbv6m (see .cargo/config.toml).
-      - name: Build lib + product bins
-        run: cargo build --release --lib --bins
-      # Educational examples. We can't use a blanket `--examples`: the two FOTA examples
-      # (fota_app / fota_ota) link against embassy-boot's `__bootloader_*` partition symbols, which
-      # only exist under the ACTIVE-slot memory.x that the `fota-active` feature swaps in — so they
-      # don't LINK without it (by design; the justfile builds them via the `fota-image` recipe).
-      # Build every other example individually here; the FOTA one is the next step.
-      - name: Build examples (non-FOTA)
-        run: |
-          set -euo pipefail
-          for f in examples/*.rs; do
-            name=$(basename "$f" .rs)
-            case "$name" in
-              fota_app|fota_ota) continue ;;  # need fota-active (next step)
-            esac
-            echo "::group::example $name"
-            cargo build --release --example "$name"
-            echo "::endgroup::"
-          done
-      # One FOTA-featured build: an example linked into the ACTIVE slot (build.rs swaps in the
-      # ACTIVE-origin memory.x under `fota-active`) — exercises the FOTA link path CI would
-      # otherwise never cover.
-      #
-      # NOTE: this builds `fota_app` (the self-swap demo), not `fota_ota,role-node`. The full OTA
-      # node currently OVERFLOWS the 77.75 KB ACTIVE slot in release (~1.7 KB at HEAD, more as the
-      # radio/crypto stack grows) — a real firmware-size issue to resolve separately, not a CI
-      # config problem. `fota_app` covers the identical ACTIVE-link + bootloader-merge path and
-      # fits. Restore `--example fota_ota --features fota-active,role-node` once the node fits.
-      - name: Build a FOTA image (ACTIVE-linked)
-        run: cargo build --release --example fota_app --features fota-active
+      # Lib + product bins + educational examples. Target defaults to thumbv6m
+      # (see .cargo/config.toml).
+      - name: Build lib + product bins + examples
+        run: cargo build --release --lib --bins --examples
 
-  # 2. Host-side unit tests: the extracted no_std cores + the fota-sign signer, plus the bootloader
-  #    size guard. `just test` builds these for the host triple (the firmware itself can't test).
+  # 2. Host-side unit tests: the extracted no_std cores. `just test` builds these for the host
+  #    triple (the firmware itself can't test).
   host-test:
     name: host tests (just test)
     runs-on: ubuntu-latest
@@ -85,22 +54,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv6m-none-eabi
-      - name: Install cargo-binutils + llvm-tools (for size-check)
-        run: |
-          rustup component add llvm-tools
-          cargo install cargo-binutils
       - name: Install just
         uses: extractions/setup-just@v2
-      - name: Ensure python3 is available
-        run: python3 --version
       - uses: Swatinem/rust-cache@v2
-      # tower-kv + tower-radio-core + fota-sign host tests, and `size-check` (runs first).
+      # tower-kv + tower-radio-core host tests.
       - name: just test
         run: just test
 
   # 3. Lint. clippy can't run `--all-targets` on thumbv6m (the tests need host libtest, which the
-  #    bare-metal target lacks), so the embedded clippy covers the buildable targets; the fota-sign
-  #    host clippy is run separately on the host triple.
+  #    bare-metal target lacks), so the embedded clippy covers the buildable targets.
   clippy:
     name: clippy (-D warnings)
     runs-on: ubuntu-latest
@@ -114,10 +76,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy (thumbv6m — lib, examples, bins)
         run: cargo clippy --lib --examples --bins -- -D warnings
-      - name: clippy (fota-sign, host)
-        run: cargo clippy --manifest-path tools/fota-sign/Cargo.toml --all-targets -- -D warnings
 
-  # 4. The golden rule: tower-protocol must be pinned to the SAME git tag in all four in-repo
+  # 4. The golden rule: tower-protocol must be pinned to the SAME git tag in all in-repo
   #    manifests AND in tower-cli. postcard is not self-describing — a mismatch mis-decodes the
   #    wire without a build error, so it has to be checked explicitly.
   lockstep:
@@ -127,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Ensure python3 is available
         run: python3 --version
-      # Local half (the four firmware manifests agree) + cross-repo half (tower-cli pins the same
+      # Local half (the firmware manifests agree) + cross-repo half (tower-cli pins the same
       # tag), fetched from the tower-cli default branch. See tools/protocol_pin_check.py and the
       # local-only `just check-protocol-pin` recipe.
       - name: Verify tower-protocol pin (firmware + tower-cli)

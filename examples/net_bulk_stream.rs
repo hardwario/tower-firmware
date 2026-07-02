@@ -8,8 +8,7 @@
 //! L0). **Neither board ever buffers the whole transfer:** the sender generates each
 //! 64 B chunk on demand from a [`BulkSource`] and the requester verifies + CRCs each
 //! chunk on the fly through a [`BulkSink`], then discards it. RAM is constant
-//! regardless of size — exactly what a flash-backed FOTA source/sink would use; here
-//! the sink just checks bytes instead of writing flash.
+//! regardless of size.
 //!
 //! The sender cycles **firmware-sized** blobs — 4 / 16 / 32 / 64 KB — and the
 //! requester is purely announce-driven (it verifies whatever length the announce
@@ -191,7 +190,7 @@ async fn run(b: Board) {
         let mut round: u32 = 0;
         loop {
             let t0 = Instant::now();
-            match net.bulk_fetch_into(GW_ID, 0, &mut sink).await {
+            match net.bulk_fetch_into(GW_ID, &mut sink).await {
                 Some(n) => {
                     let ms = t0.elapsed().as_millis().max(1);
                     let crc = sink.final_crc();

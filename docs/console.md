@@ -13,7 +13,7 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > settings framework (5 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
 > implemented and tested on real hardware. The codec has 20 host tests including
-> 9000 fuzz iterations; `just test` runs 29 in all (adding the 9 FOTA-manifest tests).
+> 9000 fuzz iterations (run in the tower-protocol repo).
 
 This is the standalone reference for using and maintaining the console subsystem —
 architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
@@ -102,7 +102,7 @@ app!(run);
 - **The codec** (`tower-protocol`) frames every message identically — see *Wire
   protocol*.
 - **RX** is read by the same manager and **routed by frame type** — shell frames to the
-  shell, `FotaData` to the host-proxy channel. The manager owns the whole UART so it can
+  shell's channel. The manager owns the whole UART so it can
   be torn down/rebuilt on USB unplug/plug — see *Low power & the dynamic console*.
 
 ### Low power & the dynamic (USB-gated) console
@@ -129,9 +129,8 @@ node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is
 
 RX is owned by the manager and **routed by frame type**: `ShellCommand`/`ShellComplete`
 go to the shell (`shell::dispatch_frame`; the shell registers its command tree + settings
-via `shell::serve`/`serve_ext`, which just store them — no task); `FotaData` goes to a
-channel the FOTA host-proxy consumes. So the shell and host-proxy keep working across
-teardown/rebuild without owning the raw RX half.
+via `shell::serve`/`serve_ext`, which just store them — no task). So the shell keeps
+working across teardown/rebuild without owning the raw RX half.
 
 **The `WakeGuard`:** even while the console is up, STOP would gate the USART clock and the
 writer's awaited TXE interrupt would never fire. The writer holds a `WakeGuard(Stop1)`
@@ -155,7 +154,6 @@ runs before the app's console.)
 | **B — live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
 | **B (no-reset check)** | across the unplug/replug in B, watch the log **uptime timestamps** | Uptime is **continuous / increasing** (device kept running+sleeping). If it resets to 0 → the device rebooted, i.e. *not* the dynamic path |
 | **C — headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI (or the ~500 ms poll fallback) wakes the MCU; console appears in `tower logs` within ~½ s |
-| **D — FOTA host-proxy** | node `just flash-fota fota_ota` (role-node); gateway (USB) `role-gateway`; host `tower fota serve …`; trigger a pull | node fetches manifest + image via the gateway and swaps (exercises the `FotaData → console::FOTA_DATA` route) |
 
 **If a test fails — where to look:**
 
@@ -167,7 +165,6 @@ runs before the app's console.)
 - **Logs appear but garbled** → framing / the reused static `TX_BUF`/`RX_BUF` across rebuilds.
 - **Shell silent, logs fine** → the RX router (`dispatch_frame`) or `SHELL_PARAMS` not set
   (a `no_shell` app has no shell by design).
-- **FOTA pull stalls** → the `FotaData → FOTA_DATA` routing (`console::route_frame`).
 - **Current doesn't drop on unplug** → the UART isn't being dropped; check the manager's
   unplug branch (`select3`) fires (VBUS debounce is 50 ms).
 - **Host reports a `seq` gap on re-plug** → should not occur: the writer's `seq` resets
@@ -474,10 +471,8 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 | `ShellResponse` | 4 | T→H | cmd_id, result, chunk, last, text |
 | `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
 | `Dropped` | 6 | T→H | count of dropped frames |
-| `FotaReq` | 7 | T→H | fixed binary: offset + length (node → host, pull request) |
 | `ShellCommand` | 16 | H→T | cmd_id, line |
 | `ShellComplete` | 17 | H→T | req_id, line, cursor |
-| `FotaData` | 18 | H→T | fixed binary: offset + image/manifest bytes (host → node) |
 
 A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
 `decode_frame` checks version + type + CRC and returns `(MsgType, seq, payload)`.
@@ -512,7 +507,6 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 - `print!` / `println!` — raw text (re-exported macros)
 - `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, vbus)`, `boot_banner(name)`
   — wiring for the dynamic (USB-gated) console, handled for you by `Board::take` / `app!`
-- `FOTA_DATA` — channel of decoded `FotaData` payloads the manager routes to the FOTA host-proxy
 
 `tower::shell`:
 - `serve(spawner, kv)` / `serve_ext(spawner, kv, app_commands, app_settings)`
@@ -542,7 +536,7 @@ The wire codec lives in its own repo now
 ([`tower-protocol`](https://github.com/hardwario/tower-protocol)); its host tests run there:
 
 ```sh
-cargo test --features verify   # in a tower-protocol checkout — 29 tests (20 codec + 9 FOTA)
+cargo test   # in a tower-protocol checkout
 ```
 
 These cover round-trips for every message, boundary frame sizes, the decoder's

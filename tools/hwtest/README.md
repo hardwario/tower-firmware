@@ -18,14 +18,13 @@ pass signals, and edge-case catalogue; this README is just the runner mechanics.
 | `build.sh <example> <outbin> [features]` | `cargo objcopy` an example to a raw `.bin` |
 | `fc.sh PORT BIN SECS OUT` | flash BIN to PORT, then mode-B capture (`jolt --reset`) for SECS |
 | `tb.sh NODE_BIN NP GW_BIN GP SECS NOUT GOUT` | two-board: flash node then gw (sequential), capture both |
-| `m3.sh NODE_PORT GW_PORT` | full FOTA OTA E2E: flash v1 node + gw, `fota serve` v2, watch node pull→swap→confirm |
 
 ## Quick recipes
 ```sh
 # resolve current ports (they re-enumerate; re-run each session)
 P1=$(ls /dev/cu.usbserial-* | sort | head -1); P2=$(ls /dev/cu.usbserial-* | sort | tail -1)
 
-# host unit tests + bootloader size guard
+# host unit tests
 just test
 
 # a one-shot KAT (mode B): flash + capture-from-reset + grep the verdict
@@ -48,6 +47,5 @@ tower -d "$P1" complete "/system settings set m"
 ```
 
 ## Notes
-- `RESULTS-2026-06-29.md` is a recorded full run (≈40 PASS + 4 findings).
+- `RESULTS-2026-06-29.md` is a recorded full run (≈33 PASS + 4 findings).
 - The inline shell is **zsh**: no `mapfile`; `${v:+--flag "$v"}` collapses to one arg (use explicit `if`).
-- FOTA swap is silent (~2.5 min) — capture ≥210 s for `fota_app`/`fota_ota` confirm lines.
