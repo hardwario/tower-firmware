@@ -187,6 +187,13 @@ See `thermometer.rs` (≈12 lines of logic) for the minimal real example.
 
 ## Build / flash / logs
 
+> **Firmware updates are wired, by design.** A device is programmed over its USB
+> serial link (the STM32 system bootloader, driven by `tower flash`) or over SWD —
+> there is no over-the-air update path. The trade is deliberate: the L083's full
+> 192 KB flash goes to the application instead of being split into update slots,
+> and the SDK carries no updater/bootloader code. Plan deployments accordingly:
+> updating a fielded unit means plugging into it.
+
 Prerequisites (one-time): `cargo install just cargo-binutils probe-rs-tools`
 and `rustup component add llvm-tools`. `just check-protocol-pin` also needs
 `python3` (`python` on Windows).

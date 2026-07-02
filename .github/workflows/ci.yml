@@ -32,7 +32,7 @@ jobs:
     name: embedded build (thumbv6m)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust (stable) + thumbv6m
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,13 +49,13 @@ jobs:
     name: host tests (just test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust (stable) + thumbv6m
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv6m-none-eabi
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
       - uses: Swatinem/rust-cache@v2
       # tower-kv + tower-radio-core host tests.
       - name: just test
@@ -67,7 +67,7 @@ jobs:
     name: clippy (-D warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust (stable) + clippy + thumbv6m
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,7 +84,7 @@ jobs:
     name: tower-protocol lockstep
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Ensure python3 is available
         run: python3 --version
       # Local half (the firmware manifests agree) + cross-repo half (tower-cli pins the same

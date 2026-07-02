@@ -25,7 +25,7 @@ postcard = { version = "1", features = ["use-std"] }
 serialport = "4.9"
 # jolt as a LIBRARY (default-features=false → no clap/anyhow/indicatif): its `port::Port` drives
 # the tuned NRST/BOOT0 pulses (reset-into-app / reset-into-bootloader) we use to reset the Core.
-jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.2.0", default-features = false }
+jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.3.0", default-features = false }
 # Parse the hil.toml bench fixture (core/dongle serials, ppk2 supply). Tiny, std-only.
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
