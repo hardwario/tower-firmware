@@ -3,9 +3,9 @@
 //!   # 1) build + sign the update image the host will serve:
 //!   just fota-update
 //!   # 2) node (ACTIVE-linked, under the bootloader; bootloader+node merged into one flash):
-//!   TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota
+//!   TOWER_DEVICE=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota
 //!   # 3) gateway (normal app; proxies the image from the host over USB):
-//!   TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash example fota_ota
+//!   TOWER_FEATURES=role-gateway TOWER_DEVICE=<gw-port> just flash example fota_ota
 //!   # 4) host (streams the signed update image to the gateway on demand):
 //!   tower -d <gw-port> fota serve --image target/fota-update.bin \
 //!                                 --manifest target/fota-update.fmanifest

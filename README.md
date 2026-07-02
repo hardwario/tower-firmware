@@ -209,7 +209,7 @@ just flash example blinky --no-verify  # extra args pass through to `tower flash
 
 Flashing + console use the [`tower`](https://github.com/hardwario/tower-cli) CLI (it
 programs the STM32L0 over the UART bootloader and decodes the framed console); install it
-on your `PATH`. Set `TOWER_PORT=/dev/cu.usbserial-XXXX` if more than one serial port is
+on your `PATH`. Set `TOWER_DEVICE=/dev/cu.usbserial-XXXX` if more than one serial port is
 present. `cargo run --release --example blinky` also flashes via the SWD probe-rs runner
 in `.cargo/config.toml` if you use a J-Link/ST-Link instead.
 

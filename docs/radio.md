@@ -35,7 +35,7 @@ Examples live in `examples/`. Flash with the UART bootloader and watch the conso
 
 ```sh
 just flash example <name>                 # build + flash (auto-detect port)
-TOWER_PORT=/dev/cu.usbserial-XXXX just flash example <name>   # pick a board
+TOWER_DEVICE=/dev/cu.usbserial-XXXX just flash example <name>   # pick a board
 tower logs                 # watch from boot
 
 # two-board examples select a role via a Cargo feature:

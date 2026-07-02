@@ -8,7 +8,7 @@
 #   just flash example blinky      # build + flash the blinky example
 #   just run app radio_push_button # build + flash a product, then stream the (framed) console logs
 #
-# Override the serial port:   TOWER_PORT=/dev/cu.usbserial-XXXX just flash example blinky
+# Override the serial device: TOWER_DEVICE=/dev/cu.usbserial-XXXX just flash example blinky
 # Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
 #
 # Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
@@ -33,9 +33,9 @@ bin := "target/firmware.bin"
 python := if os() == "windows" { "python" } else { "python3" }
 
 # Optional serial device; empty => let `tower` auto-detect the only USB serial device present.
-# (The env var stays TOWER_PORT for continuity; it's passed to `tower`/`jolt` as `-d`.)
-port := env_var_or_default("TOWER_PORT", "")
-_port_flag := if port == "" { "" } else { "-d " + port }
+# Read from TOWER_DEVICE; passed to `tower`/`jolt` as `-d`.
+device := env_var_or_default("TOWER_DEVICE", "")
+_device_flag := if device == "" { "" } else { "-d " + device }
 
 # Optional cargo features, e.g. a radio example's role selection:
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed
@@ -109,7 +109,7 @@ size kind name:
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed
 # Build + flash a target (plain full-flash at 0x0800_0000, no bootloader) — erase/write/verify/reset.
 flash kind name *args: (build kind name)
-    tower {{_port_flag}} flash {{bin}} {{args}}
+    tower {{_device_flag}} flash {{bin}} {{args}}
 
 # The app links into the ACTIVE slot (@0x0800_8100), merged with the bootloader (@0x0800_0000) into
 # one image (see `fota-image`); `fota-active` is added automatically, TOWER_FEATURES appended:
@@ -117,37 +117,37 @@ flash kind name *args: (build kind name)
 #   TOWER_FEATURES=role-node just flash-fota fota_ota     # the real OTA node (v1)
 # Build + flash the FOTA-capable (bootloader + ACTIVE-linked app) image; read it with `just logs`.
 flash-fota name *args: (fota-image name _fota_features)
-    tower {{_port_flag}} flash target/fota-merged.bin {{args}}
+    tower {{_device_flag}} flash target/fota-merged.bin {{args}}
 
 # Build + flash a target (kind example|app), then stream its framed console logs (resets first).
 run kind name: (flash kind name)
-    tower {{_port_flag}} logs
+    tower {{_device_flag}} logs
 
 # Build + flash a FOTA image, then stream its framed console logs (watch the swap + confirm).
 run-fota name: (flash-fota name)
-    tower {{_port_flag}} logs
+    tower {{_device_flag}} logs
 
 
 # === Console & device control =====================================================================
 
 # Stream the decoded framed console logs from the running MCU (extra args -> `tower logs`).
 logs *args:
-    tower {{_port_flag}} logs {{args}}
+    tower {{_device_flag}} logs {{args}}
 
 # Open the full-screen TUI console (logs + events + interactive shell).
 console:
-    tower {{_port_flag}} console
+    tower {{_device_flag}} console
 
 # Reset the MCU into the application (add `--bootloader` to enter the system bootloader).
 reset *args:
-    tower {{_port_flag}} reset {{args}}
+    tower {{_device_flag}} reset {{args}}
 
 # Erase the entire device flash, then reset into the application.
 erase:
-    tower {{_port_flag}} erase
+    tower {{_device_flag}} erase
 
-# List the available serial ports / TOWER devices.
-ports:
+# List the connected serial devices (TOWER boards).
+devices:
     tower devices
 
 

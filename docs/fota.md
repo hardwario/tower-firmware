@@ -211,11 +211,11 @@ TOWER_FEATURES=fota-no-confirm just flash-fota fota_app   # auto-revert test →
 
 # Real-firmware swap E2E (fota_ota) — two boards + host:
 just fota-update                          # build + sign the update the host serves
-TOWER_PORT=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota   # node v1 (merged)
-TOWER_FEATURES=role-gateway TOWER_PORT=<gw-port> just flash example fota_ota    # gateway
+TOWER_DEVICE=<node-port> TOWER_FEATURES=role-node just flash-fota fota_ota   # node v1 (merged)
+TOWER_FEATURES=role-gateway TOWER_DEVICE=<gw-port> just flash example fota_ota    # gateway
 tower -d <gw-port> fota serve --image target/fota-update.bin \
                               --manifest target/fota-update.fmanifest    # host-proxy
-TOWER_PORT=<node-port> just logs          # → *** UPDATE CONFIRMED *** booted swapped v2
+TOWER_DEVICE=<node-port> just logs          # → *** UPDATE CONFIRMED *** booted swapped v2
 ```
 
 Host signer (`tools/fota-sign`, a std host binary): `just fota-sign pubkey` /
