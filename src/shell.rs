@@ -490,20 +490,24 @@ fn cmd_reboot(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let us = Instant::now().as_micros();
-    // "firmware:" reports the app/example NAME (the same string the boot `Hello` carries and
-    // `tower` prints on connect) — not the SDK crate version, which is identical for every app and
-    // disagreed with the Hello. Multi-line summary (spans more than one wire frame — exercises
-    // chunking).
+    // "firmware:" reports the app/example NAME + version and the per-boot session id — the exact
+    // fields the boot `Hello` carries and `tower` prints on connect (they must agree). The name
+    // is per-app; the version is the SDK crate version; the session bumps once per boot. Multi-line
+    // summary (spans more than one wire frame — exercises chunking).
+    // Lines kept terse so the whole summary fits the shell response buffer (`RESP_CAP` = 256 B)
+    // even at worst case: a 32-char firmware name + 10-digit session + large uptime.
     let _ = write!(
         ctx,
-        "firmware:  {}\r\n\
+        "firmware:  {} {}\r\n\
+         session:   {}\r\n\
          protocol:  v{}\r\n\
          uptime:    {}.{:03} s\r\n\
-         cpu:       STM32L083CZ Cortex-M0+ @ 16 MHz (HSI)\r\n\
-         clock:     LSE 32.768 kHz RTC tick\r\n\
-         memory:    192 KiB flash / 20 KiB RAM / 6 KiB EEPROM\r\n\
-         console:   USART1 PA9/PA10 115200 8N1, framed\r\n",
+         cpu:       STM32L083CZ @ 16 MHz, LSE RTC\r\n\
+         memory:    192K flash / 20K RAM / 6K EEPROM\r\n\
+         console:   USART1 115200 8N1 framed\r\n",
         console::firmware_name(),
+        console::firmware_version(),
+        console::session_id(),
         PROTOCOL_VERSION,
         us / 1_000_000,
         (us % 1_000_000) / 1000,

@@ -138,8 +138,8 @@ pub fn list_ports() -> Vec<String> {
 /// `tower-protocol` message fields, so a frame outlives the decoder's buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
-    /// Boot banner: protocol + firmware version.
-    Hello { protocol_version: u8, firmware_version: String },
+    /// Boot banner: protocol version, firmware name + version, and per-boot session id.
+    Hello { protocol_version: u8, firmware_name: String, firmware_version: String, session_id: u32 },
     /// A `log::` record.
     Log { level: Level, uptime_us: u64, module: String, message: String },
     /// A `println!`-style print.
@@ -308,7 +308,9 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
         MsgType::Hello => match postcard::from_bytes::<Hello>(payload) {
             Ok(h) => Frame::Hello {
                 protocol_version: h.protocol_version,
+                firmware_name: h.firmware_name.to_string(),
                 firmware_version: h.firmware_version.to_string(),
+                session_id: h.session_id,
             },
             Err(_) => Frame::Other(msg_type),
         },

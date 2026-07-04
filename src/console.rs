@@ -29,7 +29,7 @@ use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 use embassy_futures::select::{select, select3};
@@ -54,6 +54,8 @@ use tower_protocol::{
     FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame,
 };
 
+use crate::storage::{NS_SYS, Nv};
+
 // USART1 interrupt for the console UART. Bound here (not in `board`) because the console
 // manager owns the UART and rebuilds it on every USB plug-in.
 bind_interrupts!(pub struct ConsoleIrqs {
@@ -71,8 +73,13 @@ const MAX_RESP: usize = 256;
 /// Shell-response text bytes per frame. Kept well under the ~240-byte payload budget
 /// (a [`ShellResponse`] header is ~9 bytes) so a frame never fails to encode.
 const SHELL_CHUNK: usize = 192;
-/// Max firmware-version string in `Hello`.
+/// Max firmware-name string in `Hello` (the baked-in app/example name).
 const FW_LEN: usize = 32;
+/// Firmware version string carried in `Hello` — the SDK crate version with a leading `v`
+/// (e.g. `"v0.1.0"`), baked at compile time. Distinct from [`FW_NAME`] (the app name).
+const FW_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+/// `NS_SYS` local key for the persisted boot counter (the `Hello` session_id).
+const KEY_BOOT_COUNT: u8 = 0x00;
 /// TX queue depth (frames). Sized to absorb boot-time chatter before the writer runs.
 const TX_DEPTH: usize = 8;
 /// Event caps: name length, per-field key/value length, and max fields. Sized so the
@@ -126,6 +133,9 @@ static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 /// Firmware name for the boot `Hello` (set by [`boot_banner`]); the dynamic console
 /// [`manager`] re-emits `Hello` with it on every USB plug-in so the host resyncs.
 static FW_NAME: Mutex<RefCell<String<FW_LEN>>> = Mutex::new(RefCell::new(String::new()));
+/// Per-boot session id carried in `Hello` — a persisted counter bumped once per boot by
+/// [`init_session`], so the host can tell a device reboot from a continuous link.
+static SESSION_ID: AtomicU32 = AtomicU32::new(0);
 
 fn bump_dropped() {
     critical_section::with(|cs| {
@@ -378,7 +388,12 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
             tx,
             &mut seq,
             MsgType::Hello,
-            &Hello { protocol_version: PROTOCOL_VERSION, firmware_version: &name },
+            &Hello {
+                protocol_version: PROTOCOL_VERSION,
+                firmware_name: &name,
+                firmware_version: FW_VERSION,
+                session_id: session_id(),
+            },
         )
         .await;
     }
@@ -604,6 +619,33 @@ pub fn boot_banner(name: &str) {
 /// while the shell printed the SDK crate version, identical for every app).
 pub fn firmware_name() -> String<FW_LEN> {
     critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone())
+}
+
+/// The baked-in firmware version string carried in `Hello` (SDK crate version, `v`-prefixed).
+pub fn firmware_version() -> &'static str {
+    FW_VERSION
+}
+
+/// The per-boot session id carried in `Hello` (0 until [`init_session`] runs).
+pub fn session_id() -> u32 {
+    SESSION_ID.load(Ordering::Relaxed)
+}
+
+/// Read, increment, and persist the per-boot session counter once at start-up (the `Hello`
+/// `session_id`). Called by the [`app!`](crate::app) macro after the KV store is installed and
+/// before the console emits its first `Hello`. Best-effort: if the store can't be read the
+/// counter restarts at 1, and a failed persist just means two boots may share an id — the id is
+/// a reboot *hint* for the host, not a security guarantee (that is the radio TX-counter's job).
+pub fn init_session(kv: Nv) {
+    let sys = kv.scope(NS_SYS);
+    let next = sys
+        .get::<u32>(KEY_BOOT_COUNT)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        .wrapping_add(1);
+    let _ = sys.set::<u32>(KEY_BOOT_COUNT, &next);
+    SESSION_ID.store(next, Ordering::Relaxed);
 }
 
 /// Await the writer draining every queued frame, then a short tail for the last frame to clear

@@ -17,7 +17,7 @@ description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER f
 # tower-protocol tag the firmware + CLI pin (golden-rule lockstep, enforced by
 # tools/protocol_pin_check.py): a mismatch here would silently mis-decode exactly the frames we
 # assert on. `alloc`/`std` come for free on the host.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.1.0" }
 # Deserialize the decoded postcard payloads (Log/Event/Hello/…). Same major as tower-protocol's,
 # with std/alloc on the host (the harness owns copies of the borrowed message fields).
 postcard = { version = "1", features = ["use-std"] }

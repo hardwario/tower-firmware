@@ -139,6 +139,8 @@ impl Eeprom for Storage<'_> {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Ns(pub u8);
 
+/// System/console layer state (the per-boot session counter carried in `Hello`).
+pub const NS_SYS: Ns = Ns(0x53);
 /// Radio [`net`](crate::radio::net) layer (TX-counter watermark, last-seen lanes).
 pub const NS_NET: Ns = Ns(0x52);
 /// Console/shell settings (one local per declared [`Setting`](crate::shell)).

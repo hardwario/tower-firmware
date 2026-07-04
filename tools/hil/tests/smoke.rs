@@ -104,8 +104,10 @@ fn smoke_hello_banner_decodes() {
         .wait_for(Duration::from_secs(5), |f| matches!(f, Frame::Hello { .. }))
         .expect("console read")
         .expect("no Hello banner within 5 s");
-    if let Frame::Hello { protocol_version, firmware_version } = hello {
+    if let Frame::Hello { protocol_version, firmware_name, firmware_version, session_id } = hello {
         assert_eq!(protocol_version, tower_protocol::PROTOCOL_VERSION, "protocol version drift");
+        assert!(!firmware_name.is_empty(), "empty firmware name in Hello");
         assert!(!firmware_version.is_empty(), "empty firmware version in Hello");
+        assert!(session_id > 0, "session_id should be a bumped boot counter (>=1)");
     }
 }

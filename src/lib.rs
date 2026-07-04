@@ -96,6 +96,9 @@ macro_rules! app {
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
             let board = $crate::board::Board::take(spawner);
+            // Bump + persist the per-boot session id (Hello session_id) before the console
+            // emits its first Hello (the manager task only polls at the first await below).
+            $crate::console::init_session(board.kv);
             // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
             let __setup = $setup;
