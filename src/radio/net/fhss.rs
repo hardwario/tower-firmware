@@ -25,7 +25,7 @@
 
 use embassy_time::{Duration, Instant, Timer};
 
-use super::{Access, Net, Received, SendResult, TX_TIMEOUT};
+use super::{Access, KEY_FHSS_EPOCH, NS_NET, Net, Received, SendResult, TX_TIMEOUT, read_u32};
 use crate::radio::ccm::TAG_LEN;
 use crate::radio::config::{self, Band, FHSS_N, FHSS_RENDEZVOUS_CH, fhss_freq_hz};
 use crate::radio::device::RadioError;
@@ -55,8 +55,18 @@ const RENDEZVOUS_RX_MS: u64 = 350;
 /// or a ~1-cycle rendezvous. A genuinely dead/restarted gateway is detected in ~7 s,
 /// then recovered via the rendezvous channel.
 const REACQUIRE_LIMIT: u32 = 24;
-/// Beacon payload: cycle(4 LE) ‖ slot_index(1).
-const BEACON_PL_LEN: usize = 5;
+/// Beacon payload: epoch(4 LE) ‖ cycle(4 LE) ‖ slot_index(1). The leading `epoch` is the
+/// gateway's monotonic boot-id (see [`crate::radio::net`]'s `KEY_FHSS_EPOCH`): a node refuses to
+/// anchor to an epoch older than the highest it has seen, so a captured beacon replayed from a
+/// previous gateway session can't re-sync it.
+const BEACON_PL_LEN: usize = 9;
+/// Slots of slack allowed between the slot advance of two acquisition beacons and the real time
+/// elapsed between them. During acquisition the node parks on the rendezvous channel and hears the
+/// gateway once per cycle, so two successive beacons are ~`FHSS_N` slots (one 24 s cycle) apart;
+/// their `slot_abs` advance must match the elapsed wall-time (± this slack). A *replayed* capture
+/// carries a FIXED `slot_abs`, so a second copy fails this check (its slot didn't advance while
+/// time did) and the anchor is never committed — the two-beacon consistency guard.
+const ACQUIRE_SLOT_SLACK: u32 = 3;
 /// Broadcast destination (beacons are network-wide).
 const BROADCAST: u32 = 0xFFFF_FFFF;
 /// Slots of slack allowed between a beacon's slot index and the node's prediction before that
@@ -110,6 +120,15 @@ pub(crate) struct Fhss {
     last_beacon: Instant,
     miss: u32,
     cur_channel: u8,
+    /// Master: this gateway session's monotonic epoch (boot-id) stamped into every beacon.
+    /// Node: the highest epoch it has anchored to (0 = none seen yet). A node ignores any beacon
+    /// with `epoch < self.epoch` (a stale replay from an older gateway session); a genuine gateway
+    /// restart carries a strictly higher epoch and is accepted.
+    epoch: u32,
+    /// Node acquisition scratch: the first beacon `(epoch, slot_abs, t_rx)` seen while unanchored,
+    /// held until a second, time-consistent beacon confirms it (see [`ACQUIRE_SLOT_SLACK`]). A
+    /// replayed capture never produces a consistent successor, so it can never commit an anchor.
+    acquire: Option<(u32, u32, Instant)>,
     /// Per-channel transmitted airtime (ms) accumulated this session — a light
     /// *measurement* for the §15.247 compliance histogram. Occupancy itself is
     /// bounded *structurally* (N=80, cycle 24 s > 20 s ⇒ each channel tuned ≤ once
@@ -129,6 +148,8 @@ impl Fhss {
             last_beacon: Instant::now(),
             miss: 0,
             cur_channel: FHSS_RENDEZVOUS_CH,
+            epoch: 0,
+            acquire: None,
             airtime_ms: [0; FHSS_N as usize],
         }
     }
@@ -197,14 +218,24 @@ impl Net {
         self.fhss.role = role;
         self.fhss.seed = seed;
         self.fhss.miss = 0;
+        self.fhss.acquire = None;
         self.fhss.airtime_ms = [0; FHSS_N as usize];
         self.access = Access::Fhss;
         match role {
             FhssRole::Master => {
+                // Bump + persist the monotonic epoch so this session's beacons are strictly newer
+                // than any previous session's — nodes reject the older ones as replays. Best
+                // effort: if the write fails we still advance in RAM (a reboot might then reuse the
+                // epoch, only weakening replay protection, never breaking sync).
+                let nkv = self.kv.scope(NS_NET);
+                let next = read_u32(nkv, KEY_FHSS_EPOCH).unwrap_or(0).saturating_add(1);
+                let _ = nkv.set_bytes(KEY_FHSS_EPOCH, &next.to_le_bytes());
+                self.fhss.epoch = next;
                 self.fhss.state = FhssState::Synced;
                 self.fhss.anchor = Some((0, Instant::now()));
             }
             FhssRole::Node => {
+                self.fhss.epoch = 0; // no gateway epoch seen yet this session
                 self.fhss.state = FhssState::Scanning;
                 self.fhss.anchor = None;
                 self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
@@ -324,12 +355,17 @@ impl Net {
             // transmits (covers rx() setup latency).
             Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
 
-            // Re-anchor only to a beacon consistent with our prediction (anti-replay): a stale
-            // replayed capture is far behind `slot` and is ignored (falls to the miss path), so
-            // it can't yank our clock. A real beacon lands on `slot` (± a slot of timing slack).
-            if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
+            // Re-anchor only to a beacon that is (a) not from an older gateway session — a replay
+            // carrying `epoch < self.fhss.epoch` is ignored — and (b) consistent with our
+            // prediction: a stale replayed capture is far behind `slot` and falls to the miss
+            // path, so it can't yank our clock. A real beacon lands on `slot` (± a slot of timing
+            // slack). A genuinely restarted gateway carries a higher epoch but a slot near 0, so it
+            // fails the prediction check here and is recovered via the rescan path (below).
+            if let Some((epoch, slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
+                && epoch >= self.fhss.epoch
                 && slot_abs.abs_diff(slot) <= FHSS_RESYNC_SLACK
             {
+                self.fhss.epoch = epoch; // track the newest epoch seen
                 self.fhss_lock(slot_abs, t_rx); // → Synced, miss = 0, re-anchored
                 return NodeSlot {
                     state: FhssState::Synced,
@@ -366,7 +402,36 @@ impl Net {
         // channel and listen a wide window for the gateway's once-per-cycle pass.
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(FHSS_RENDEZVOUS_CH)).await;
         self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
-        if let Some((slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(RENDEZVOUS_RX_MS)).await {
+        let scanning = NodeSlot {
+            state: FhssState::Scanning,
+            channel: FHSS_RENDEZVOUS_CH,
+            slot: 0,
+            got_beacon: false,
+        };
+        let Some((epoch, slot_abs, t_rx)) =
+            self.fhss_rx_beacon(Duration::from_millis(RENDEZVOUS_RX_MS)).await
+        else {
+            return scanning;
+        };
+        // A beacon from an older gateway session (epoch below the highest we've locked to) is a
+        // replay — ignore it entirely, don't even hold it as a candidate.
+        if epoch < self.fhss.epoch {
+            return scanning;
+        }
+        // Two-beacon consistency: commit an anchor only once a SECOND beacon of the SAME epoch
+        // advances its slot in step with the real time elapsed since the first. A replayed capture
+        // repeats one fixed `slot_abs`, so a second copy's slot didn't advance while wall-time did
+        // — the check fails and no anchor is committed. A real gateway's successive rendezvous
+        // beacons advance one cycle (`FHSS_N` slots) per ~24 s, matching the elapsed time.
+        let consistent = if let Some((e0, s0, t0)) = self.fhss.acquire {
+            let time_adv = (t_rx.saturating_duration_since(t0).as_millis() / FHSS_SLOT_MS) as u32;
+            e0 == epoch && slot_abs > s0 && (slot_abs - s0).abs_diff(time_adv) <= ACQUIRE_SLOT_SLACK
+        } else {
+            false
+        };
+        if consistent {
+            self.fhss.acquire = None;
+            self.fhss.epoch = epoch; // record the session we've now locked to
             self.fhss_lock(slot_abs, t_rx);
             NodeSlot {
                 state: FhssState::Synced,
@@ -375,10 +440,13 @@ impl Net {
                 got_beacon: true,
             }
         } else {
+            // First beacon this acquisition (or an inconsistent pair — e.g. a replay): hold it as
+            // the pending candidate and keep scanning for a time-consistent successor.
+            self.fhss.acquire = Some((epoch, slot_abs, t_rx));
             NodeSlot {
                 state: FhssState::Scanning,
                 channel: FHSS_RENDEZVOUS_CH,
-                slot: 0,
+                slot: slot_abs,
                 got_beacon: false,
             }
         }
@@ -479,8 +547,9 @@ impl Net {
         let cycle = slot_abs / FHSS_N as u32;
         let i = (slot_abs % FHSS_N as u32) as u8;
         let mut pl = [0u8; BEACON_PL_LEN];
-        pl[..4].copy_from_slice(&cycle.to_le_bytes());
-        pl[4] = i;
+        pl[..4].copy_from_slice(&self.fhss.epoch.to_le_bytes());
+        pl[4..8].copy_from_slice(&cycle.to_le_bytes());
+        pl[8] = i;
         let hdr = Header {
             frame_type: FrameType::Beacon,
             flags: 0,
@@ -499,12 +568,13 @@ impl Net {
         }
     }
 
-    /// Receive + authenticate a beacon under the network key (broadcast dest OK;
-    /// **no** replay-advance — a beacon is an idempotent time signal, so a rebooted
-    /// gateway can't lock the node out). Listens until a valid beacon arrives or the
-    /// window elapses, ignoring any non-beacon frame in between (so a stray frame in
-    /// the widened/early window doesn't count as a miss). Returns `(slot_abs, t_rx)`.
-    async fn fhss_rx_beacon(&mut self, timeout: Duration) -> Option<(u32, Instant)> {
+    /// Receive + authenticate a beacon under the network key (broadcast dest OK). CCM auth proves
+    /// the beacon is genuine but NOT fresh — a captured beacon replayed later still authenticates —
+    /// so the caller enforces freshness via the monotonic `epoch` (reject-backwards) and the
+    /// two-beacon acquisition consistency check. Listens until a valid beacon arrives or the
+    /// window elapses, ignoring any non-beacon frame in between (so a stray frame in the
+    /// widened/early window doesn't count as a miss). Returns `(epoch, slot_abs, t_rx)`.
+    async fn fhss_rx_beacon(&mut self, timeout: Duration) -> Option<(u32, u32, Instant)> {
         let deadline = Instant::now().checked_add(timeout)?;
         let key = self.default_key;
         let mut buf = [0u8; MAX_FRAME];
@@ -520,9 +590,10 @@ impl Net {
                 && range.len() >= BEACON_PL_LEN
             {
                 let pl = &buf[range];
-                let cycle = u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]);
-                let slot_abs = cycle * FHSS_N as u32 + pl[4] as u32;
-                return Some((slot_abs, t_rx));
+                let epoch = u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]);
+                let cycle = u32::from_le_bytes([pl[4], pl[5], pl[6], pl[7]]);
+                let slot_abs = cycle * FHSS_N as u32 + pl[8] as u32;
+                return Some((epoch, slot_abs, t_rx));
             }
         }
     }

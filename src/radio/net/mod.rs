@@ -62,6 +62,10 @@ const P: u32 = 32;
 /// EEPROM local keys (within `NS_NET`) for the persisted counter state.
 const KEY_WATERMARK: u8 = 0x00;
 const KEY_LASTSEEN: u8 = 0x01;
+/// FHSS gateway epoch (boot-id): a master bumps + persists it each session so its beacons are
+/// strictly newer than any previous session's, and a node refuses to anchor to an older epoch —
+/// defeating a replayed beacon capture. `0x02` is free (peer lanes start at `KEY_LASTSEEN_BASE`).
+const KEY_FHSS_EPOCH: u8 = 0x02;
 
 /// Peer-table capacity. A gateway in a star holds up to 32 nodes; a P2P device
 /// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
