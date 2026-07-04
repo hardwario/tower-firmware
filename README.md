@@ -8,8 +8,8 @@ power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
 [`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
-Each subsystem has a guide: [`docs/console.md`](docs/console.md) and
-[`docs/radio.md`](docs/radio.md).
+Each subsystem has a guide: [`docs/console.md`](docs/console.md),
+[`docs/radio.md`](docs/radio.md), and [`docs/storage.md`](docs/storage.md).
 
 | | |
 |---|---|

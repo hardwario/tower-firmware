@@ -24,6 +24,7 @@
 #![no_std]
 
 pub mod board;
+pub mod bootguard;
 pub mod button;
 pub mod console;
 pub mod led;
@@ -99,7 +100,8 @@ macro_rules! app {
             let board = $crate::board::Board::take(spawner);
             // Bump + persist the per-boot session id (Hello session_id) before the console
             // emits its first Hello (the manager task only polls at the first await below).
-            $crate::console::init_session(board.kv);
+            // Passes the spawner so the boot-loop guard can arm its healthy-uptime task.
+            $crate::console::init_session(board.kv, spawner);
             // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
             let __setup = $setup;

@@ -341,6 +341,15 @@ pub fn compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S:
     Ok(())
 }
 
+/// The active half's **generation** — a monotonic counter bumped once per compaction [`flip`]
+/// (its atomic commit), so it doubles as the store's **lifetime flip count**: the load-bearing
+/// input to an EEPROM-wear estimate, since each flip cycles ~one half's cells. `0` on an
+/// un-initialized region. A pure read (two superblock reads, no write), so polling it for
+/// telemetry never itself contributes to wear.
+pub fn generation<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
+    Ok(active(store, capacity)?.map(|(_, g)| g).unwrap_or(0))
+}
+
 /// Flip: pack the live set of the active half `src_h` (generation `src_gen`) into the inactive
 /// half, then commit by writing the inactive half's superblock at `src_gen + 1`.
 fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Result<(), KvError<S::Error>> {

@@ -48,7 +48,7 @@ use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete,
 use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
 
 use crate::console;
-use crate::storage::{NS_SHELL, Nv, Scoped};
+use crate::storage::{FLIP_BUDGET, NS_SHELL, Nv, Scoped};
 
 const MAX_LINE: usize = 96;
 /// Max whitespace/`/`-separated tokens a command line may hold. An over-long line is rejected
@@ -238,6 +238,7 @@ static BASE_ROOT: &[Entry] = &[
         &[
             Entry::cmd("reboot", Args::None, cmd_reboot),
             Entry::Menu("resource", &[Entry::cmd("print", Args::None, cmd_resource)]),
+            Entry::Menu("eeprom", &[Entry::cmd("print", Args::None, cmd_eeprom)]),
             Entry::Menu(
                 "settings",
                 &[
@@ -498,19 +499,39 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // even at worst case: a 32-char firmware name + 10-digit session + large uptime.
     let _ = write!(
         ctx,
-        "firmware:  {} {}\r\n\
-         session:   {}\r\n\
-         protocol:  v{}\r\n\
-         uptime:    {}.{:03} s\r\n\
-         cpu:       STM32L083CZ @ 16 MHz, LSE RTC\r\n\
-         memory:    192K flash / 20K RAM / 6K EEPROM\r\n\
-         console:   USART1 115200 8N1 framed\r\n",
+        "firmware: {} {}\r\n\
+         session: {}\r\n\
+         protocol: v{}\r\n\
+         uptime: {}.{:03} s\r\n\
+         cpu: STM32L083CZ @ 16 MHz, LSE RTC\r\n\
+         memory: 192K flash / 20K RAM / 6K EEPROM\r\n\
+         console: USART1 115200 8N1 framed\r\n",
         console::firmware_name(),
         console::firmware_version(),
         console::session_id(),
         PROTOCOL_VERSION,
         us / 1_000_000,
         (us % 1_000_000) / 1000,
+    );
+    Outcome::ok()
+}
+
+fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
+    // Wear gauge: the KV compaction-flip count (the persisted superblock generation — a pure read,
+    // no added wear) vs the conservative flip budget (FLIP_BUDGET). See docs/storage.md.
+    let flips = ctx.kv.raw().flip_generation();
+    // Per-mille of budget in integer math (no FPU on the M0+): rendered as X.X%.
+    let permille = ((flips as u64) * 1000 / FLIP_BUDGET as u64) as u32;
+    let _ = write!(
+        ctx,
+        "eeprom: 6 KiB data EEPROM\r\n\
+         flips: {} / {} ({}.{}%)\r\n\
+         resets: {}\r\n",
+        flips,
+        FLIP_BUDGET,
+        permille / 10,
+        permille % 10,
+        crate::bootguard::consecutive_resets(),
     );
     Outcome::ok()
 }
@@ -550,7 +571,7 @@ fn settings_get(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     let mut val = String::<MAX_SETTING>::new();
     read_value(ctx.kv, s, &mut val);
     let (kind, default) = (s.kind, s.default);
-    let _ = write!(ctx, "{} = {}  [", s.name, val);
+    let _ = write!(ctx, "{} = {} [", s.name, val);
     write_constraint(ctx, kind);
     let _ = write!(ctx, ", default {default}]");
     Outcome::ok()

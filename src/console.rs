@@ -636,16 +636,24 @@ pub fn session_id() -> u32 {
 /// before the console emits its first `Hello`. Best-effort: if the store can't be read the
 /// counter restarts at 1, and a failed persist just means two boots may share an id — the id is
 /// a reboot *hint* for the host, not a security guarantee (that is the radio TX-counter's job).
-pub fn init_session(kv: Nv) {
+///
+/// **Boot-loop backoff:** the [`bootguard`](crate::bootguard) tracks consecutive fast resets in
+/// reset-surviving RAM. Once a unit is judged to be looping, this stops writing the counter to
+/// EEPROM (reporting a RAM-derived id instead) so a wedged/brown-out-looping node can't grind the
+/// store one record per reset (see `docs/storage.md`).
+pub fn init_session(kv: Nv, spawner: crate::Spawner) {
+    let resets = crate::bootguard::on_boot(spawner);
     let sys = kv.scope(NS_SYS);
-    let next = sys
-        .get::<u32>(KEY_BOOT_COUNT)
-        .ok()
-        .flatten()
-        .unwrap_or(0)
-        .wrapping_add(1);
-    let _ = sys.set::<u32>(KEY_BOOT_COUNT, &next);
-    SESSION_ID.store(next, Ordering::Relaxed);
+    let stored = sys.get::<u32>(KEY_BOOT_COUNT).ok().flatten().unwrap_or(0);
+    if crate::bootguard::is_looping() {
+        // Looping: do NOT touch EEPROM. Report a RAM-derived id so the host still sees it move
+        // per reset, without persisting a record each time.
+        SESSION_ID.store(stored.wrapping_add(resets), Ordering::Relaxed);
+    } else {
+        let next = stored.wrapping_add(1);
+        let _ = sys.set::<u32>(KEY_BOOT_COUNT, &next);
+        SESSION_ID.store(next, Ordering::Relaxed);
+    }
 }
 
 /// Await the writer draining every queued frame, then a short tail for the last frame to clear

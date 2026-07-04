@@ -44,6 +44,17 @@ use tower_kv::{Eeprom, KvError};
 /// ([`MAX_VALUE`]) and the most distinct keys [`Kv::compact`] tracks in one pass ([`MAX_KEYS`]).
 pub use tower_kv::{MAX_KEYS, MAX_VALUE};
 
+/// STM32L083CZ data-EEPROM endurance: **100,000 erase/write cycles** (datasheet-confirmed).
+/// Every wear figure below scales linearly with it.
+pub const EEPROM_ENDURANCE_CYCLES: u32 = 100_000;
+/// Lifetime compaction-flip budget for the wear gauge, kept **deliberately conservative**. Each
+/// flip erases + reprograms the store's most-written cells (the re-packed live-set prefix and the
+/// committed superblock); charging one full erase/write cycle of the worst cell per flip caps the
+/// store at `endurance` flips. The store wear-levels across two alternating halves, so a given
+/// cell is really the flip target only every *other* flip — true life is ~2× this — meaning the
+/// gauge errs toward reporting *more* wear, never less. See `docs/storage.md`.
+pub const FLIP_BUDGET: u32 = EEPROM_ENDURANCE_CYCLES;
+
 /// A non-volatile storage error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -219,6 +230,12 @@ impl<'d> Kv<'d> {
     pub fn compact(&mut self) -> Result<(), Error> {
         tower_kv::compact(&mut self.storage, self.capacity).map_err(Error::from)
     }
+
+    /// Lifetime compaction-flip count (the active-half generation) — a pure read for EEPROM-wear
+    /// telemetry; see [`tower_kv::generation`] and [`FLIP_BUDGET`]. `0` on a fresh region.
+    pub fn flip_generation(&self) -> u32 {
+        tower_kv::generation(&self.storage, self.capacity).unwrap_or(0)
+    }
 }
 
 /// The one process-wide [`Kv`] over the EEPROM, behind a blocking mutex + `RefCell`, parked in a
@@ -285,6 +302,12 @@ impl Nv {
     /// Reclaim space taken by superseded records (see [`Kv::compact`]).
     pub fn compact(&self) -> Result<(), Error> {
         self.with(|kv| kv.compact())
+    }
+
+    /// Lifetime compaction-flip count for EEPROM-wear telemetry (see [`Kv::flip_generation`]).
+    /// A pure read — polling it adds no wear. Compare against [`FLIP_BUDGET`].
+    pub fn flip_generation(&self) -> u32 {
+        self.with(|kv| kv.flip_generation())
     }
 
     /// A namespace-scoped view: every get/set is keyed by an 8-bit `local`, silently prefixed with
