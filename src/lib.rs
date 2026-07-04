@@ -34,6 +34,7 @@ pub mod shell;
 pub mod storage;
 pub mod strip;
 pub mod tmp112;
+pub mod watchdog;
 pub mod ws2812;
 
 pub use embassy_executor::Spawner;

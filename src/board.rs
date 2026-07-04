@@ -12,7 +12,7 @@ use embassy_stm32::flash::Flash;
 use embassy_stm32::gpio::Pull;
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
-use embassy_stm32::peripherals::{DMA1_CH3, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
+use embassy_stm32::peripherals::{DMA1_CH3, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
@@ -77,6 +77,11 @@ pub struct Board {
     /// `Copy`; hand the same handle to `Net`, the [`shell`](crate::shell), and the app at once
     /// (each call locks the one store).
     pub kv: Nv,
+    /// Independent watchdog peripheral — **opt-in**. Pass to
+    /// [`watchdog::enable`](crate::watchdog::enable) to arm a hardware reset on a firmware hang;
+    /// apps that don't want it simply ignore this field. The IWDG runs from the LSI and keeps
+    /// counting in STOP, so the feeder must pet it during idle (see the `watchdog` module).
+    pub iwdg: Peri<'static, IWDG>,
 
     // --- SPIRIT1 sub-GHz radio (SPSGRF module) — see [`radio`](crate::radio). ---
     /// SPIRIT1 shutdown pin (PB7). Has a 1 MΩ hardware pull-up so the part boots
@@ -169,6 +174,7 @@ impl Board {
             // LIS2DH12 INT1 (PB6) — active-high push-pull, so pull-down + rising edge.
             accel_int: ExtiInput::new(p.PB6, p.EXTI6, Pull::Down, Irqs),
             kv: Nv::install(Storage::new(Flash::new_blocking(p.FLASH))),
+            iwdg: p.IWDG,
 
             // SPIRIT1 radio resources. The driver (`Spirit1::new`) builds the
             // blocking SPI and drives SDN/CS itself; here we just hand over the
