@@ -87,7 +87,6 @@ const EV_FIELDS: usize = 6;
 /// An owned outgoing message. The writer assigns the `seq` and encodes it, so nothing
 /// borrows past the producing call and dropped frames never consume sequence numbers.
 enum Outgoing {
-    Hello(String<FW_LEN>),
     Log {
         level: Level,
         uptime_us: u64,
@@ -324,9 +323,10 @@ pub async fn manager(
         // backpressure (see `enqueue`). Set this before the Hello so it takes the same path.
         CONSOLE_UP.store(true, Ordering::Relaxed);
 
-        // Re-announce the link so the host resyncs its per-session `seq` / header.
-        let name = critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone());
-        try_enqueue(Outgoing::Hello(name));
+        // The writer synthesizes the session `Hello` as its own first frame (see `writer_loop`),
+        // so the host resyncs its per-link `seq` on every plug-in WITHOUT the Hello ever riding
+        // the shared producer queue — where a burst of logs racing the plug-in could drop it
+        // (drop-newest) and strand the host on a stale seq (docs/console.md).
 
         // Run the writer + RX router until USB is unplugged (debounced), then tear the
         // UART down by dropping `tx`/`rx` at the end of this scope.
@@ -342,23 +342,56 @@ pub async fn manager(
     }
 }
 
+/// Scope guard that counts one dropped frame if destroyed while still armed. [`writer_loop`] arms
+/// it after dequeuing an item so that if the writer is cancelled (USB unplug via `select3`) before
+/// the item reaches the UART, the loss is still reflected in the host's Dropped accounting; it is
+/// disarmed (`.0 = false`) once the item's bytes are in the UART ring.
+struct OnCancelDrop(bool);
+
+impl Drop for OnCancelDrop {
+    fn drop(&mut self) {
+        if self.0 {
+            bump_dropped();
+        }
+    }
+}
+
 /// Drain [`TX_CHANNEL`] over `tx` until cancelled. Holds a [`WakeGuard`] across each
 /// transmit burst: the async write awaits the USART TXE interrupt, which STOP would
 /// gate — the guard forces a plain WFI so the USART stays clocked and the interrupt
 /// fires. Between bursts **no** guard is held (docs/console.md).
 async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
-    // Lone 0x00 at start-up: flush any partial frame on the host's decoder.
+    let mut seq: u16 = 0;
+
+    // The writer emits the session's opening frames ITSELF — not via the shared producer queue —
+    // so a burst of logs racing a plug-in can never bump the `Hello` out of a full TX_CHANNEL
+    // (drop-newest). The host relies on decoding a fresh Hello to reset its per-link `seq`
+    // tracking (docs/console.md); dropping it would strand the host on a stale seq and print a
+    // spurious wire-loss warning. Lead with a lone 0x00 to flush any partial frame left on the
+    // host's decoder, then the Hello as seq 0.
     {
         let _g = WakeGuard::new(StopMode::Stop1);
         let _ = tx.write_all(&[0u8]).await;
         let _ = tx.flush().await;
+        let name = firmware_name();
+        send(
+            tx,
+            &mut seq,
+            MsgType::Hello,
+            &Hello { protocol_version: PROTOCOL_VERSION, firmware_version: &name },
+        )
+        .await;
     }
 
-    let mut seq: u16 = 0;
     loop {
         let item = TX_CHANNEL.receive().await;
         // Hold STOP off across the burst so the interrupt-driven writes complete.
         let _guard = WakeGuard::new(StopMode::Stop1);
+        // Count this dequeued item as dropped if the writer is cancelled (USB unplug via the
+        // manager's `select3`) before it is handed to the UART — keeps the host's Dropped
+        // accounting exact even for the "never dropped" backpressured producers. Disarmed once
+        // the item's bytes are written into the UART ring.
+        let mut cancel_guard = OnCancelDrop(true);
 
         // Report any dropped frames first (one marker before the next real frame).
         let dropped = take_dropped();
@@ -367,18 +400,6 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
         }
 
         match &item {
-            Outgoing::Hello(fw) => {
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::Hello,
-                    &Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        firmware_version: fw,
-                    },
-                )
-                .await
-            }
             Outgoing::Log {
                 level,
                 uptime_us,
@@ -424,6 +445,7 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
             }
             Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
         }
+        cancel_guard.0 = false; // item's bytes are in the UART ring — not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
         let _ = tx.flush().await;
@@ -566,15 +588,39 @@ pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>
     enqueue(Outgoing::Completions(c)).await;
 }
 
-/// Record the firmware name and emit the boot `Hello` + a banner log. Called by the
-/// [`app!`](crate::app) macro at start-up. The name is stored so the dynamic console
-/// [`manager`] can re-emit `Hello` on each USB plug-in.
+/// Record the firmware name and emit the boot banner log. Called by the [`app!`](crate::app)
+/// macro at start-up. The name is stored so the console [`writer_loop`] emits the session `Hello`
+/// as its own first frame on every plug-in (it does not ride the producer queue).
 pub fn boot_banner(name: &str) {
     critical_section::with(|cs| {
         *FW_NAME.borrow(cs).borrow_mut() = clip(name);
     });
-    try_enqueue(Outgoing::Hello(clip(name)));
     log::info!(target: "boot", "booted: {}", name);
+}
+
+/// The firmware name recorded by [`boot_banner`] — the app/example name carried in `Hello` and
+/// shown by `tower`'s connect banner. The shell's `resource` command reports this so its
+/// "firmware:" line matches the boot `Hello` (they previously disagreed: Hello carried the name
+/// while the shell printed the SDK crate version, identical for every app).
+pub fn firmware_name() -> String<FW_LEN> {
+    critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone())
+}
+
+/// Await the writer draining every queued frame, then a short tail for the last frame to clear
+/// the UART. A caller that resets the MCU right after emitting a final response (the shell's
+/// `/system reboot`) uses this so the reset can't cut the response off mid-frame — the old fixed
+/// 150 ms sleep was shorter than a full `TX_CHANNEL` at 115200 baud (~190 ms). Bounded so an
+/// absent/wedged writer (console down) can't hang the caller.
+pub async fn flush() {
+    for _ in 0..200 {
+        if TX_CHANNEL.is_empty() {
+            break;
+        }
+        Timer::after(Duration::from_millis(5)).await;
+    }
+    // The last dequeued frame may still be in the UART ring/shift register; a full ~270-byte
+    // frame is ~24 ms at 115200 8N1.
+    Timer::after(Duration::from_millis(30)).await;
 }
 
 /// Backing function for [`print!`](crate::print)/[`println!`](crate::println).
@@ -599,39 +645,65 @@ macro_rules! println {
     };
 }
 
-/// SDK panic handler: emit one framed error record, then halt. The executor is dead,
-/// so this bypasses the channel and blocking-writes the frame straight to the USART1
-/// registers via the PAC. If the console isn't up yet (USART1 disabled) it just halts.
-#[panic_handler]
-fn on_panic(info: &PanicInfo) -> ! {
+/// Blocking-write one framed `Error` [`Log`] straight to the USART1 registers via the PAC,
+/// bypassing the (dead) executor and the channel. Shared by the [`on_panic`] handler and the
+/// [`HardFault`] exception — both run with the executor stopped and interrupts effectively ours.
+/// If the console UART isn't up (USART1 disabled — USB not attached), it's a no-op: there is
+/// nowhere to send. `uptime_us` is the real timebase (the time driver is a peripheral, still
+/// live here) so the crash time is preserved, not reported as 0.
+fn blocking_emit_error(module: &str, message: &str) {
     use embassy_stm32::pac::USART1;
 
-    if USART1.cr1().read().ue() {
-        // Silence the BufferedUart ISR so it can't race our direct register writes.
-        USART1.cr1().modify(|w| {
-            w.set_txeie(false);
-            w.set_rxneie(false);
-        });
-        let mut msg = String::<MAX_MSG>::new();
-        let _ = write!(msg, "{}", info);
-        let payload = Log {
-            level: Level::Error,
-            uptime_us: 0,
-            module: "panic",
-            message: msg.as_str(),
-        };
-        let mut buf = [0u8; MAX_WIRE];
-        if let Ok(n) = encode_frame(MsgType::Log, 0, &payload, &mut buf) {
-            // Lead with a 0x00: any byte still in the shift register (or a partial frame
-            // the silenced writer left behind) would otherwise prefix and corrupt ours.
-            // The delimiter flushes the host decoder so our frame stands alone.
-            for &b in core::iter::once(&0u8).chain(&buf[..n]) {
-                while !USART1.isr().read().txe() {}
-                USART1.tdr().write(|w| w.set_dr(b as u16));
-            }
-            while !USART1.isr().read().tc() {}
-        }
+    if !USART1.cr1().read().ue() {
+        return;
     }
+    // Silence the BufferedUart ISR so it can't race our direct register writes.
+    USART1.cr1().modify(|w| {
+        w.set_txeie(false);
+        w.set_rxneie(false);
+    });
+    let payload = Log {
+        level: Level::Error,
+        uptime_us: Instant::now().as_micros(),
+        module,
+        message,
+    };
+    let mut buf = [0u8; MAX_WIRE];
+    if let Ok(n) = encode_frame(MsgType::Log, 0, &payload, &mut buf) {
+        // Lead with a 0x00: any byte still in the shift register (or a partial frame the
+        // silenced writer left behind) would otherwise prefix and corrupt ours. The delimiter
+        // flushes the host decoder so our frame stands alone.
+        for &b in core::iter::once(&0u8).chain(&buf[..n]) {
+            while !USART1.isr().read().txe() {}
+            USART1.tdr().write(|w| w.set_dr(b as u16));
+        }
+        while !USART1.isr().read().tc() {}
+    }
+}
+
+/// SDK panic handler: emit one framed error record (if the console is up), then halt.
+#[panic_handler]
+fn on_panic(info: &PanicInfo) -> ! {
+    let mut msg = String::<MAX_MSG>::new();
+    let _ = write!(msg, "{}", info);
+    blocking_emit_error("panic", msg.as_str());
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
+
+/// HardFault handler: report the fault (with the faulting PC/LR) over the same blocking framed
+/// path as [`on_panic`], then halt — instead of vanishing into cortex-m-rt's default spin, which
+/// reported nothing over the wire. We deliberately do NOT auto-reset here: a reboot-on-fault
+/// policy plus a crash record that survives to the next boot (for the USB-unplugged field case)
+/// is a separate design decision. NOTE for that follow-up: an IWDG watchdog would need to account
+/// for STOP-mode sleep (the L0 IWDG keeps counting in STOP and would reset an idle battery node),
+/// so it is intentionally not enabled here.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    let mut msg = String::<MAX_MSG>::new();
+    let _ = write!(msg, "HardFault pc={:#010x} lr={:#010x}", ef.pc(), ef.lr());
+    blocking_emit_error("fault", msg.as_str());
     loop {
         cortex_m::asm::wfi();
     }

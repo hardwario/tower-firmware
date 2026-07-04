@@ -6,12 +6,12 @@
 # TOWER Core Module — wired to a SEGGER J-Link (SWD flash via probe-rs) and a Nordic PPK2
 # (scriptable current supply/measure). The power tests flash it over SWD and cycle the PPK2.
 [core]
-serial = "/dev/cu.usbserial-2120"
+serial = "/dev/cu.usbserial-110"
 
 # TOWER Radio Dongle — USB-powered, flashed over the UART bootloader with `tower flash`. The
 # smoke + radio-peer tests use this board (it can hold a KAT example or the gateway role).
 [dongle]
-serial = "/dev/cu.usbserial-2140"
+serial = "/dev/cu.usbserial-130"
 
 # Nordic PPK2 source-measure. Measure at the 1.8 V knee, NOT 3 V: the Core's regulator/brown-out
 # knee sits near ~2 V, so a 3 V reading can read low while 1.8 V is the honest deep-sleep floor

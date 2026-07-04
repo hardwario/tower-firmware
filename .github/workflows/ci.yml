@@ -42,6 +42,16 @@ jobs:
       # (see .cargo/config.toml).
       - name: Build lib + product bins + examples
         run: cargo build --release --lib --bins --examples
+      # The ~20 two-board examples gate their sender/node/peer halves behind role features, so a
+      # default-feature build leaves that half of the matrix compile-unchecked. Build each role
+      # so an API change that only a role-gated branch uses can't merge green (and then fail
+      # mid-bench-session or in the HIL harness's build_and_flash).
+      - name: Build role-gated example variants
+        run: |
+          cargo build --release --examples --features role-node
+          cargo build --release --examples --features role-gateway
+          cargo build --release --examples --features role-peer-a
+          cargo build --release --examples --features role-peer-b
 
   # 2. Host-side unit tests: the extracted no_std cores. `just test` builds these for the host
   #    triple (the firmware itself can't test).
@@ -76,6 +86,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy (thumbv6m — lib, examples, bins)
         run: cargo clippy --lib --examples --bins -- -D warnings
+
+  # 3b. Compile the HIL harness. It is workspace-excluded (host std crate) and its hardware tests
+  #     are `#[ignore]`d, so `cargo test --no-run` proves the harness API stays in sync with the
+  #     tower-protocol / jolt tags it pins WITHOUT any hardware — exactly what the harness's own
+  #     docs claim `cargo test` does, but which otherwise only ever happened on the bench machine.
+  hil-compile:
+    name: HIL harness compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev (serialport dep)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile the HIL tests (host, no hardware run)
+        run: cargo test --manifest-path tools/hil/Cargo.toml --no-run
 
   # 4. The golden rule: tower-protocol must be pinned to the SAME git tag in all in-repo
   #    manifests AND in tower-cli. postcard is not self-describing — a mismatch mis-decodes the

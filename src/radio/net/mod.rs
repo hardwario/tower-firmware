@@ -27,7 +27,7 @@ pub use bulk::{BULK_CHUNK, BulkSink, BulkSource};
 pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
 pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use super::ccm::Ccm;
 use super::config::{self, Band, RfConfig};
@@ -225,16 +225,33 @@ impl Net {
         // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the
         // very first boot, since 0 = "never sent"), then reserve the next block.
         let nkv = kv.scope(NS_NET); // our namespaced view; the raw `kv` is kept for `Net::kv()`
-        let resume = read_u32(nkv, KEY_WATERMARK).unwrap_or(1).max(1);
+        let stored_watermark = read_u32(nkv, KEY_WATERMARK);
+        let stored_last_seen = read_u32(nkv, KEY_LASTSEEN);
+        let last_seen = stored_last_seen.unwrap_or(0);
+        let resume = stored_watermark.unwrap_or(1).max(1);
         let reserve_limit = resume.wrapping_add(RESERVE);
-        // Persist the reserve watermark AND verify it read back. TX is only nonce-safe while a
-        // watermark strictly greater than any counter we will ever send is durably stored. If
-        // the write fails or does not read back (EEPROM full/faulted), start TX **locked**: the
-        // device can still receive, but sending would risk resuming at a stale watermark after a
-        // reboot and reusing a CCM nonce. (Fail closed — see the `tx_locked` field.)
-        let persisted = nkv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes()).is_ok();
-        let tx_locked = !(persisted && read_u32(nkv, KEY_WATERMARK) == Some(reserve_limit));
-        let last_seen = read_u32(nkv, KEY_LASTSEEN).unwrap_or(0);
+
+        // A store that shows prior use (a persisted last-seen) but whose watermark is now
+        // unreadable has almost certainly lost the watermark record to EEPROM corruption
+        // (`scan_half` stops at the first bad record, orphaning everything after it — and the
+        // watermark, rewritten every RESERVE transfers, tends to sit late in the log). Resuming
+        // the TX counter at 1 under the unchanged key would then reuse every CCM nonce 1..old.
+        // Fail **closed** WITHOUT rewriting a fresh low watermark (that would poison a later boot
+        // into resuming low and reusing nonces). The device can still receive; sending needs a
+        // re-key / factory reset. A genuinely virgin store (no watermark AND no last-seen)
+        // legitimately starts at 1.
+        let watermark_lost = stored_watermark.is_none() && stored_last_seen.is_some();
+        let tx_locked = if watermark_lost {
+            true
+        } else {
+            // Persist the reserve watermark AND verify it read back. TX is only nonce-safe while a
+            // watermark strictly greater than any counter we will ever send is durably stored. If
+            // the write fails or does not read back (EEPROM full/faulted), start TX **locked**:
+            // the device can still receive, but sending would risk resuming at a stale watermark
+            // after a reboot and reusing a CCM nonce. (Fail closed — see the `tx_locked` field.)
+            let persisted = nkv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes()).is_ok();
+            !(persisted && read_u32(nkv, KEY_WATERMARK) == Some(reserve_limit))
+        };
 
         // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/radio.md).
         let duty = match cfg.band {
@@ -418,13 +435,18 @@ impl Net {
     ///
     /// **Saturating, not wrapping** — the counter is the CCM nonce input, so it must never
     /// wrap back to a reused value. At the 2³²−1 ceiling (≈136 yr at 1 Hz — practically
-    /// unreachable) it sticks at `u32::MAX`; the strict `counter > last_seen` replay rule then
-    /// makes a peer reject every further frame as a replay, so the link fails **closed**
-    /// rather than silently reusing a low nonce. Re-key well before then.
+    /// unreachable) it **locks TX** (`tx_locked = true`): every subsequent send fails closed
+    /// rather than transmitting another frame under the pinned `u32::MAX` nonce. A reused
+    /// `(key, nonce)` is a CCM confidentiality *and* integrity break (keystream + MAC reuse),
+    /// not merely a delivery failure the replay rule would reject — so we must stop emitting,
+    /// not rely on the peer to drop it. Re-key well before then.
     fn advance_tx_counter(&mut self) {
         self.tx_counter = self.tx_counter.saturating_add(1);
         if self.tx_counter == u32::MAX {
-            return; // ceiling reached: stop churning the reserve watermark (see above)
+            // Ceiling reached: fail closed. Do not emit any further frame (the next send would
+            // reuse the pinned MAX nonce) and stop churning the reserve watermark.
+            self.tx_locked = true;
+            return;
         }
         if self.tx_counter >= self.reserve_limit {
             // Extend the reservation, but only trust it once the write lands. If the persist
@@ -584,22 +606,42 @@ impl Net {
         Ok(())
     }
 
-    /// Wait `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.
+    /// Wait up to `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.
+    ///
+    /// Loops until the window deadline, **ignoring** any frame that isn't the ACK we're waiting
+    /// for, rather than giving up on the first one. The SPIRIT1 runs with no address filtering,
+    /// so `rx()` surfaces the first CRC-valid frame from *anyone* — a neighbouring node's uplink
+    /// landing in our 200 ms window is common in a star. Treating that foreign (undecodable under
+    /// our key) frame as "no ACK" was a false `NotDelivered` that burned a retransmit and could
+    /// report a delivery failure the gateway had actually received — the exact star-contention
+    /// bug `recv()`'s re-ACK cache fixed on the receive side. This mirrors `recv()` /
+    /// `fhss_rx_beacon`: keep listening until the deadline.
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
         let key = self.key_for(dest);
+        let deadline = Instant::now() + ACK_WINDOW;
         let mut buf = [0u8; MAX_FRAME];
-        let Ok((len, _)) = self.radio.rx(&mut buf, ACK_WINDOW).await else {
-            return false;
-        };
-        let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
-            return false;
-        };
-        if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
-            return false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.as_ticks() == 0 {
+                return false; // window elapsed
+            }
+            let Ok((len, _)) = self.radio.rx(&mut buf, remaining).await else {
+                return false; // rx timed out over the remaining window (or a radio error)
+            };
+            // A foreign / undecodable frame is NOT a failed ACK — skip it and keep waiting.
+            let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
+                continue;
+            };
+            if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
+                continue;
+            }
+            // ACK payload: acked counter (4 LE) + rssi (1). A valid ACK for a *different* counter
+            // (a stale/duplicate ACK) also isn't ours — keep waiting for the right one.
+            let pl = &buf[range];
+            if pl.len() >= 4 && u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]) == counter {
+                return true;
+            }
         }
-        // ACK payload: acked counter (4 LE) + rssi (1).
-        let pl = &buf[range];
-        pl.len() >= 4 && u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]) == counter
     }
 
     /// Build, cache and transmit an ACK for a received confirmed frame. The ACK
@@ -614,7 +656,10 @@ impl Net {
         let ack_counter = self.tx_counter;
         let mut payload = [0u8; 5];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
-        payload[4] = rssi_dbm as i8 as u8;
+        // Clamp to i8 range before packing: rssi_dbm is i16 and the SPIRIT1 noise floor reaches
+        // below −128 dBm, where a bare `as i8` wraps (−130 → +126) and reports a strong link for
+        // the weakest one. Clamp so the reported margin is monotonic at the edges.
+        payload[4] = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
         let hdr = Header {
             frame_type: FrameType::Ack,
             flags: 0,
@@ -626,11 +671,18 @@ impl Net {
         let key = self.key_for(dest);
         let mut ack = [0u8; MAX_FRAME];
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &payload, &mut ack) {
-            // ACK airtime is governed too (docs/radio.md); skip it if over budget — the sender
-            // will retransmit, and a retransmit re-drives this same path (recv re-ACKs by
-            // (src, counter)), so no ACK cache is needed.
             self.advance_tx_counter(); // ACK consumes a counter (its own, docs/radio.md)
-            if self.duty.try_tx(duty::frame_toa_ms(n)) {
+            // ACK airtime is charged to the EU 1 % governor ONLY in Duty mode. AFA/FHSS manage
+            // spectrum access on their own path and are not under the 1 % cap, so metering the
+            // ACK against `self.duty` there (which stays the EU governor) let a drained bucket
+            // silently kill confirmed delivery in a mode that has no duty limit. In Duty mode we
+            // still gate + consume budget; if over budget we skip the ACK and the sender
+            // retransmits (recv re-ACKs by (src, counter)), so no ACK cache is needed.
+            let may_tx = match self.access {
+                Access::Duty => self.duty.try_tx(duty::frame_toa_ms(n)),
+                _ => true,
+            };
+            if may_tx {
                 let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
             }
         }

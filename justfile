@@ -162,15 +162,19 @@ check-protocol-pin:
 # concurrently. HW-touching tests are `#[ignore]`d, so `--ignored` opts INTO the bench run; a plain
 # `cargo test` (which `cargo check`/CI would do) only COMPILES them.
 
-# Run the smoke + radio HIL groups on the bench (needs the Dongle + Core; NOT run in CI).
+# Run the smoke + radio + extended HIL groups on the bench (needs the Dongle + Core; NOT run in
+# CI). The `power` group is compiled out (no `power` feature), so this never touches the PPK2.
 hil *args:
     cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} -- --ignored --test-threads=1 {{args}}
 
-# Run the feature-gated power HIL group (needs the Core on J-Link + PPK2, FTDI UNPLUGGED).
+# Run ONLY the feature-gated power HIL group (needs the Core on J-Link + PPK2, FTDI UNPLUGGED).
+# The `power_` name filter is load-bearing: `--features power` merely ADDS power.rs — without the
+# filter, `--ignored` would ALSO run the smoke/radio/extended groups, whose `tower flash` of the
+# FTDI-detached Core times out on a power bench. `hil-full` is the unfiltered "everything" run.
 hil-power *args:
-    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 {{args}}
+    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 power_ {{args}}
 
-# Run every HIL group (smoke + radio + power) on the fully-cabled bench.
+# Run every HIL group (smoke + radio + extended + power) on the fully-cabled bench.
 hil-full *args:
     cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 {{args}}
 

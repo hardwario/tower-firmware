@@ -35,7 +35,7 @@ use core::cell::RefCell;
 
 use embassy_stm32::flash::{Blocking, EEPROM_SIZE, Flash};
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tower_kv::{Eeprom, KvError};
@@ -224,8 +224,17 @@ impl<'d> Kv<'d> {
 /// [`shell`](crate::shell), and apps — borrows it through an [`Nv`] handle.
 ///
 /// A *blocking* (non-async) mutex suffices: EEPROM access is synchronous and is never held across
-/// `.await` on this single-core cooperative executor, and no EEPROM access happens in an interrupt.
-pub type SharedKv = Mutex<CriticalSectionRawMutex, RefCell<Kv<'static>>>;
+/// `.await` on this single-core cooperative executor. The raw mutex is [`ThreadModeRawMutex`], NOT
+/// `CriticalSectionRawMutex`: every access is task-context (thread mode), so it never needs to mask
+/// interrupts — and it MUST NOT. A compaction flip programs a whole ~3 KB EEPROM half word-by-word
+/// (each ~3.4–6.8 ms), and under a critical-section mutex that ran with all interrupts disabled for
+/// **2.5–5 s** — long enough to overflow the SPIRIT1 RX FIFO and slip every timer, triggered
+/// unpredictably from the radio hot path. With `ThreadModeRawMutex` the flip still monopolizes the
+/// *executor* (no other task runs until it returns — no `.await` inside), but the NVIC keeps
+/// servicing interrupts, so the radio and timebase stay alive. `ThreadModeRawMutex` also enforces
+/// the "thread mode only" contract by construction: a stray EEPROM access from an ISR/exception
+/// now panics instead of silently deadlocking.
+pub type SharedKv = Mutex<ThreadModeRawMutex, RefCell<Kv<'static>>>;
 
 /// A cheap, `Copy` handle to the one shared [`Kv`]. Hand the same handle to `Net`, the shell, and
 /// apps at once (it is [`Board::kv`](crate::board::Board)); each method locks + borrows the store

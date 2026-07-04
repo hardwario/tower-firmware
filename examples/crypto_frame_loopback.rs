@@ -106,13 +106,15 @@ async fn run(_b: Board) {
         }
     }
 
-    if pass {
-        info!(target: "frame", "frame codec + nonce + CCM loopback: ALL PASS ***");
-    } else {
-        error!(target: "frame", "frame loopback: FAILURES above");
-    }
-
+    // Re-emit the verdict every 5 s: the boot burst above (~10 frames in ~10 ms) can overflow
+    // the console TX queue (drop-newest, see src/console.rs TX_DEPTH), and the verdict is the
+    // one line that must survive — this way `tower logs` attached at ANY time still sees it.
     loop {
+        if pass {
+            info!(target: "frame", "frame codec + nonce + CCM loopback: ALL PASS ***");
+        } else {
+            error!(target: "frame", "frame loopback: FAILURES above");
+        }
         embassy_time::Timer::after_secs(5).await;
     }
 }

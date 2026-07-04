@@ -42,7 +42,7 @@
 use core::fmt::{self, Write};
 
 use embassy_executor::Spawner;
-use embassy_time::{Instant, Timer};
+use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
 use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
@@ -66,6 +66,10 @@ pub const R_OK: u8 = 0;
 pub const R_NOT_FOUND: u8 = 1;
 pub const R_BAD_ARG: u8 = 2;
 pub const R_STORAGE: u8 = 3;
+/// The response exceeded the buffer and was truncated — the body is incomplete. Set by the
+/// dispatcher (not a handler) when [`Ctx`] overflowed, so a caller doesn't mistake a cut-off
+/// `/export` / `settings print` for a complete, successful one.
+pub const R_TRUNCATED: u8 = 4;
 
 // ---- declarative settings ---------------------------------------------------
 
@@ -176,6 +180,10 @@ pub struct Ctx<'a> {
     /// The merged settings table (SDK base + app).
     pub settings: SettingsTable,
     out: &'a mut String<RESP_CAP>,
+    /// Set when a write hit the `RESP_CAP` ceiling and the response body was truncated. The
+    /// dispatcher turns this into [`R_TRUNCATED`] so a scripting caller sees the output is
+    /// incomplete rather than a silent, R_OK-looking partial (e.g. an `/export` cut mid-setting).
+    overflowed: bool,
 }
 
 impl Write for Ctx<'_> {
@@ -184,6 +192,9 @@ impl Write for Ctx<'_> {
         let mut end = s.len().min(RESP_CAP - self.out.len());
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
+        }
+        if end < s.len() {
+            self.overflowed = true; // couldn't fit all of `s` — body is now truncated
         }
         let _ = self.out.push_str(&s[..end]);
         Ok(())
@@ -437,22 +448,29 @@ async fn dispatch(
     match resolve(&toks, app) {
         Resolved::Cmd(cmd, arg_start) => {
             let mut out = String::<RESP_CAP>::new();
-            let outcome = {
+            let (outcome, truncated) = {
                 let mut ctx = Ctx {
                     kv,
                     settings,
                     out: &mut out,
+                    overflowed: false,
                 };
-                (cmd.run)(&mut ctx, &toks[arg_start..])
+                let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
+                (outcome, ctx.overflowed)
             };
-            console::shell_response(cmd_id, outcome.result, out.as_str()).await;
+            // A response that overflowed the buffer would otherwise report R_OK on a silently
+            // truncated body; surface it as R_TRUNCATED so a scripting caller (`tower exec`) can
+            // tell the output is incomplete. Don't mask a handler's own non-zero result.
+            let result = if truncated && outcome.result == R_OK { R_TRUNCATED } else { outcome.result };
+            console::shell_response(cmd_id, result, out.as_str()).await;
             if outcome.reboot {
-                // Let the response flush before reset. This runs on the console RX task,
-                // so a USB unplug within this 150 ms window cancels it (the manager tears
-                // the console down) and the reset is skipped — acceptable: a reboot issued
-                // and then immediately unplugged is a no-op, and the node reboots on demand
-                // only while a host is attached.
-                Timer::after_millis(150).await;
+                // Wait for the response to actually leave the wire before resetting, instead of a
+                // fixed sleep shorter than a full TX queue at 115200 baud (which truncated the
+                // reboot response). This runs on the console RX task, so a USB unplug within the
+                // window cancels it (the manager tears the console down) and the reset is skipped
+                // — acceptable: a reboot issued then immediately unplugged is a no-op, and the
+                // node reboots on demand only while a host is attached.
+                console::flush().await;
                 cortex_m::peripheral::SCB::sys_reset();
             }
         }
@@ -472,7 +490,10 @@ fn cmd_reboot(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let us = Instant::now().as_micros();
-    // Multi-line summary (spans more than one wire frame — exercises chunking).
+    // "firmware:" reports the app/example NAME (the same string the boot `Hello` carries and
+    // `tower` prints on connect) — not the SDK crate version, which is identical for every app and
+    // disagreed with the Hello. Multi-line summary (spans more than one wire frame — exercises
+    // chunking).
     let _ = write!(
         ctx,
         "firmware:  {}\r\n\
@@ -482,7 +503,7 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
          clock:     LSE 32.768 kHz RTC tick\r\n\
          memory:    192 KiB flash / 20 KiB RAM / 6 KiB EEPROM\r\n\
          console:   USART1 PA9/PA10 115200 8N1, framed\r\n",
-        env!("CARGO_PKG_VERSION"),
+        console::firmware_name(),
         PROTOCOL_VERSION,
         us / 1_000_000,
         (us % 1_000_000) / 1000,

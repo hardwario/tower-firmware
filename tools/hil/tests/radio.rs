@@ -9,7 +9,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use tower_hil::{bench_or_fail, frame_text, reset_into_app, Console};
+use tower_hil::{bench_or_fail, frame_text, Console};
 
 /// Build `net_confirmed` with the given cargo features to target/firmware.bin, then flash `port`.
 fn build_and_flash(port: &str, features: &str) -> Result<(), String> {
@@ -55,25 +55,41 @@ fn radio_net_confirmed_delivered_and_acked() {
     build_and_flash(&bench.core.serial, "role-node").expect("flash node (Core)");
 
     // Concurrent capture: open both consoles, reset both into the app, then read a window.
+    // Each console loans its own handle to jolt for the pulse (Console::reset_into_app) — a
+    // second open of an attached tty fails under serialport 4.9's exclusive flock.
     let mut node = Console::open(&bench.core.serial).expect("open node console");
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     node.resync();
     gw.resync();
-    reset_into_app(&bench.dongle.serial).expect("reset gateway");
-    reset_into_app(&bench.core.serial).expect("reset node");
+    gw.reset_into_app().expect("reset gateway");
+    node.reset_into_app().expect("reset node");
 
-    // Node must report a confirmed delivery (an ACK came back). net_confirmed logs "Delivered"
-    // / "ACK" on success; treat NotDelivered as a failing outcome to surface clearly.
-    let delivered = node
-        .wait_for(Duration::from_secs(15), |f| {
-            frame_text(f).is_some_and(|t| {
-                t.contains("Delivered") || t.contains("delivered") || t.contains("ACK")
-            })
+    // Node must report a confirmed delivery (an ACK came back). net_confirmed logs the
+    // SendResult VARIANT NAME per send: `Delivered`, `NotDelivered`, `Busy`, `DutyLimited`,
+    // `Error …`. We require at least ONE `Delivered` within the window — NOT the strict first
+    // outcome: the very first send after a fresh dual-reset lands in the SPIRIT1 warm-up and
+    // reliably reports a one-shot `seq=0 Error timeout` (~120 ms after radio init, before the
+    // separately-reset gateway is armed); every subsequent send at 2 s cadence Delivers. A bare
+    // `contains("Delivered")` would also match `NotDelivered`, so exclude that token explicitly.
+    let mut delivered = false;
+    let mut last = String::new();
+    while node
+        .wait_for(Duration::from_secs(18), |f| {
+            frame_text(f).is_some_and(|t| t.contains("seq="))
         })
         .expect("node console read")
-        .expect("node never reported a confirmed delivery within 15 s");
-    let t = frame_text(&delivered).unwrap_or("");
-    assert!(!t.contains("not delivered"), "confirmed send failed on the node: {t:?}");
+        .and_then(|f| frame_text(&f).map(str::to_string))
+        .map(|t| {
+            last = t.clone();
+            delivered = t.contains("Delivered") && !t.contains("NotDelivered");
+            !delivered // keep reading until a genuine Delivered (or the window elapses)
+        })
+        .unwrap_or(false)
+    {}
+    assert!(
+        delivered,
+        "node never reported a confirmed delivery within the window (last outcome: {last:?})"
+    );
 
     // Gateway must log at least one received/decrypted frame from the node.
     let got_rx = gw

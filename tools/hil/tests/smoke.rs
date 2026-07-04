@@ -8,7 +8,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use tower_hil::{Frame, bench_or_fail, frame_text, reset_into_app, Console};
+use tower_hil::{Frame, bench_or_fail, frame_text, Console};
 
 /// Flash a raw `.bin` to a board over the UART bootloader via `tower flash`. Sequential by design
 /// (concurrent FTDI flashing is unreliable — Write-Memory timeouts / re-enumeration, see
@@ -57,9 +57,11 @@ fn smoke_ccm_kat_all_pass() {
     tower_flash(&bench.dongle.serial, &bin).expect("flash the Dongle");
 
     // Reset into the app so the one-shot verdict is emitted while we're listening, then decode.
+    // The console LOANS its handle to jolt for the pulse — a second open of the same tty fails
+    // under serialport 4.9's exclusive flock (Console::reset_into_app).
     let mut console = Console::open(&bench.dongle.serial).expect("open Dongle console");
     console.resync();
-    reset_into_app(&bench.dongle.serial).expect("reset the Dongle into the app");
+    console.reset_into_app().expect("reset the Dongle into the app");
 
     // Await a positive verdict; a FAIL/MISMATCH/VIOLATION line fails fast.
     let verdict = console
@@ -96,7 +98,7 @@ fn smoke_hello_banner_decodes() {
 
     let mut console = Console::open(&bench.dongle.serial).expect("open Dongle console");
     console.resync();
-    reset_into_app(&bench.dongle.serial).expect("reset the Dongle into the app");
+    console.reset_into_app().expect("reset the Dongle into the app");
 
     let hello = console
         .wait_for(Duration::from_secs(5), |f| matches!(f, Frame::Hello { .. }))
