@@ -9,6 +9,13 @@
 target = "thumbv6m-none-eabi"
 
 [target.thumbv6m-none-eabi]
+# Memory-safety: flip-link relocates the stack to the BOTTOM of RAM (below .bss),
+# so a stack overflow underflows past RAM_START and faults immediately (HardFault)
+# instead of silently growing DOWN into .bss and corrupting statics. The L083 has
+# no MPU, so this link-time trick is the only way to make an overflow loud. It
+# wraps rust-lld and is transparent to the -Tlink.x / --nmagic args build.rs sets.
+# Install with: cargo install flip-link
+linker = "flip-link"
 # Flash and run over SWD with a J-Link / ST-Link.
 # Requires probe-rs:  cargo install probe-rs-tools
 runner = "probe-rs run --chip STM32L083CZTx"

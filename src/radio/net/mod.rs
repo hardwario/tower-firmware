@@ -9,7 +9,7 @@
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
 //! Keys are per-peer: [`Net::add_peer`] binds an `id` to its own AES key and
-//! replay lane (star ≤64 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
+//! replay lane (star ≤32 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
 //! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, docs/radio.md).
 //!
@@ -63,12 +63,14 @@ const P: u32 = 32;
 const KEY_WATERMARK: u8 = 0x00;
 const KEY_LASTSEEN: u8 = 0x01;
 
-/// Peer-table capacity. A gateway in a star holds up to 64 nodes; a P2P device
+/// Peer-table capacity. A gateway in a star holds up to 32 nodes; a P2P device
 /// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
-/// is a usage policy, not a different type.
-pub const MAX_PEERS: usize = 64;
+/// is a usage policy, not a different type. Sized at 32 (not 64) so the table
+/// (`[Option<Peer>; MAX_PEERS]`, ~32 B/slot) costs ~1 KB, not ~2 KB, of the Net
+/// future in `.bss` — RAM that (with flip-link) is stack headroom on this 20 KB part.
+pub const MAX_PEERS: usize = 32;
 /// Local base (within `NS_NET`) for per-peer last-seen lanes (slot `i` → `KEY_LASTSEEN_BASE + i`,
-/// `i < MAX_PEERS = 64`, so lanes occupy locals `0x10..=0x4F`).
+/// `i < MAX_PEERS = 32`, so lanes occupy locals `0x10..=0x2F`).
 const KEY_LASTSEEN_BASE: u8 = 0x10;
 
 /// A registered peer: its ID, per-peer AES key, and replay state (docs/radio.md).
@@ -319,7 +321,7 @@ impl Net {
     /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
     /// its own replay lane. The peer's persisted last-seen is restored. Returns
     /// `false` only if the table is full (and the id is new) — check the return in
-    /// production code. Up to [`MAX_PEERS`] peers (star ≤64 / P2P ≤8 by policy, docs/radio.md).
+    /// production code. Up to [`MAX_PEERS`] peers (star ≤32 / P2P ≤8 by policy, docs/radio.md).
     pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
         if let Some(i) = self.peer_slot(id) {
             self.peers[i].as_mut().unwrap().key = *key; // re-key in place

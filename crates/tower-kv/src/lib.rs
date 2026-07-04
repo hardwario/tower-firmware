@@ -350,9 +350,15 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
     let dst_base = half_base(capacity, dst_h);
 
     // Pass 1: latest offset per tag in the source half (+ the source log's end).
+    // `tmp` is reused as pass 1's CRC-check scratch and pass 2's record-copy buffer — the two
+    // uses are strictly sequential, so one buffer serves both. This keeps a second MAX_VALUE
+    // array off the compaction stack: flip runs synchronously inside the executor poll (via
+    // set_bytes ← Nv::with ← net.send), the deepest stack path in a radio app, where peak
+    // headroom is tight (see docs/radio.md — no stack guard on this target).
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
-    let src_free = walk_latest(store, src_base, half, &mut latest, &mut nkeys)?;
+    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let src_free = walk_latest(store, src_base, half, &mut latest, &mut nkeys, &mut tmp)?;
 
     // Blank the destination half so its scan will terminate cleanly (it may hold stale records
     // from when it was active two generations ago). Its superblock is untouched here, so the
@@ -362,7 +368,6 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
     // Pass 2: copy each latest record forward into the destination, packed.
     let mut wr = 0u32;
     let mut o = 0u32;
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
     while o < src_free {
         let mut hdr = [0u8; KV_HEADER];
         store.read(src_base + o, &mut hdr).map_err(KvError::Backend)?;
@@ -398,9 +403,9 @@ fn walk_latest<S: Eeprom>(
     area: u32,
     latest: &mut [(u16, u32); MAX_KEYS],
     nkeys: &mut usize,
+    val: &mut [u8],
 ) -> Result<u32, KvError<S::Error>> {
     let mut o = 0u32;
-    let mut val = [0u8; MAX_VALUE];
     loop {
         if o + KV_HEADER as u32 > area {
             break;
@@ -455,11 +460,12 @@ fn legacy_free<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Er
 fn legacy_compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<u32, KvError<S::Error>> {
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
-    let old_free = walk_latest(store, 0, capacity, &mut latest, &mut nkeys)?;
+    // Reuse one buffer for the CRC-check scan (pass 1) and the record copy (pass 2); see `flip`.
+    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let old_free = walk_latest(store, 0, capacity, &mut latest, &mut nkeys, &mut tmp)?;
 
     let mut wr = 0u32;
     let mut o = 0u32;
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
     while o < old_free {
         let mut hdr = [0u8; KV_HEADER];
         store.read(o, &mut hdr).map_err(KvError::Backend)?;
