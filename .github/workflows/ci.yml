@@ -39,6 +39,10 @@ jobs:
         with:
           targets: thumbv6m-none-eabi
       - uses: Swatinem/rust-cache@v2
+      # The committed .cargo/config.toml sets `linker = "flip-link"` (stack-overflow protection),
+      # so every embedded link needs the binary on PATH.
+      - name: Install flip-link (the workspace linker)
+        run: cargo install flip-link
       # Lib + product bins + educational examples. Target defaults to thumbv6m
       # (see .cargo/config.toml).
       - name: Build lib + product bins + examples
