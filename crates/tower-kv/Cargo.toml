@@ -2,7 +2,9 @@
 name = "tower-kv"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.87"
 license = "MIT"
+repository = "https://github.com/hardwario/tower-firmware"
 description = "no_std key-value codec over byte-addressable EEPROM, extracted from the HARDWARIO TOWER firmware SDK so the record/scan/compaction logic can be unit-tested on the host (the firmware itself is no_std and can't cargo test)."
 
 # The codec is generic over an `Eeprom` byte-store trait (the firmware implements it over the
@@ -10,4 +12,4 @@ description = "no_std key-value codec over byte-addressable EEPROM, extracted fr
 # so EEPROM records stay byte-compatible with the firmware. Pinned to the same tower-protocol
 # tag as the firmware (see the repo CLAUDE.md lockstep note).
 [dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.1.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }

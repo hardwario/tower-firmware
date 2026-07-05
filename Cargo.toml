@@ -2,7 +2,9 @@
 name = "tower"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.87"
 license = "MIT"
+repository = "https://github.com/hardwario/tower-firmware"
 description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
 
 # This package is also the workspace root. `tower-protocol` (the shared no_std wire-format
@@ -101,7 +103,7 @@ tower-net-core = { path = "crates/tower-net-core" }
 
 # Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
 # (bump in lockstep with `tower-cli` on any wire change).
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.1.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
 
 # Bounded buffers for the framed console (the TX queue item, log/print scratch).
 # Matches the version already in the lockfile (pulled transitively by embassy).

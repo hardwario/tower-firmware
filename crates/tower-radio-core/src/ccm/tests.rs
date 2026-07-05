@@ -9,17 +9,19 @@
 
 use super::{AesBlock, Ccm, NONCE_LEN, TAG_LEN};
 use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
 
 /// Pure-Rust single-block AES-128 (the `aes` crate) as an [`AesBlock`], for host tests only.
 struct SoftAes;
 
 impl AesBlock for SoftAes {
     fn encrypt_block(&mut self, key: &[u8; 16], block: &mut [u8; 16]) {
-        let cipher = Aes128::new(GenericArray::from_slice(key));
-        let mut b = GenericArray::clone_from_slice(block);
+        // aes 0.9 (cipher 0.5): GenericArray became `Array` (hybrid-array) and the trait is
+        // `BlockCipherEncrypt`; the construction is otherwise unchanged.
+        let cipher = Aes128::new(&Array(*key));
+        let mut b = Array(*block);
         cipher.encrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        block.copy_from_slice(&b.0);
     }
 }
 
