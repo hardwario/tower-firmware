@@ -377,6 +377,13 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
     // tracking (docs/console.md); dropping it would strand the host on a stale seq and print a
     // spurious wire-loss warning. Lead with a lone 0x00 to flush any partial frame left on the
     // host's decoder, then the Hello as seq 0.
+    //
+    // KNOWN LIMITATION (measured 2026-07-05, wire probe): while a chatty boot backlog drains
+    // right after this Hello (a full TX_CHANNEL ≈ 500 B ≈ 45 ms at 115200), host→device bytes
+    // can be lost to receiver overrun — a ShellCommand sent within ~60 ms of the Hello vanishes
+    // (CRC-dropped from a partial frame), while a quiet firmware (blinky) accepts at Hello+5 ms.
+    // The host CLI guards this with a post-Hello settle (tower-cli session::POST_HELLO_GUARD);
+    // a firmware-side fix would need the RX ISR to survive the TX flood (ORE handling/rings).
     {
         let _g = WakeGuard::new(StopMode::Stop1);
         let _ = tx.write_all(&[0u8]).await;
