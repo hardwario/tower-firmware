@@ -57,7 +57,7 @@ pub const STATE_SYNTH_CALIBRATION: u8 = 0x4F;
 pub const STATE_LOCKWON: u8 = 0x13;
 
 /// Extract the 7-bit MC state from the first MISO status byte returned by any
-/// SPI transaction. That byte is the MC_STATE0 register: bits[7:1]=STATE[6:0],
+/// SPI transaction. That byte is the MC_STATE0 register: `bits[7:1]=STATE[6:0]`,
 /// bit0=XO_ON. So `state = (status0 >> 1) & 0x7F`.
 #[inline]
 pub const fn state_from_status(status0: u8) -> u8 {

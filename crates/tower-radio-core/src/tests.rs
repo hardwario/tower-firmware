@@ -107,7 +107,10 @@ fn hop_channel_is_perfect_permutation() {
         for i in 0..FHSS_N as u8 {
             let ch = hop_channel::<FHSS_N>(seed, 0, i);
             assert!((ch as usize) < FHSS_N, "channel {ch} out of range (seed {seed})");
-            assert!(!seen[ch as usize], "channel {ch} repeated (seed {seed}) — not a permutation");
+            assert!(
+                !seen[ch as usize],
+                "channel {ch} repeated (seed {seed}) — not a permutation"
+            );
             seen[ch as usize] = true;
         }
         assert!(seen.iter().all(|&s| s), "not every channel visited (seed {seed})");

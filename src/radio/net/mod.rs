@@ -430,7 +430,10 @@ impl Net {
                 self.default_last_seen = counter;
                 self.default_accepts = self.default_accepts.wrapping_add(1);
                 if self.default_accepts.is_multiple_of(P) {
-                    let _ = self.kv.scope(NS_NET).set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
+                    let _ = self
+                        .kv
+                        .scope(NS_NET)
+                        .set_bytes(KEY_LASTSEEN, &counter.to_le_bytes());
                 }
             }
         }

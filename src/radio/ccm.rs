@@ -9,7 +9,7 @@
 //!
 //! The CCM **construction** (CBC-MAC + CTR) lives in the host-testable
 //! [`tower_radio_core::ccm`] leaf crate, generic over an
-//! [`AesBlock`](tower_radio_core::ccm::AesBlock) single-block cipher; it is verified there
+//! [`AesBlock`] single-block cipher; it is verified there
 //! against RFC 3610 Packet Vector #1. This module is the thin device binding: it plugs the L0
 //! hardware AES ([`HwAes`]) in as that block cipher and re-exposes the same `Ccm` API the radio
 //! stack already uses. **Zero** behavioural change on target — the hardware binding caches the

@@ -45,7 +45,7 @@ pub use embassy_executor::Spawner;
 ///
 /// Wraps your `async fn run(b: Board)` with the STOP-mode executor + reset entry and the
 /// always-on board setup ([`board::Board::take`] — clock, console, TMP112 one-shot). It also
-/// **serves the interactive [`shell`](crate::shell) by default**, over the shared EEPROM
+/// **serves the interactive [`shell`] by default**, over the shared EEPROM
 /// [`Nv`](crate::storage::Nv) handle, so the app can drive `Net` on the same `b.kv`
 /// alongside it. The whole app is then just:
 ///

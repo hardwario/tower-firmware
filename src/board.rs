@@ -252,7 +252,7 @@ pub fn atsha_sleep(i2c: &mut I2c<'static, Blocking, Master>) {
 /// untouched, so a deliberate crypto sequence still manages its own wake/sleep.
 ///
 /// It implements [`embedded_hal::i2c::I2c`], so it drops in wherever a raw bus went (the
-/// [`Tmp112`](crate::tmp112::Tmp112) / [`Lis2dh12`](crate::lis2dh12::Lis2dh12) drivers are
+/// [`Tmp112`] / [`Lis2dh12`](crate::lis2dh12::Lis2dh12) drivers are
 /// generic over it). Use [`into_inner`](Self::into_inner) for deliberate *unguarded*
 /// access (e.g. a raw bus scan).
 pub struct AtshaGuard<T> {

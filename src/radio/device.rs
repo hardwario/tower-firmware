@@ -30,7 +30,7 @@ pub enum RadioError {
     /// Device ID did not match the expected SPIRIT1 (part 304 / version 48).
     WrongDevice { partnum: u8, version: u8 },
     /// The MC state machine did not reach the requested state in time; carries
-    /// the last observed STATE[6:0] code.
+    /// the last observed `STATE[6:0]` code.
     StuckState(u8),
     /// CSMA/CCA gave up: the channel stayed busy (max-backoff IRQ).
     Busy,
@@ -183,14 +183,14 @@ impl Spirit1 {
         })
     }
 
-    /// Read the current MC STATE[6:0] code (see the `STATE_*` consts in
-    /// [`regs`](super::regs)).
+    /// Read the current MC `STATE[6:0]` code (see the `STATE_*` consts in
+    /// [`regs`])).
     pub fn mc_state(&mut self) -> Result<u8, RadioError> {
         let (v, _) = self.spi.read_reg(regs::MC_STATE0)?;
         Ok(regs::state_from_status(v))
     }
 
-    /// Send a command strobe; returns the status bytes (status[0] carries the
+    /// Send a command strobe; returns the status bytes (`status[0]` carries the
     /// MC state at transaction start).
     pub fn command(&mut self, cmd: u8) -> Result<Status, RadioError> {
         Ok(self.spi.command(cmd)?)
@@ -261,7 +261,7 @@ impl Spirit1 {
         Ok(())
     }
 
-    /// Set the IRQ mask (32-bit INT_MASK; bits per [`regs`](super::regs) `IRQ_*`).
+    /// Set the IRQ mask (32-bit INT_MASK; bits per [`regs`] `IRQ_*`).
     /// A 1 routes that event to nIRQ.
     pub fn set_irq_mask(&mut self, mask: u32) -> Result<(), RadioError> {
         // IRQ_MASK3..0 hold INT_MASK[31:24]..[7:0]; write MSB-first at 0x90.

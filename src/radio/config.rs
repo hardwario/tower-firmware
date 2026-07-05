@@ -126,7 +126,7 @@ fn synt_value(fbase_hz: u64, b_div: u64) -> u32 {
 }
 
 /// Pack the 26-bit SYNT divider for `f_hz` into the four SYNT3..SYNT0 bytes:
-/// SYNT[25:0] with WCP[7:5]=0 and the band-select `bs` in SYNT0[2:0].
+/// `SYNT[25:0]` with `WCP[7:5]=0` and the band-select `bs` in `SYNT0[2:0]`.
 fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
     let synt = synt_value(f_hz, b_div);
     [

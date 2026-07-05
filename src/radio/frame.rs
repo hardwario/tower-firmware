@@ -13,7 +13,7 @@
 
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
-/// Protocol version (bits[7:5] of `ver_type`).
+/// Protocol version (`bits[7:5]` of `ver_type`).
 pub const VERSION: u8 = 1;
 /// Header size without a bulk index (ver_type+flags+src+dest+counter).
 pub const HDR_LEN: usize = 14;

@@ -1,4 +1,4 @@
-//! Addressable-LED **strip effects** — a high-level layer over the [`ws2812`]
+//! Addressable-LED **strip effects** — a high-level layer over the [`ws2812`](crate::ws2812)
 //! driver.
 //!
 //! A [`Strip`] owns an RGB *intent* framebuffer plus the WS2812 driver. You
@@ -33,7 +33,7 @@
 //! [sparkle](Strip::sparkle).
 //!
 //! Scope: the framebuffer is RGB; on an RGBW strip the white channel is left
-//! off (use the [`ws2812`] driver directly for white-channel control).
+//! off (use the [`ws2812`](crate::ws2812) driver directly for white-channel control).
 
 use embassy_stm32::Peri;
 use embassy_stm32::peripherals::{DMA1_CH3, PA1, TIM2};

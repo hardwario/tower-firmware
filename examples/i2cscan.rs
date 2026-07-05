@@ -13,7 +13,10 @@
 
 use embassy_time::Timer;
 use log::info;
-use tower::{app, board::{self, Board}};
+use tower::{
+    app,
+    board::{self, Board},
+};
 
 async fn run(b: Board) {
     // Take the *raw* (unguarded) I2C2 bus from the TMP112 driver for address probing —

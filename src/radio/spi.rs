@@ -8,7 +8,7 @@
 //!
 //! Every method returns the two MC_STATE status bytes the SPIRIT1 shifts out on
 //! MISO during the header + address bytes of *every* transaction (§10.2). Use
-//! [`regs::state_from_status`](super::regs::state_from_status) on `status[0]` to
+//! [`regs::state_from_status`] on `status[0]` to
 //! get the current MC state for free — no extra read.
 
 use embassy_stm32::Peri;

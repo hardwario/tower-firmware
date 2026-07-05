@@ -358,12 +358,7 @@ pub fn serve(spawner: Spawner, kv: Nv) {
 /// `ShellCommand`/`ShellComplete` frames into [`SHELL_RX`](crate::console::SHELL_RX), and
 /// [`shell_rx_task`] dispatches them here. `app_commands`/`app_settings` add an app command tree
 /// / settings (pass `&[]` for none). The task is spawned at most once across repeated calls.
-pub fn serve_ext(
-    spawner: Spawner,
-    kv: Nv,
-    app_commands: &'static [Entry],
-    app_settings: &'static [Setting],
-) {
+pub fn serve_ext(spawner: Spawner, kv: Nv, app_commands: &'static [Entry], app_settings: &'static [Setting]) {
     critical_section::with(|cs| {
         SHELL_PARAMS
             .borrow(cs)
@@ -384,8 +379,7 @@ pub fn serve_ext(
 /// Handle one decoded shell RX frame — called by [`shell_rx_task`]. No-op if no shell was
 /// served (`no_shell` apps leave [`SHELL_PARAMS`] unset).
 async fn dispatch_frame(inner: &[u8]) {
-    let Some((kv, app_commands, app_settings)) =
-        critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
+    let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
     else {
         return;
     };
@@ -412,13 +406,7 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
                     return;
                 }
                 // Likewise reject more tokens than `tokenize` holds, rather than dropping the tail.
-                if cmd
-                    .line
-                    .split(['/', ' ', '\t'])
-                    .filter(|s| !s.is_empty())
-                    .count()
-                    > MAX_TOKENS
-                {
+                if cmd.line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
                     console::shell_response(cmd.cmd_id, R_BAD_ARG, "too many arguments").await;
                     return;
                 }
@@ -439,13 +427,7 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
     }
 }
 
-async fn dispatch(
-    kv: Scoped,
-    app: &'static [Entry],
-    settings: SettingsTable,
-    cmd_id: u16,
-    line: &str,
-) {
+async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cmd_id: u16, line: &str) {
     let toks = tokenize(line);
     match resolve(&toks, app) {
         Resolved::Cmd(cmd, arg_start) => {
@@ -463,7 +445,11 @@ async fn dispatch(
             // A response that overflowed the buffer would otherwise report R_OK on a silently
             // truncated body; surface it as R_TRUNCATED so a scripting caller (`tower exec`) can
             // tell the output is incomplete. Don't mask a handler's own non-zero result.
-            let result = if truncated && outcome.result == R_OK { R_TRUNCATED } else { outcome.result };
+            let result = if truncated && outcome.result == R_OK {
+                R_TRUNCATED
+            } else {
+                outcome.result
+            };
             console::shell_response(cmd_id, result, out.as_str()).await;
             if outcome.reboot {
                 // Wait for the response to actually leave the wire before resetting, instead of a

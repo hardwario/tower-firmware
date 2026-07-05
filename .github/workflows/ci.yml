@@ -54,6 +54,7 @@ jobs:
       - name: Build role-gated example variants
         run: |
           cargo build --release --examples --features role-node
+          cargo build --release --examples --features role-node,node-2
           cargo build --release --examples --features role-gateway
           cargo build --release --examples --features role-peer-a
           cargo build --release --examples --features role-peer-b
@@ -91,6 +92,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy (thumbv6m — lib, examples, bins)
         run: cargo clippy --lib --examples --bins -- -D warnings
+      # Lint the role-gated halves too — without these, a warning inside a
+      # #[cfg(feature = "role-…")] branch never fails CI (the build job compiles
+      # them, but only the default-feature set is linted above).
+      - name: clippy (role-gated example variants)
+        run: |
+          cargo clippy --examples --features role-node -- -D warnings
+          cargo clippy --examples --features role-node,node-2 -- -D warnings
+          cargo clippy --examples --features role-gateway -- -D warnings
+          cargo clippy --examples --features role-peer-a -- -D warnings
+          cargo clippy --examples --features role-peer-b -- -D warnings
+
+  # 3b. Formatting. rustfmt.toml commits the house style (110 cols, stable options only —
+  #     comment content is never reflowed) exactly so this can gate; see its header.
+  fmt:
+    name: rustfmt (--check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust (stable) + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # 3c. The rustdoc story is part of the SDK surface: fail on broken intra-doc links or
+  #     malformed docs so the (extensive) API documentation can't rot silently.
+  docs:
+    name: rustdoc (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust (stable) + thumbv6m
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      # --document-private-items: the module docs deliberately narrate the internals
+      # (writer_loop, TX_CHANNEL, …) with intra-doc links; building the private items keeps
+      # those links live, and the -A silences the corresponding lint (everything else — broken
+      # links, bare URLs, malformed HTML — still fails the build).
+      - name: cargo doc (no deps, incl. private items)
+        run: cargo doc --no-deps --lib --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings -A rustdoc::private-intra-doc-links
 
   # 4. The golden rule: tower-protocol must be pinned to the SAME git tag in all in-repo
   #    manifests AND in the sibling consumer repos (tower-cli, tower-hil). postcard is not

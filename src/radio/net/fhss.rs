@@ -361,7 +361,8 @@ impl Net {
             // path, so it can't yank our clock. A real beacon lands on `slot` (± a slot of timing
             // slack). A genuinely restarted gateway carries a higher epoch but a slot near 0, so it
             // fails the prediction check here and is recovered via the rescan path (below).
-            if let Some((epoch, slot_abs, t_rx)) = self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
+            if let Some((epoch, slot_abs, t_rx)) =
+                self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
                 && epoch >= self.fhss.epoch
                 && slot_abs.abs_diff(slot) <= FHSS_RESYNC_SLACK
             {

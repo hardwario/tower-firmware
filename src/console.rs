@@ -50,9 +50,7 @@ use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
 use tower_protocol::msg::{Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse};
-use tower_protocol::{
-    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame,
-};
+use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame};
 
 use crate::storage::{NS_SYS, Nv};
 
@@ -434,9 +432,7 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
                 )
                 .await
             }
-            Outgoing::Print(text) => {
-                send(tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await
-            }
+            Outgoing::Print(text) => send(tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await,
             Outgoing::Event { name, fields } => {
                 // Capacity matches the wire type (`Event.fields: Vec<_, 8>`); the
                 // producer already capped the owned `fields` at EV_FIELDS (≤ 8).
@@ -697,7 +693,7 @@ macro_rules! println {
 
 /// Blocking-write one framed `Error` [`Log`] straight to the USART1 registers via the PAC,
 /// bypassing the (dead) executor and the channel. Shared by the [`on_panic`] handler and the
-/// [`HardFault`] exception — both run with the executor stopped and interrupts effectively ours.
+/// `HardFault` exception — both run with the executor stopped and interrupts effectively ours.
 /// If the console UART isn't up (USART1 disabled — USB not attached), it's a no-op: there is
 /// nowhere to send. `uptime_us` is the real timebase (the time driver is a peripheral, still
 /// live here) so the crash time is preserved, not reported as 0.
