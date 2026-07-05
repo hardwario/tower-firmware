@@ -10,7 +10,7 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/tower-kv", "crates/tower-radio-core"]
+members = ["crates/tower-kv", "crates/tower-net-core", "crates/tower-radio-core"]
 resolver = "2"
 
 [dependencies]
@@ -90,6 +90,14 @@ tower-kv = { path = "crates/tower-kv" }
 # arithmetic can be unit-tested on the host (`just test`); the firmware re-exports it from
 # `src/radio` (the `Instant`-based `try_tx` wrapper stays in src/radio/duty.rs). no_std.
 tower-radio-core = { path = "crates/tower-radio-core" }
+
+# The pure decision core of the radio network layer's security invariants (replay rule,
+# TX-counter reserve-ahead watermark / fail-closed nonce safety, ACK resolution, FHSS
+# beacon-epoch acceptance, pairing-confirm freshness, CCM nonce construction). Extracted like
+# `tower-kv`/`tower-radio-core` so the security-critical accept/reject arithmetic can be
+# unit-tested on the host (`just test`); the firmware keeps all I/O/async/radio/EEPROM flow and
+# delegates each decision to these kernels. no_std, dependency-free.
+tower-net-core = { path = "crates/tower-net-core" }
 
 # Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
 # (bump in lockstep with `tower-cli` on any wire change).

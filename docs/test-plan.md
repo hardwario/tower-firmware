@@ -185,6 +185,7 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 |---|---|---|
 | H1 | `tower-kv` codec (12 tests: append/latest-wins, torn-append, torn-flip, torn-superblock fail-closed, compaction, full, migrate legacy/fresh, key-zero reserved) | `test result: ok. 12 passed` |
 | H2 | `tower-radio-core` (11 tests: duty token-bucket math + FHSS hop permutation) | `test result: ok. 11 passed` |
+| H3 | `tower-net-core` (61 tests: replay rule, TX-counter watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing confirm freshness, CCM nonce layout/uniqueness) | `test result: ok. 61 passed` |
 
 ### B. Board bring-up & peripheral drivers
 | ID | Example | Mode | Pass / observable | Edge cases |

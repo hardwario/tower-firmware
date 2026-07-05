@@ -159,12 +159,15 @@ run kind name: (flash kind name)
 # === Tests & checks ===============================================================================
 
 # Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
-# codec) and `tower-radio-core` (the EU/US/FHSS duty token-bucket math + the fixed FHSS hop
-# permutation — the regulatory arithmetic). The shared wire-protocol tests live in
-# github.com/hardwario/tower-protocol.
+# codec), `tower-net-core` (the network-layer security decision kernels — replay rule, TX-counter
+# watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing
+# confirm freshness, CCM nonce construction) and `tower-radio-core` (the EU/US/FHSS duty
+# token-bucket math + the fixed FHSS hop permutation — the regulatory arithmetic). The shared
+# wire-protocol tests live in github.com/hardwario/tower-protocol.
 # Run the firmware's host-side unit tests.
 test *args:
     cargo test -p tower-kv --target {{host}} {{args}}
+    cargo test -p tower-net-core --target {{host}} {{args}}
     cargo test -p tower-radio-core --target {{host}} {{args}}
 
 

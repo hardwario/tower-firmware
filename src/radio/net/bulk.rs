@@ -73,15 +73,15 @@ impl Net {
     /// bounded by neither RAM nor (the 24-bit index aside) the protocol. Returns
     /// whether the last chunk was served.
     pub async fn bulk_serve_from<S: BulkSource>(&mut self, dest: u32, source: &mut S) -> bool {
-        if self.tx_locked {
+        if self.txc.locked() {
             return false; // fail closed (nonce safety): can't reserve the session counter
         }
         let key = self.key_for(dest);
         let total_len = source.total_len();
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
-        let announce_counter = self.tx_counter;
+        let announce_counter = self.txc.counter();
         self.advance_tx_counter();
-        let session = self.tx_counter; // reserved for all chunks; consumed at the end
+        let session = self.txc.counter(); // reserved for all chunks; consumed at the end
         // Nonce-reuse guard: the announce frame rides `announce_counter` (bulk_index 0) and
         // chunk 0 rides `session` (also bulk_index 0) — their CCM nonces differ only while the
         // TX counter still advances. At the u32::MAX ceiling `advance_tx_counter` is a no-op, so
@@ -176,7 +176,7 @@ impl Net {
     /// index aside) the protocol. Returns the total length received, or `None` on
     /// announce/chunk failure or a sink that refused (`begin`/`consume` → `false`).
     pub async fn bulk_fetch_into<S: BulkSink>(&mut self, src: u32, sink: &mut S) -> Option<usize> {
-        if self.tx_locked {
+        if self.txc.locked() {
             return None; // fail closed (nonce safety): BULK_REQ frames consume TX counters
         }
         let key = self.key_for(src);
@@ -202,7 +202,7 @@ impl Net {
 
         let mut received = 0;
         for k in 0..n_chunks {
-            let req_counter = self.tx_counter; // one counter per chunk; retransmits reuse it
+            let req_counter = self.txc.counter(); // one counter per chunk; retransmits reuse it
             let req_hdr = Header {
                 frame_type: FrameType::BulkReq,
                 flags: 0,

@@ -8,8 +8,8 @@ Cortex-M0+). The crate is a library; runnable programs come in two kinds — edu
 over the UART bootloader via the
 `tower` CLI. Standalone device control (logs/console/reset/erase/devices) is the CLI's own
 job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`. Host tests:
-`just test` (the `tower-kv` + `tower-radio-core` crates — the firmware itself is `no_std`
-and can't `cargo test`).
+`just test` (the `tower-kv` + `tower-net-core` + `tower-radio-core` crates — the firmware
+itself is `no_std` and can't `cargo test`).
 
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep
 

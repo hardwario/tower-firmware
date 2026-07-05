@@ -3,8 +3,8 @@
 # The crate is an embedded `no_std` library for the STM32L083CZ (Cortex-M0+), so the workspace
 # default target is thumbv6m-none-eabi (see .cargo/config.toml). There is no hardware in CI, so we
 # BUILD the firmware (lib + examples + product bins), but the actual host-side unit tests live in
-# the extracted no_std leaf crates (tower-kv, tower-radio-core) — run via `just test`, which
-# builds those for the host triple.
+# the extracted no_std leaf crates (tower-kv, tower-net-core, tower-radio-core) — run via
+# `just test`, which builds those for the host triple.
 #
 # The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in TWO
 # manifests here AND in the sibling consumer repos (tower-cli, tower-hil), and postcard is not
@@ -73,7 +73,7 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
       - uses: Swatinem/rust-cache@v2
-      # tower-kv + tower-radio-core host tests.
+      # tower-kv + tower-net-core + tower-radio-core host tests.
       - name: just test
         run: just test
 

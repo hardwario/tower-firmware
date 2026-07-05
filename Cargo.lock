@@ -1012,6 +1012,7 @@ dependencies = [
  "postcard",
  "serde",
  "tower-kv",
+ "tower-net-core",
  "tower-protocol",
  "tower-radio-core",
 ]
@@ -1022,6 +1023,10 @@ version = "0.1.0"
 dependencies = [
  "tower-protocol",
 ]
+
+[[package]]
+name = "tower-net-core"
+version = "0.1.0"
 
 [[package]]
 name = "tower-protocol"

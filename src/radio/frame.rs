@@ -187,18 +187,16 @@ impl Header {
     }
 }
 
-/// Derive the 13-byte CCM nonce from the header fields:
-/// `src[4] ‖ counter[4] ‖ bulk_index[3] ‖ 0x0000` (little-endian). The single
-/// audited nonce source for the whole stack.
-pub fn nonce_for(src: u32, counter: u32, bulk_index: u32) -> [u8; NONCE_LEN] {
-    let mut n = [0u8; NONCE_LEN];
-    n[0..4].copy_from_slice(&src.to_le_bytes());
-    n[4..8].copy_from_slice(&counter.to_le_bytes());
-    let b = bulk_index.to_le_bytes();
-    n[8..11].copy_from_slice(&b[..3]);
-    // n[11..13] = 0x0000
-    n
-}
+// The nonce construction lives in the host-testable `tower_net_core` leaf crate, where the
+// exact byte layout is pinned by a golden test and uniqueness across (src, counter, bulk_index)
+// is proven by round-trip/property tests. Re-exported so call sites keep saying
+// `frame::nonce_for` — it remains the single audited nonce source for the whole stack, and no
+// behavioural change (the construction is byte-identical).
+pub use tower_net_core::nonce::nonce_for;
+
+// `tower-net-core` is dependency-free, so it states the 13-byte CCM nonce length itself; it
+// must agree with the CCM core's, or `nonce_for`'s return type wouldn't fit the `Ccm` API.
+const _: () = assert!(tower_net_core::nonce::NONCE_LEN == NONCE_LEN);
 
 /// Build a full on-air frame: clear header ‖ CCM(payload) ‖ tag. Returns the
 /// total length. `out` must be at least [`MAX_FRAME`] bytes.

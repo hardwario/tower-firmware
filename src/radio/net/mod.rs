@@ -28,6 +28,12 @@ pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channe
 pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 
 use embassy_time::{Duration, Instant, Timer};
+// The security-critical *decision* kernels (replay rule, TX-counter watermark/fail-closed,
+// ACK resolution) live in the host-testable `tower_net_core` leaf crate; this module keeps the
+// radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
+use tower_net_core::ack::{AckVerdict, AckWait};
+use tower_net_core::replay::{ReplayLane, ReplayVerdict};
+use tower_net_core::txctr::TxCounter;
 
 use super::ccm::Ccm;
 use super::config::{self, Band, RfConfig};
@@ -52,13 +58,8 @@ pub const DEFAULT_REPS: u8 = 3;
 /// Max inter-rep backoff (ms), randomised to de-sync collided senders.
 const MAX_BACKOFF_MS: u32 = 100;
 
-/// TX-counter reserve block: persist the watermark only once per `RESERVE`
-/// transfers, and on boot resume *at* the watermark (> any value actually sent,
-/// so a counter is never reused; ≤ one block is skipped per reboot, docs/radio.md).
-const RESERVE: u32 = 1024;
-/// Receiver last-seen lazy-persist period: the replay window across a reboot is
-/// ≤ `P` transfers (docs/radio.md).
-const P: u32 = 32;
+// The TX-counter reserve block (`RESERVE` = 1024) and the receiver lazy-persist period
+// (`P` = 32) live with their kernels in `tower_net_core` (`txctr::RESERVE`, `replay::P`).
 /// EEPROM local keys (within `NS_NET`) for the persisted counter state.
 const KEY_WATERMARK: u8 = 0x00;
 const KEY_LASTSEEN: u8 = 0x01;
@@ -82,8 +83,8 @@ const KEY_LASTSEEN_BASE: u8 = 0x10;
 struct Peer {
     id: u32,
     key: [u8; 16],
-    last_seen: u32,
-    accepts: u32,
+    /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
+    lane: ReplayLane,
 }
 
 /// Outcome of a [`Net::send`]. Inspect it — a `NotDelivered`/`Busy`/`DutyLimited`
@@ -182,21 +183,13 @@ pub struct Net {
     /// Per-peer (id, key, last-seen) table; a registered peer overrides the
     /// default key and gets its own replay lane (docs/radio.md).
     peers: [Option<Peer>; MAX_PEERS],
-    /// Replay last-seen for senders not in the peer table (the single-link lane).
-    default_last_seen: u32,
-    /// Accepted-transfer count on the default lane since its last persist.
-    default_accepts: u32,
-    /// Monotonic TX counter, advanced by one per transfer (docs/radio.md).
-    tx_counter: u32,
-    /// Highest reserved (persisted) counter value; `tx_counter < reserve_limit`
-    /// holds as an invariant only while [`tx_locked`](Self::tx_locked) is false —
-    /// the counter is never used at or past the last *durably* persisted watermark.
-    reserve_limit: u32,
-    /// Set once a reserve-watermark persist fails: TX is refused (fail closed) so a
-    /// counter past the last durable watermark can never go on air (which after a
-    /// reboot resuming at the stale watermark would reuse a CCM nonce). See
-    /// [`advance_tx_counter`](Self::advance_tx_counter) and `RadioError::NonceLocked`.
-    tx_locked: bool,
+    /// Replay lane for senders not in the peer table (the single-link lane).
+    default_lane: ReplayLane,
+    /// The TX-counter kernel: monotonic counter + reserve-ahead watermark + the fail-closed
+    /// lock (`tower_net_core::txctr` — the CCM nonce anti-reuse invariant lives there; this
+    /// module owns its EEPROM persistence). See [`advance_tx_counter`](Self::advance_tx_counter)
+    /// and `RadioError::NonceLocked`.
+    txc: TxCounter,
     /// EEPROM-backed counter persistence (shared handle).
     kv: Nv,
     /// EU duty-cycle governor (airtime budget for all TX).
@@ -228,36 +221,26 @@ impl Net {
         )
         .await?;
 
-        // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the
-        // very first boot, since 0 = "never sent"), then reserve the next block.
+        // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the very first
+        // boot, since 0 = "never sent"), then reserve the next block. The resume/fail-closed
+        // decision (incl. the lost-watermark corruption case) is `tower_net_core::txctr` —
+        // see `TxCounter::resume` for the full rationale.
         let nkv = kv.scope(NS_NET); // our namespaced view; the raw `kv` is kept for `Net::kv()`
         let stored_watermark = read_u32(nkv, KEY_WATERMARK);
         let stored_last_seen = read_u32(nkv, KEY_LASTSEEN);
         let last_seen = stored_last_seen.unwrap_or(0);
-        let resume = stored_watermark.unwrap_or(1).max(1);
-        let reserve_limit = resume.wrapping_add(RESERVE);
-
-        // A store that shows prior use (a persisted last-seen) but whose watermark is now
-        // unreadable has almost certainly lost the watermark record to EEPROM corruption
-        // (`scan_half` stops at the first bad record, orphaning everything after it — and the
-        // watermark, rewritten every RESERVE transfers, tends to sit late in the log). Resuming
-        // the TX counter at 1 under the unchanged key would then reuse every CCM nonce 1..old.
-        // Fail **closed** WITHOUT rewriting a fresh low watermark (that would poison a later boot
-        // into resuming low and reusing nonces). The device can still receive; sending needs a
-        // re-key / factory reset. A genuinely virgin store (no watermark AND no last-seen)
-        // legitimately starts at 1.
-        let watermark_lost = stored_watermark.is_none() && stored_last_seen.is_some();
-        let tx_locked = if watermark_lost {
-            true
-        } else {
+        let (mut txc, boot_watermark) = TxCounter::resume(stored_watermark, stored_last_seen.is_some());
+        if let Some(watermark) = boot_watermark {
             // Persist the reserve watermark AND verify it read back. TX is only nonce-safe while a
             // watermark strictly greater than any counter we will ever send is durably stored. If
             // the write fails or does not read back (EEPROM full/faulted), start TX **locked**:
             // the device can still receive, but sending would risk resuming at a stale watermark
-            // after a reboot and reusing a CCM nonce. (Fail closed — see the `tx_locked` field.)
-            let persisted = nkv.set_bytes(KEY_WATERMARK, &reserve_limit.to_le_bytes()).is_ok();
-            !(persisted && read_u32(nkv, KEY_WATERMARK) == Some(reserve_limit))
-        };
+            // after a reboot and reusing a CCM nonce. (Fail closed — see `TxCounter`.)
+            let persisted = nkv.set_bytes(KEY_WATERMARK, &watermark.to_le_bytes()).is_ok();
+            if !(persisted && read_u32(nkv, KEY_WATERMARK) == Some(watermark)) {
+                txc.lock();
+            }
+        }
 
         // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/radio.md).
         let duty = match cfg.band {
@@ -271,11 +254,8 @@ impl Net {
             my_id: cfg.my_id,
             default_key: cfg.key,
             peers: [None; MAX_PEERS],
-            default_last_seen: last_seen,
-            default_accepts: 0,
-            tx_counter: resume,
-            reserve_limit,
-            tx_locked,
+            default_lane: ReplayLane::new(last_seen),
+            txc,
             kv,
             duty,
             rng: cfg.my_id | 1,
@@ -307,19 +287,19 @@ impl Net {
     /// Current live TX counter (for diagnostics / persistence demos).
     #[must_use]
     pub fn tx_counter(&self) -> u32 {
-        self.tx_counter
+        self.txc.counter()
     }
 
     /// Current persisted reserve watermark.
     #[must_use]
     pub fn reserve_watermark(&self) -> u32 {
-        self.reserve_limit
+        self.txc.reserve_limit()
     }
 
     /// Current last-seen counter on the default lane (single-link diagnostics).
     #[must_use]
     pub fn last_seen(&self) -> u32 {
-        self.default_last_seen
+        self.default_lane.last_seen()
     }
 
     /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
@@ -352,8 +332,7 @@ impl Net {
                 self.peers[i] = Some(Peer {
                     id,
                     key: *key,
-                    last_seen,
-                    accepts: 0,
+                    lane: ReplayLane::new(last_seen),
                 });
                 return true;
             }
@@ -384,7 +363,7 @@ impl Net {
     #[must_use]
     pub fn peer_last_seen(&self, id: u32) -> Option<u32> {
         self.peer_slot(id)
-            .map(|i| self.peers[i].as_ref().unwrap().last_seen)
+            .map(|i| self.peers[i].as_ref().unwrap().lane.last_seen())
     }
 
     /// Table slot holding `id`, if registered.
@@ -402,23 +381,23 @@ impl Net {
         }
     }
 
-    /// Last-seen for `src`'s replay lane (peer lane if registered, else default).
-    fn lane_last_seen(&self, src: u32) -> u32 {
+    /// The replay lane for `src` (peer lane if registered, else default) — a copy, for the
+    /// pure [`classify`](ReplayLane::classify) decision.
+    fn lane(&self, src: u32) -> ReplayLane {
         match self.peer_slot(src) {
-            Some(i) => self.peers[i].as_ref().unwrap().last_seen,
-            None => self.default_last_seen,
+            Some(i) => self.peers[i].as_ref().unwrap().lane,
+            None => self.default_lane,
         }
     }
 
     /// Record acceptance of `counter` from `src`: advance that lane's last-seen
     /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/radio.md).
+    /// The cadence decision is the lane kernel's ([`ReplayLane::accept`]); the EEPROM write is ours.
     fn lane_accept(&mut self, src: u32, counter: u32) {
         match self.peer_slot(src) {
             Some(i) => {
                 let p = self.peers[i].as_mut().unwrap();
-                p.last_seen = counter;
-                p.accepts = p.accepts.wrapping_add(1);
-                if p.accepts.is_multiple_of(P) {
+                if p.lane.accept(counter) {
                     let id = p.id;
                     let _ = self
                         .kv
@@ -427,9 +406,7 @@ impl Net {
                 }
             }
             None => {
-                self.default_last_seen = counter;
-                self.default_accepts = self.default_accepts.wrapping_add(1);
-                if self.default_accepts.is_multiple_of(P) {
+                if self.default_lane.accept(counter) {
                     let _ = self
                         .kv
                         .scope(NS_NET)
@@ -442,35 +419,20 @@ impl Net {
     /// Advance the TX counter, re-reserving + persisting the next block when the
     /// current reserve is exhausted (the only TX-counter persistence path).
     ///
-    /// **Saturating, not wrapping** — the counter is the CCM nonce input, so it must never
-    /// wrap back to a reused value. At the 2³²−1 ceiling (≈136 yr at 1 Hz — practically
-    /// unreachable) it **locks TX** (`tx_locked = true`): every subsequent send fails closed
-    /// rather than transmitting another frame under the pinned `u32::MAX` nonce. A reused
-    /// `(key, nonce)` is a CCM confidentiality *and* integrity break (keystream + MAC reuse),
-    /// not merely a delivery failure the replay rule would reject — so we must stop emitting,
-    /// not rely on the peer to drop it. Re-key well before then.
+    /// The counter arithmetic — saturating at the 2³²−1 ceiling and locking TX there, and the
+    /// reserve-ahead watermark — is [`TxCounter::advance`] (see its docs for the full CCM
+    /// nonce-reuse argument). Here we only execute the persist it requests: if the write
+    /// lands, the reservation is committed; if it fails, TX locks (fail closed) — the guard on
+    /// every send path refuses to transmit while locked.
     fn advance_tx_counter(&mut self) {
-        self.tx_counter = self.tx_counter.saturating_add(1);
-        if self.tx_counter == u32::MAX {
-            // Ceiling reached: fail closed. Do not emit any further frame (the next send would
-            // reuse the pinned MAX nonce) and stop churning the reserve watermark.
-            self.tx_locked = true;
-            return;
-        }
-        if self.tx_counter >= self.reserve_limit {
-            // Extend the reservation, but only trust it once the write lands. If the persist
-            // fails we must NOT advance `reserve_limit`: doing so would let us keep emitting
-            // counters past the last *durable* watermark, and a reboot that then resumes at the
-            // stale watermark would reuse those CCM nonces. Instead lock TX (fail closed) — the
-            // guard on every send path refuses to transmit while locked.
-            let next = self.reserve_limit.saturating_add(RESERVE);
+        if let Some(next) = self.txc.advance() {
             match self
                 .kv
                 .scope(NS_NET)
                 .set_bytes(KEY_WATERMARK, &next.to_le_bytes())
             {
-                Ok(()) => self.reserve_limit = next,
-                Err(_) => self.tx_locked = true,
+                Ok(()) => self.txc.reserve_persisted(next),
+                Err(_) => self.txc.lock(),
             }
         }
     }
@@ -479,7 +441,7 @@ impl Net {
     /// the byte-identical frame up to `reps` times; unconfirmed sends transmit
     /// once. The transfer consumes exactly one TX counter value (docs/radio.md).
     pub async fn send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
-        if self.tx_locked {
+        if self.txc.locked() {
             return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
         }
         // In FHSS mode a static-channel TX would break the hopping requirement;
@@ -490,7 +452,7 @@ impl Net {
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/radio.md)
         }
-        let counter = self.tx_counter;
+        let counter = self.txc.counter();
         let hdr = Header {
             frame_type: FrameType::Data,
             flags: if confirmed { flags::CONFIRMED } else { 0 },
@@ -562,43 +524,46 @@ impl Net {
         }
         let key = self.key_for(peek.src);
 
-        // CCM-verify first (authenticates the header incl. counter), then decide.
+        // CCM-verify first (authenticates the header incl. counter), then decide. The
+        // counter/replay rule is the lane kernel's (`tower_net_core::replay`) — see its docs
+        // for why classification must only ever run on an authenticated frame.
         let (hdr, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
 
-        let last_seen = self.lane_last_seen(hdr.src);
-        if hdr.counter > last_seen {
-            // Fresh — accept, advance the sender's lane, ACK if requested.
-            self.lane_accept(hdr.src, hdr.counter);
-            let confirmed = hdr.flags & flags::CONFIRMED != 0;
-            if confirmed {
-                self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+        match self.lane(hdr.src).classify(hdr.counter) {
+            ReplayVerdict::Fresh => {
+                // Fresh — accept, advance the sender's lane, ACK if requested.
+                self.lane_accept(hdr.src, hdr.counter);
+                let confirmed = hdr.flags & flags::CONFIRMED != 0;
+                if confirmed {
+                    self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+                }
+                let plen = range.end - range.start;
+                let mut out = [0u8; MAX_PAYLOAD];
+                out[..plen].copy_from_slice(&buf[range]);
+                Some(Received {
+                    src: hdr.src,
+                    counter: hdr.counter,
+                    rssi_dbm: q.rssi_dbm,
+                    confirmed,
+                    len: plen,
+                    buf: out,
+                })
             }
-            let plen = range.end - range.start;
-            let mut out = [0u8; MAX_PAYLOAD];
-            out[..plen].copy_from_slice(&buf[range]);
-            Some(Received {
-                src: hdr.src,
-                counter: hdr.counter,
-                rssi_dbm: q.rssi_dbm,
-                confirmed,
-                len: plen,
-                buf: out,
-            })
-        } else if hdr.counter == last_seen {
-            // Benign retransmit: this peer's most-recently-accepted counter is being resent
-            // because its ACK was lost. Re-ACK deterministically (identified by this src's own
-            // lane last-seen), do NOT re-deliver. Keying the re-ACK by (src, counter) rather than
-            // a single global cache means interleaved senders in a star can't evict each other's
-            // pending ACK — the old single-slot cache reported false NotDelivered + app-level
-            // duplicates under that race (see docs/radio.md). Only confirmed frames were ACKed,
-            // so only re-ACK confirmed ones.
-            if hdr.flags & flags::CONFIRMED != 0 {
-                self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+            ReplayVerdict::Retransmit => {
+                // Benign retransmit: this peer's most-recently-accepted counter is being resent
+                // because its ACK was lost. Re-ACK deterministically (identified by this src's own
+                // lane last-seen), do NOT re-deliver. Keying the re-ACK by (src, counter) rather than
+                // a single global cache means interleaved senders in a star can't evict each other's
+                // pending ACK — the old single-slot cache reported false NotDelivered + app-level
+                // duplicates under that race (see docs/radio.md). Only confirmed frames were ACKed,
+                // so only re-ACK confirmed ones.
+                if hdr.flags & flags::CONFIRMED != 0 {
+                    self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+                }
+                None
             }
-            None
-        } else {
             // counter < last-seen → replay; drop silently (replay state untouched).
-            None
+            ReplayVerdict::Replay => None,
         }
     }
 
@@ -624,9 +589,11 @@ impl Net {
     /// our key) frame as "no ACK" was a false `NotDelivered` that burned a retransmit and could
     /// report a delivery failure the gateway had actually received — the exact star-contention
     /// bug `recv()`'s re-ACK cache fixed on the receive side. This mirrors `recv()` /
-    /// `fhss_rx_beacon`: keep listening until the deadline.
+    /// `fhss_rx_beacon`: keep listening until the deadline. The accept/ignore decision per
+    /// heard frame is the [`AckWait`] kernel's (`tower_net_core::ack`).
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
         let key = self.key_for(dest);
+        let mut wait = AckWait::new(self.my_id, dest, counter);
         let deadline = Instant::now() + ACK_WINDOW;
         let mut buf = [0u8; MAX_FRAME];
         loop {
@@ -641,13 +608,8 @@ impl Net {
             let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
                 continue;
             };
-            if hdr.frame_type != FrameType::Ack || hdr.src != dest || hdr.dest != self.my_id {
-                continue;
-            }
-            // ACK payload: acked counter (4 LE) + rssi (1). A valid ACK for a *different* counter
-            // (a stale/duplicate ACK) also isn't ours — keep waiting for the right one.
-            let pl = &buf[range];
-            if pl.len() >= 4 && u32::from_le_bytes([pl[0], pl[1], pl[2], pl[3]]) == counter {
+            let is_ack = hdr.frame_type == FrameType::Ack;
+            if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range]) == AckVerdict::Resolved {
                 return true;
             }
         }
@@ -657,12 +619,12 @@ impl Net {
     /// uses the ACKer's *own* fresh counter (docs/radio.md); the acknowledged counter rides
     /// in the payload.
     async fn send_ack(&mut self, dest: u32, acked: u32, rssi_dbm: i16) {
-        if self.tx_locked {
+        if self.txc.locked() {
             return; // fail closed: can't safely allocate a counter (nonce safety); sender retries
         }
         // Let the sender finish its TX→RX turnaround before we transmit.
         Timer::after(ACK_TURNAROUND).await;
-        let ack_counter = self.tx_counter;
+        let ack_counter = self.txc.counter();
         let mut payload = [0u8; 5];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
         // Clamp to i8 range before packing: rssi_dbm is i16 and the SPIRIT1 noise floor reaches

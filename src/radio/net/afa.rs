@@ -115,7 +115,7 @@ impl Net {
     /// every channel was busy/in-off-time for a whole attempt. One TX counter is
     /// consumed (docs/radio.md), matching [`send`](Self::send).
     pub async fn afa_send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
-        if self.tx_locked {
+        if self.txc.locked() {
             return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
         }
         if self.access != Access::Afa {
@@ -125,7 +125,7 @@ impl Net {
             return SendResult::Error(RadioError::TooLong);
         }
         let my_id = self.my_id;
-        let counter = self.tx_counter;
+        let counter = self.txc.counter();
         let key = self.key_for(dest);
         let hdr = Header {
             frame_type: FrameType::Data,

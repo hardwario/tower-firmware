@@ -14,6 +14,10 @@
 //! the public-key frames in the clear-after-decrypt payload).
 
 use embassy_time::{Duration, Instant, Timer};
+// The confirm freshness/acceptance rule (node_id ‖ challenge echo) lives in the host-testable
+// `tower_net_core::pairing` kernel; the challenge minting (Net's PRNG), the windows and the
+// JOIN frame exchange stay here. Zero behavioural change on target.
+use tower_net_core::pairing::confirm_matches;
 
 use super::{ACK_TURNAROUND, Net, TX_TIMEOUT};
 use crate::radio::duty;
@@ -43,7 +47,7 @@ impl Net {
     /// `add_peer(id, key)` — or `None` on timeout / lost confirm. The host does
     /// NOT assign the ID. Pairs the first joiner only.
     pub async fn open_pairing(&mut self, timeout: Duration, key: &[u8; 16]) -> Option<u32> {
-        if self.tx_locked {
+        if self.txc.locked() {
             return None; // fail closed (nonce safety): pairing replies consume TX counters
         }
         let deadline = Instant::now().checked_add(timeout)?;
@@ -67,21 +71,20 @@ impl Net {
                 flags: 0,
                 src: self.my_id,
                 dest: node_id,
-                counter: self.tx_counter,
+                counter: self.txc.counter(),
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
             self.tx_pair(&resp_hdr, &resp).await;
             self.advance_tx_counter();
 
-            // Wait for the JOIN_CONFIRM (echoes node_id ‖ challenge) — commit only when both
-            // match, so a confirm replayed from a prior session (stale challenge) is rejected.
+            // Wait for the JOIN_CONFIRM (echoes node_id ‖ challenge) — the freshness rule
+            // (commit only when both match, so a confirm replayed from a prior session carries
+            // a stale challenge and is rejected) is the kernel's `confirm_matches`.
             let mut cbuf = [0u8; 8];
             if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
                 && chdr.frame_type == FrameType::JoinConfirm
-                && cplen >= 8
-                && u32::from_le_bytes([cbuf[0], cbuf[1], cbuf[2], cbuf[3]]) == node_id
-                && u32::from_le_bytes([cbuf[4], cbuf[5], cbuf[6], cbuf[7]]) == challenge
+                && confirm_matches(&cbuf[..cplen], node_id, challenge)
             {
                 return Some(node_id);
             }
@@ -95,7 +98,7 @@ impl Net {
     /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
     /// and returns the key on commit (or `None` on timeout).
     pub async fn join(&mut self, my_id: u32, timeout: Duration) -> Option<[u8; 16]> {
-        if self.tx_locked {
+        if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
         }
         let deadline = Instant::now().checked_add(timeout)?;
@@ -105,7 +108,7 @@ impl Net {
                 flags: 0,
                 src: my_id,
                 dest: 0, // host ID not yet known
-                counter: self.tx_counter,
+                counter: self.txc.counter(),
                 bulk_index: None,
             };
             self.tx_pair(&req_hdr, &my_id.to_le_bytes()).await;
@@ -127,7 +130,7 @@ impl Net {
                     flags: 0,
                     src: my_id,
                     dest: hdr.src,
-                    counter: self.tx_counter,
+                    counter: self.txc.counter(),
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
