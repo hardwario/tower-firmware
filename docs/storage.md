@@ -33,6 +33,28 @@ The 6144 bytes are **two 3060-byte halves** plus two 12-byte superblocks at the 
 Net: **wear is proportional to the flip rate, which is proportional to total bytes written.**
 There is no per-write hot spot; the design spreads writes across all 6 KiB.
 
+## The compaction CPU stall (~5 s) — plan for it
+
+A compaction is not just wear — it is **time**: on the STM32L0, every EEPROM word write
+stalls the CPU (NVM-stall — instruction fetches from flash halt, so interrupt handlers
+effectively halt with them). Re-packing a full half is on the order of 1,500 word writes at
+~3.4 ms each ≈ **5.2 s of the whole chip frozen** (bench-measured 2026-07-05: 5.16–5.20 s,
+flip-counter 1:1 with the stalls).
+
+Consequences to design for:
+
+- **Any KV write can absorb the stall** — whichever append happens to fill the active half
+  pays for the whole compaction: the boot-time session bump (a ~5 s "hung" boot every Nth
+  reboot; the boot then proceeds normally), a `settings set`, a radio watermark persist.
+- **The console is dead during it** (no frames out, and host→device bytes are lost — the
+  UART ISR is stalled too). The `tower` CLI tolerates this: its Hello wait and default
+  command timeout both exceed the worst-case stall.
+- **The radio is dead during it** — a compaction triggered mid-session delays ACKs/hops by
+  ~5 s. Products with tight radio timing should force compactions at moments they control
+  (e.g. a maintenance write during provisioning) rather than let one land mid-operation.
+- The stall is **bounded and fixed** (half size is fixed), so worst-case latency budgets can
+  simply add ~5.5 s to any path that may write EEPROM.
+
 ## Write budget
 
 The STM32L083CZ data EEPROM endurance is **100,000 erase/write cycles per cell**

@@ -199,10 +199,46 @@ impl Board {
 /// - **`min_stop_pause = 0`** — any await length safely uses RTC-backed STOP.
 /// - **debug clock gated in STOP** for real low-power current.
 pub fn init() -> Peripherals {
+    // Snapshot RCC_CSR (RTC-domain state + hardware reset-cause flags) BEFORE embassy's clock
+    // init touches it, then clear the sticky reset flags so every boot reports its own cause.
+    // Boot forensics: shows whether the LSE/RTC domain survived the reset and which hardware
+    // reset fired. (Added for the 2026-07-05 bimodal-boot investigation, where it RULED OUT
+    // the LSE/backup domain — every slow boot inherited a fully-matched domain + pin reset;
+    // the proven cause is the EEPROM KV compaction CPU stall in init_session, ≈5.2 s, see
+    // docs/storage.md. Kept: cheap, and reset-cause + domain state are generally useful.)
+    // Read it back with [`preinit_csr`]; `examples/lse_probe.rs` decodes and logs it each boot.
+    let csr = embassy_stm32::pac::RCC.csr().read();
+    PREINIT_CSR.store(csr.0, core::sync::atomic::Ordering::Relaxed);
+    embassy_stm32::pac::RCC.csr().modify(|w| w.set_rmvf(true));
+
     let mut config = embassy_stm32::Config::default();
     config.rcc.hsi = true;
     config.rcc.sys = Sysclk::HSI;
     config.rcc.ls = LsConfig::default_lse();
+    // LSE crystal drive strength, selectable per build (TOWER_FEATURES=lse-drive-…). Default =
+    // embassy's default_lse() = MediumHigh. Higher drive trades ~0.1–0.5 µA of STOP current
+    // for oscillation robustness. (Swept Low/MediumHigh/High on the bench 2026-07-05: drive
+    // has NO effect on the ~5.2 s bimodal-boot delay — that is the KV compaction stall — but
+    // the knob is kept for crystal-robustness experiments on marginal boards.)
+    #[cfg(any(
+        feature = "lse-drive-low",
+        feature = "lse-drive-medium-low",
+        feature = "lse-drive-high"
+    ))]
+    if let Some(lse) = &mut config.rcc.ls.lse {
+        #[cfg(feature = "lse-drive-low")]
+        {
+            lse.mode = embassy_stm32::rcc::LseMode::Oscillator(embassy_stm32::rcc::LseDrive::Low);
+        }
+        #[cfg(feature = "lse-drive-medium-low")]
+        {
+            lse.mode = embassy_stm32::rcc::LseMode::Oscillator(embassy_stm32::rcc::LseDrive::MediumLow);
+        }
+        #[cfg(feature = "lse-drive-high")]
+        {
+            lse.mode = embassy_stm32::rcc::LseMode::Oscillator(embassy_stm32::rcc::LseDrive::High);
+        }
+    }
     config.min_stop_pause = Duration::from_ticks(0);
     config.enable_debug_during_sleep = false;
     let p = embassy_stm32::init(config);
@@ -211,6 +247,17 @@ pub fn init() -> Peripherals {
 
     p
 }
+
+/// Raw `RCC_CSR` as sampled by [`init`] before embassy's clock init ran — the RTC-domain
+/// state the boot *inherited* (LSEON/LSERDY/LSEDRV/RTCSEL/RTCEN) plus this reset's cause
+/// flags (PIN/POR/SFT/IWDG/…; cleared right after sampling, so they are per-boot). Decode
+/// with `embassy_stm32::pac::rcc::regs::Csr(raw)`.
+pub fn preinit_csr() -> u32 {
+    PREINIT_CSR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// See [`preinit_csr`].
+static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Assert the STM32L0 STOP-mode power tuning in `PWR_CR`:
 /// - **LPSDSR** — put the voltage regulator in *low-power* mode during deep sleep

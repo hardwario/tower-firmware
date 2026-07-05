@@ -129,6 +129,13 @@ role-peer-a = []
 role-peer-b = []
 node-1 = []
 node-2 = []
+# LSE (32 kHz crystal) drive strength override — default (no feature) = embassy's MediumHigh.
+# Higher drive = more oscillation robustness for ~0.1–0.5 µA extra STOP current (bench-swept
+# 2026-07-05: no effect on the bimodal-boot delay, which is the KV compaction stall — see
+# docs/storage.md; knob kept for marginal-crystal experiments). See board::init.
+lse-drive-low = []
+lse-drive-medium-low = []
+lse-drive-high = []
 
 # Ready-made product firmwares for the TOWER IoT Kit — distinct from the educational
 # `examples/` (which demonstrate one block each). These are full applications, so they are
