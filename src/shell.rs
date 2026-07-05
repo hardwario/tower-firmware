@@ -505,19 +505,28 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // Wear gauge: the KV compaction-flip count (the persisted superblock generation — a pure read,
-    // no added wear) vs the conservative flip budget (FLIP_BUDGET). See docs/storage.md.
-    let flips = ctx.kv.raw().flip_generation();
+    // no added wear) vs the conservative flip budget (FLIP_BUDGET), plus the store's occupancy
+    // (live/free) and the background-maintenance pre-blank state. All pure reads. See
+    // docs/storage.md.
+    let nv = ctx.kv.raw();
+    let flips = nv.flip_generation();
     // Per-mille of budget in integer math (no FPU on the M0+): rendered as X.X%.
     let permille = ((flips as u64) * 1000 / FLIP_BUDGET as u64) as u32;
     let _ = write!(
         ctx,
         "eeprom: 6 KiB data EEPROM\r\n\
          flips: {} / {} ({}.{}%)\r\n\
+         live: {} B\r\n\
+         free: {} B\r\n\
+         dead-half blanked: {}\r\n\
          resets: {}\r\n",
         flips,
         FLIP_BUDGET,
         permille / 10,
         permille % 10,
+        nv.live_bytes(),
+        nv.free_bytes(),
+        if nv.dead_half_blank() { "yes" } else { "no" },
         crate::bootguard::consecutive_resets(),
     );
     Outcome::ok()

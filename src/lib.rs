@@ -99,6 +99,10 @@ macro_rules! app {
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
             let board = $crate::board::Board::take(spawner);
+            // Background EEPROM maintenance (incremental compaction + dead-half pre-blanking),
+            // on by default so the multi-second synchronous flip stall can't land mid-operation
+            // (docs/storage.md). Event-driven: costs an idle node zero wakeups.
+            $crate::storage::spawn_maintenance(spawner, board.kv);
             // Bump + persist the per-boot session id (Hello session_id) before the console
             // emits its first Hello (the manager task only polls at the first await below).
             // Passes the spawner so the boot-loop guard can arm its healthy-uptime task.

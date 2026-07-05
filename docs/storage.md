@@ -7,7 +7,9 @@ covers the layout, how it wears, what the SDK writes and how often, the tuning k
 rules an app should follow so the EEPROM lasts the product's life.
 
 > **Status: implemented and hardware-verified.** The store, the wear telemetry
-> (`/system/eeprom print`), and the boot-loop backoff all run on the Core Module.
+> (`/system/eeprom print`), and the boot-loop backoff all run on the Core Module. The
+> background maintenance task (incremental compaction, below) is implemented and host-tested;
+> its stall-slicing numbers are datasheet/bench-derived but not yet re-verified on the bench.
 
 ## The store
 
@@ -33,27 +35,58 @@ The 6144 bytes are **two 3060-byte halves** plus two 12-byte superblocks at the 
 Net: **wear is proportional to the flip rate, which is proportional to total bytes written.**
 There is no per-write hot spot; the design spreads writes across all 6 KiB.
 
-## The compaction CPU stall (~5 s) — plan for it
+## The compaction CPU stall — bounded by background maintenance
 
 A compaction is not just wear — it is **time**: on the STM32L0, every EEPROM word write
 stalls the CPU (NVM-stall — instruction fetches from flash halt, so interrupt handlers
-effectively halt with them). Re-packing a full half is on the order of 1,500 word writes at
-~3.4 ms each ≈ **5.2 s of the whole chip frozen** (bench-measured 2026-07-05: 5.16–5.20 s,
-flip-counter 1:1 with the stalls).
+effectively halt with them). Re-packing a full half synchronously is on the order of 1,500
+word writes at ~3.4 ms each ≈ **5.2 s of the whole chip frozen** (bench-measured 2026-07-05:
+5.16–5.20 s, flip-counter 1:1 with the stalls). Historically, whichever append happened to
+fill the active half paid for the whole compaction — the boot-time session bump (a ~5 s
+"hung" boot every Nth reboot), a `settings set`, a radio watermark persist — with the console
+and radio dead for the duration.
 
-Consequences to design for:
+The SDK now compacts **incrementally, in the background**. A maintenance task (spawned by
+default by the `app!` macro — `storage::maintenance`) runs bounded slices of at most
+`MAINT_BUDGET_WORDS` = 4 word-programs ≈ **14 ms** of stall each, yielding to the other tasks
+between slices. It is **event-driven**: woken by KV writes (and once at boot), it drains all
+work and then sleeps on a signal — an idle node takes zero extra wakeups and STOP stays
+reachable. The two-half + superblock-commit design is what makes this safe: every pre-commit
+step is invisible (the source half stays active until the final CRC'd superblock write), so a
+reboot mid-maintenance loses only RAM progress and the flip restarts from scratch.
 
-- **Any KV write can absorb the stall** — whichever append happens to fill the active half
-  pays for the whole compaction: the boot-time session bump (a ~5 s "hung" boot every Nth
-  reboot; the boot then proceeds normally), a `settings set`, a radio watermark persist.
-- **The console is dead during it** (no frames out, and host→device bytes are lost — the
-  UART ISR is stalled too). The `tower` CLI tolerates this: its Hello wait and default
-  command timeout both exceed the worst-case stall.
-- **The radio is dead during it** — a compaction triggered mid-session delays ACKs/hops by
-  ~5 s. Products with tight radio timing should force compactions at moments they control
-  (e.g. a maintenance write during provisioning) rather than let one land mid-operation.
-- The stall is **bounded and fixed** (half size is fixed), so worst-case latency budgets can
-  simply add ~5.5 s to any path that may write EEPROM.
+What the task does, in priority order:
+
+1. **Advance a pending incremental flip** (`tower-kv` `flip_start`/`flip_step`/`flip_commit`):
+   pass-1 scan into a RAM plan, then blank + copy a few words per slice, then one commit slice
+   (tail catch-up of appends that landed during the flip + the superblock write). Appends keep
+   going to the source half throughout; if it fills anyway, the write itself finishes the
+   flip's *remaining* steps synchronously — never a failure, just latency.
+2. **Start a flip proactively** once free space in the active half drops below
+   `FLIP_THRESHOLD` = 528 B (two worst-case records — headroom for the appends that land
+   between trigger and commit), and only when flipping would restore that headroom.
+3. **Pre-blank the dead half** (read-first, skipping already-zero words — idempotent and
+   wear-free on re-runs), so the next flip's blank pass costs nothing.
+
+Residual stall budget:
+
+| Path | Worst-case stall |
+|---|---|
+| Steady state (default `app!`: maintenance task running) | ~14 ms slices; commit slice ~tens of ms |
+| Sync fallback, dead half pre-blanked (store filled mid-flip / no proactive room) | ≤ ~2.6 s (copy pass only — the blank pass reads-and-skips) |
+| Sync fallback, maintenance never ran (custom entry without the task) | ~5.2 s (blank + copy), as before |
+
+The boot-time session bump still appends one small record per boot, but in steady state it can
+no longer land on a full half — maintenance keeps free space above the threshold — so the ~5 s
+"hung boot" is gone. Products that want a full compaction at a moment they control (e.g. during
+provisioning) can call `Nv::compact_now()`.
+
+Pre-blanking adds **no extra wear**: it programs exactly the nonzero words the next flip's
+blank pass would have programmed (which then skips them), just earlier and in slices. Note the
+per-boot session id and TX watermark deliberately stay ordinary KV records: the KV region
+occupies the entire 6 KiB EEPROM (3060 + 3060 + 2×12 superblocks — no reserved raw area), so
+relocating them to dedicated raw cells would shrink the region and force a full store
+migration; bounded maintenance removes the motive.
 
 ## Write budget
 
@@ -111,17 +144,26 @@ Both live in the host-tested `crates/tower-net-core` decision crate (`txctr::RES
 
 ## Wear telemetry
 
-`/system/eeprom print` (or `Nv::flip_generation()`):
+`/system/eeprom print` (or `Nv::flip_generation()` / `free_bytes()` / `live_bytes()` /
+`dead_half_blank()`):
 
 ```
 eeprom: 6 KiB data EEPROM
 flips: 110 / 100000 (0.1%)
+live: 84 B
+free: 2620 B
+dead-half blanked: yes
 resets: 1
 ```
 
 `flips` is the store's lifetime compaction count (the persisted superblock generation) against
-`FLIP_BUDGET`; `resets` is the current consecutive-fast-reset run (see below). Reading it is a
-pure EEPROM **read** — polling telemetry adds no wear.
+`FLIP_BUDGET` — proactive background flips count here too. They trigger at the 528 B threshold
+rather than at full, so each flip absorbs ~2.5 KB of appends instead of ~3 KB: a ~20 % higher
+flip rate, well inside the conservative budget (the gauge already under-reports true life ~2×). `live` is the packed size of the
+latest record per key; `free` the appendable room left in the active half (a flip reclaims
+`used − live`); `dead-half blanked` reports whether maintenance has pre-blanked the inactive
+half (the next flip then skips its blank pass). `resets` is the current consecutive-fast-reset
+run (see below). Reading it is a pure EEPROM **read** — polling telemetry adds no wear.
 
 ## Boot-loop backoff
 

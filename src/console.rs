@@ -134,6 +134,25 @@ static FW_NAME: Mutex<RefCell<String<FW_LEN>>> = Mutex::new(RefCell::new(String:
 /// Per-boot session id carried in `Hello` — a persisted counter bumped once per boot by
 /// [`init_session`], so the host can tell a device reboot from a continuous link.
 static SESSION_ID: AtomicU32 = AtomicU32::new(0);
+/// Tick timestamp (low 32 bits of `Instant`) of the last decoded host→device frame — the
+/// storage maintenance task defers EEPROM slices while the host is actively talking (a CPU
+/// stall would eat in-flight RX bytes; see `storage::maintenance`). Wrapping-compared, so the
+/// ~36 h wrap at 32 kHz ticks is harmless.
+static LAST_HOST_RX: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the console is currently up (USB present, UART built). Cheap atomic read.
+pub fn is_up() -> bool {
+    CONSOLE_UP.load(Ordering::Relaxed)
+}
+
+/// Ticks since the last decoded host→device frame (u32::MAX before the first one).
+pub fn host_rx_age_ticks() -> u32 {
+    let last = LAST_HOST_RX.load(Ordering::Relaxed);
+    if last == 0 {
+        return u32::MAX;
+    }
+    (Instant::now().as_ticks() as u32).wrapping_sub(last)
+}
 
 fn bump_dropped() {
     critical_section::with(|cs| {
@@ -498,6 +517,9 @@ async fn route_frame(inner: &[u8]) {
     let Ok((mt, _seq, _payload)) = decode_frame(inner) else {
         return;
     };
+    // Non-zero by construction at boot+1 tick; 0 is reserved as "never" in host_rx_age_ticks.
+    let now = Instant::now().as_ticks() as u32;
+    LAST_HOST_RX.store(if now == 0 { 1 } else { now }, Ordering::Relaxed);
     match mt {
         MsgType::ShellCommand | MsgType::ShellComplete => {
             // Copy the whole frame for the shell to re-decode on its drain task. Depth-2 queue;
@@ -644,6 +666,12 @@ pub fn session_id() -> u32 {
 /// reset-surviving RAM. Once a unit is judged to be looping, this stops writing the counter to
 /// EEPROM (reporting a RAM-derived id instead) so a wedged/brown-out-looping node can't grind the
 /// store one record per reset (see `docs/storage.md`).
+///
+/// This append used to be the classic trigger of the multi-second compaction stall (the "~5 s
+/// hung boot" every Nth reboot). With the default [`storage::maintenance`](crate::storage::maintenance)
+/// task the store is compacted incrementally *before* it fills, so in steady state this write is
+/// just one ~12-byte append (a few word-programs); the synchronous flip remains only as the
+/// never-ran-maintenance fallback (docs/storage.md).
 pub fn init_session(kv: Nv, spawner: crate::Spawner) {
     let resets = crate::bootguard::on_boot(spawner);
     let sys = kv.scope(NS_SYS);

@@ -424,6 +424,12 @@ impl Net {
     /// nonce-reuse argument). Here we only execute the persist it requests: if the write
     /// lands, the reservation is committed; if it fails, TX locks (fail closed) — the guard on
     /// every send path refuses to transmit while locked.
+    ///
+    /// Latency note: this write (once per `RESERVE` = 1024 sends) could formerly absorb the
+    /// whole ~5 s compaction stall if it happened to fill the KV half. With the default
+    /// `storage::maintenance` task the store compacts incrementally ahead of time, so the
+    /// persist stays a single small append; the synchronous flip is only the fallback path
+    /// (docs/storage.md).
     fn advance_tx_counter(&mut self) {
         if let Some(next) = self.txc.advance() {
             match self
