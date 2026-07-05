@@ -61,9 +61,16 @@ impl ReplayLane {
 
     /// Classify an **authenticated** frame's counter against this lane (CCM-verify first — see
     /// the module docs). Pure: does not touch the lane.
+    ///
+    /// Counter `0` is unconditionally a [`Replay`](ReplayVerdict::Replay): `0` means "never
+    /// sent" (TX counters start at 1), so no legitimate frame ever carries it. Without this
+    /// rule a zero-counter frame on a *fresh* lane (last-seen 0) would compare equal and be
+    /// re-ACKed as a "retransmit" of a transfer that never happened.
     #[must_use]
     pub fn classify(&self, counter: u32) -> ReplayVerdict {
-        if counter > self.last_seen {
+        if counter == 0 {
+            ReplayVerdict::Replay
+        } else if counter > self.last_seen {
             ReplayVerdict::Fresh
         } else if counter == self.last_seen {
             ReplayVerdict::Retransmit
@@ -142,14 +149,18 @@ mod tests {
         assert_eq!(lane.classify(3 + 1025), ReplayVerdict::Fresh);
     }
 
-    /// Counter 0 against a fresh lane (last-seen 0) classifies as Retransmit, NOT Fresh: 0 means
-    /// "never sent" (the TX counter starts at 1), so a zero-counter frame is never delivered.
-    /// (And per the ordering contract, such a frame only reaches the kernel at all if it
-    /// authenticated under the key.)
+    /// Counter 0 is a Replay in EVERY lane state (fixed 2026-07-05; previously a fresh lane
+    /// compared 0 == 0 and re-ACKed it as a "retransmit" of a transfer that never happened):
+    /// 0 means "never sent" (TX counters start at 1), so a zero-counter frame is dropped
+    /// silently — never delivered, never ACKed. (Per the ordering contract, such a frame only
+    /// reaches the kernel at all if it authenticated under the key.)
     #[test]
-    fn counter_zero_never_delivered() {
-        let lane = ReplayLane::new(0);
-        assert_eq!(lane.classify(0), ReplayVerdict::Retransmit);
+    fn counter_zero_is_always_replay() {
+        let fresh = ReplayLane::new(0);
+        assert_eq!(fresh.classify(0), ReplayVerdict::Replay);
+        let mut used = ReplayLane::new(0);
+        let _ = used.accept(7);
+        assert_eq!(used.classify(0), ReplayVerdict::Replay);
     }
 
     /// A forged huge counter never reaches the lane (CCM rejects first — the ordering contract

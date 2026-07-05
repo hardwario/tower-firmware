@@ -57,7 +57,13 @@ impl TxCounter {
     pub fn resume(stored_watermark: Option<u32>, prior_use: bool) -> (Self, Option<u32>) {
         let watermark_lost = stored_watermark.is_none() && prior_use;
         let resume = stored_watermark.unwrap_or(1).max(1);
-        let reserve_limit = resume.wrapping_add(RESERVE);
+        // Saturating, not wrapping: a stored watermark within RESERVE of u32::MAX must pin
+        // the limit at the ceiling — wrapping would persist a LOW watermark, and the boot
+        // after that would resume low and reuse CCM nonces 1..old (the exact break this type
+        // exists to prevent). Saturated, the counter just runs into `advance`'s u32::MAX
+        // ceiling lock within one block: the link ends its life failing closed, never
+        // repeating a nonce.
+        let reserve_limit = resume.saturating_add(RESERVE);
         let txc = Self {
             counter: resume,
             reserve_limit,
@@ -317,20 +323,34 @@ mod tests {
         assert_eq!(txc.counter(), u32::MAX);
     }
 
-    /// Pin the CURRENT boot behaviour at a near-MAX stored watermark: `resume` computes the
-    /// reserve limit with `wrapping_add`, so the limit (and the boot-persisted watermark)
-    /// wraps to a LOW value. This is reachable only after ~2³² transfers (the ceiling lock is
-    /// designed to end the link's life well before; docs/radio.md says re-key long before) —
-    /// but it means a reboot in that end-of-life region persists a low watermark and a later
-    /// boot would resume low. Suspected bug, deliberately pinned unchanged; see the extraction
-    /// report / review notes.
+    /// A near-MAX stored watermark must SATURATE the reserve limit at u32::MAX (fixed
+    /// 2026-07-05; previously `wrapping_add` could persist a LOW watermark here, and the boot
+    /// after that would resume low and reuse CCM nonces 1..old). Reachable only after ~2³²
+    /// transfers, but the fail-closed guarantee now holds at the very edge too: the counter
+    /// drains the final saturated block and runs into `advance`'s ceiling lock.
     #[test]
-    fn near_max_resume_wraps_reserve_limit_current_behaviour() {
-        let (txc, persist) = TxCounter::resume(Some(u32::MAX - 100), true);
+    fn near_max_resume_saturates_reserve_limit_and_ends_locked() {
+        let (mut txc, persist) = TxCounter::resume(Some(u32::MAX - 100), true);
         assert_eq!(txc.counter(), u32::MAX - 100);
-        let wrapped = (u32::MAX - 100).wrapping_add(RESERVE); // == RESERVE − 102, a low value
-        assert_eq!(txc.reserve_limit(), wrapped);
-        assert_eq!(persist, Some(wrapped));
+        assert_eq!(txc.reserve_limit(), u32::MAX);
+        assert_eq!(
+            persist,
+            Some(u32::MAX),
+            "the boot-persisted watermark must never be low"
+        );
         assert!(!txc.locked());
+        // Drain the final saturated block: no watermark extension is ever requested (the
+        // limit already sits at the ceiling), and the ceiling locks TX — never a wrap.
+        for _ in 0..200 {
+            assert!(txc.advance().is_none(), "no extension past a saturated limit");
+            if txc.locked() {
+                break;
+            }
+        }
+        assert!(
+            txc.locked(),
+            "the ceiling must lock TX — the link ends closed, never wraps"
+        );
+        assert_eq!(txc.counter(), u32::MAX);
     }
 }
