@@ -731,30 +731,46 @@ fn blocking_emit_error(module: &str, message: &str) {
     }
 }
 
-/// SDK panic handler: emit one framed error record (if the console is up), then halt.
+/// SDK panic handler: write the reset-surviving crash breadcrumb, emit one framed error record
+/// (if the console is up — the USB-attached dev case), then **reset**. A field unit recovers
+/// service instead of hanging until a battery pull; the breadcrumb re-surfaces the crash on the
+/// next boot ([`emit_crash_report`]), so nothing is lost by rebooting. A crash loop is bounded
+/// by the [`bootguard`](crate::bootguard): after `BOOT_LOOP_THRESHOLD` fast resets the SDK stops
+/// grinding per-boot EEPROM state, and the run length is visible in `/system/eeprom print`.
 #[panic_handler]
 fn on_panic(info: &PanicInfo) -> ! {
     let mut msg = String::<MAX_MSG>::new();
     let _ = write!(msg, "{}", info);
+    crate::crashlog::record(crate::crashlog::Kind::Panic, msg.as_str());
     blocking_emit_error("panic", msg.as_str());
-    loop {
-        cortex_m::asm::wfi();
-    }
+    cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// HardFault handler: report the fault (with the faulting PC/LR) over the same blocking framed
-/// path as [`on_panic`], then halt — instead of vanishing into cortex-m-rt's default spin, which
-/// reported nothing over the wire. We deliberately do NOT auto-reset here: a reboot-on-fault
-/// policy plus a crash record that survives to the next boot (for the USB-unplugged field case)
-/// is a separate design decision. NOTE for that follow-up: an IWDG watchdog would need to account
-/// for STOP-mode sleep (the L0 IWDG keeps counting in STOP and would reset an idle battery node),
-/// so it is intentionally not enabled here.
+/// HardFault handler: same policy as [`on_panic`] — breadcrumb (with the faulting PC/LR), one
+/// blocking framed report when the console is up, then reset. (cortex-m-rt's default handler
+/// would spin silently.) The post-reset watchdog question is settled: [`crate::watchdog`] is
+/// STOP-aware (its feeder wakes the low-power executor), so apps arm it for the *hang* case,
+/// while this path covers the *fault* case.
 #[cortex_m_rt::exception]
 unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     let mut msg = String::<MAX_MSG>::new();
     let _ = write!(msg, "HardFault pc={:#010x} lr={:#010x}", ef.pc(), ef.lr());
+    crate::crashlog::record(crate::crashlog::Kind::HardFault, msg.as_str());
     blocking_emit_error("fault", msg.as_str());
-    loop {
-        cortex_m::asm::wfi();
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+/// Report the previous boot's crash, if the reset-surviving breadcrumb holds one — one ERROR
+/// frame on the `crash` module, emitted through the normal console queue once the manager is
+/// up. Called by the [`app!`](crate::app) macro right after the boot banner; also caches the
+/// record for `/system/crash print`.
+pub fn emit_crash_report() {
+    if let Some(c) = crate::crashlog::take() {
+        log::error!(
+            target: "crash",
+            "previous boot crashed ({}): {}",
+            c.kind.as_str(),
+            c.message()
+        );
     }
 }

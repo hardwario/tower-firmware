@@ -177,7 +177,15 @@ The executor is dead in a panic, so the channel/writer can't run. The panic hand
 silences the buffered ISR and **blocking-writes one framed `Log` (level Error)
 straight to the USART registers via the PAC**, leading with a `0x00` so any byte still
 in the shift register can't prefix and corrupt the frame. `tower logs` shows the panic
-message + location like any other error. If the console isn't up yet, it just halts.
+message + location like any other error.
+
+It then **resets** (it does not halt). Before resetting it writes the crash text into a
+reset-surviving `.uninit` RAM breadcrumb (`crashlog`, zero EEPROM wear); the next boot
+re-reports it as a `crash`-module ERROR frame and via `/system/crash print` — so a
+battery node that faults **with USB unplugged** still surfaces its crash, after it has
+already recovered. HardFaults follow the same path (with the faulting PC/LR). Crash
+loops are bounded by the bootguard's EEPROM-write backoff, and the run length shows in
+`/system/eeprom print`.
 
 ---
 

@@ -17,16 +17,20 @@
 #![no_main]
 
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use log::info;
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
-use tower::{app, board::Board};
+use tower::{app, board::Board, watchdog};
 
 static CH: LedChannel = LedChannel::new();
 // Slow "gateway alive" heartbeat on the on-board LED.
 static HEARTBEAT: Pattern = &[Step::on(30), Step::off(1970)];
 
 async fn run(b: Board) {
+    // Hardware safety net: a hung gateway takes the whole network down — reset it within
+    // ~26 s (the L0 hardware ceiling) rather than waiting for someone to notice.
+    watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
+
     let led = led::init(
         b.spawner,
         Output::new(b.led, Level::Low, Speed::Low),

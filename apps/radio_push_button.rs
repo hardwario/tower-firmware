@@ -16,14 +16,20 @@
 #![no_main]
 
 use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_time::Duration;
 use log::info;
-use tower::{app, board::Board, button, led};
+use tower::{app, board::Board, button, led, watchdog};
 
 static BTN_CH: button::ButtonChannel = button::ButtonChannel::new();
 static LED_CH: led::LedChannel = led::LedChannel::new();
 static CLICK: led::Pattern = &[led::Step::on(60)];
 
 async fn run(b: Board) {
+    // Hardware safety net: a wedged unit resets itself instead of dying in the field. The
+    // feeder wakes the low-power executor even from STOP; the L0 hardware ceiling (~26 s)
+    // keeps those wakes rare on this battery node.
+    watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
+
     let led = led::init(
         b.spawner,
         Output::new(b.led, Level::Low, Speed::Low),

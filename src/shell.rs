@@ -239,6 +239,7 @@ static BASE_ROOT: &[Entry] = &[
             Entry::cmd("reboot", Args::None, cmd_reboot),
             Entry::Menu("resource", &[Entry::cmd("print", Args::None, cmd_resource)]),
             Entry::Menu("eeprom", &[Entry::cmd("print", Args::None, cmd_eeprom)]),
+            Entry::Menu("crash", &[Entry::cmd("print", Args::None, cmd_crash)]),
             Entry::Menu(
                 "settings",
                 &[
@@ -533,6 +534,20 @@ fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
         permille % 10,
         crate::bootguard::consecutive_resets(),
     );
+    Outcome::ok()
+}
+
+fn cmd_crash(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
+    // The crash the reset-surviving breadcrumb recovered at THIS boot (cleared by the read, so
+    // it reflects the most recent fault since power-on — a brown-out that lost RAM reads clean).
+    match crate::crashlog::last() {
+        Some(c) => {
+            let _ = write!(ctx, "last crash: {}\r\n{}\r\n", c.kind.as_str(), c.message());
+        }
+        None => {
+            let _ = write!(ctx, "no crash recorded since power-on\r\n");
+        }
+    }
     Outcome::ok()
 }
 

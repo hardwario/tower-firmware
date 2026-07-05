@@ -15,15 +15,19 @@
 #![no_std]
 #![no_main]
 
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use log::{error, info};
-use tower::{app, board::Board, tmp112};
+use tower::{app, board::Board, tmp112, watchdog};
 
 // Measurement interval. A real battery product would space these out (minutes) to save
 // power; kept short here so the skeleton is easy to watch over the console.
 const MEASURE_INTERVAL_SECS: u64 = 60;
 
 async fn run(mut b: Board) {
+    // Hardware safety net: a wedged unit resets itself instead of dying in the field. The
+    // feeder wakes the low-power executor even from STOP; the L0 hardware ceiling (~26 s)
+    // keeps those wakes rare on this battery node.
+    watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
     // TODO: bring up the SPIRIT1 radio as a node and pair with the gateway. See the
     // `net_*` examples + the `net` node role in `docs/radio.md`, e.g.:
     //   let radio = tower::radio::Spirit1::new(b.radio_spi, b.radio_sck, b.radio_mosi,

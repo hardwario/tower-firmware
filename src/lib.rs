@@ -27,6 +27,7 @@ pub mod board;
 pub mod bootguard;
 pub mod button;
 pub mod console;
+pub mod crashlog;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;
@@ -104,6 +105,9 @@ macro_rules! app {
             $crate::console::init_session(board.kv, spawner);
             // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
+            // If the previous boot ended in a panic/HardFault, the reset-surviving breadcrumb
+            // holds it — report it now (one ERROR frame) and cache it for /system/crash print.
+            $crate::console::emit_crash_report();
             let __setup = $setup;
             __setup(&board);
             $run(board).await
