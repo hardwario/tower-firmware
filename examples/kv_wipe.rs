@@ -3,8 +3,9 @@
 //!
 //! Exists because the store has **no key deletion**: a live set only ever grows (peer tables,
 //! replay lanes, settings), and once it approaches a half's capacity every few appends force a
-//! compaction flip — wear plus a multi-second CPU stall each time (docs/storage.md). Until a
-//! selective delete/factory-reset lands in `tower-kv`, this example is the reset tool:
+//! compaction flip — wear plus a multi-second CPU stall each time (docs/storage.md). The
+//! normal reset is the shell command `/system/eeprom wipe confirm`; this example is the
+//! fallback for a device whose shell is unreachable:
 //!
 //!   just flash example kv_wipe     # LED: slow blink = wiping, solid = done — then
 //!   just flash example <your app>  # boots on a fresh store

@@ -238,7 +238,13 @@ static BASE_ROOT: &[Entry] = &[
         &[
             Entry::cmd("reboot", Args::None, cmd_reboot),
             Entry::Menu("resource", &[Entry::cmd("print", Args::None, cmd_resource)]),
-            Entry::Menu("eeprom", &[Entry::cmd("print", Args::None, cmd_eeprom)]),
+            Entry::Menu(
+                "eeprom",
+                &[
+                    Entry::cmd("print", Args::None, cmd_eeprom),
+                    Entry::cmd("wipe", Args::None, cmd_eeprom_wipe),
+                ],
+            ),
             Entry::Menu("crash", &[Entry::cmd("print", Args::None, cmd_crash)]),
             Entry::Menu(
                 "settings",
@@ -544,6 +550,35 @@ fn cmd_crash(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
         }
     }
     Outcome::ok()
+}
+
+fn cmd_eeprom_wipe(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
+    // Factory reset. Destroys EVERYTHING the store holds — pairing keys, peer tables, replay
+    // lanes, the TX watermark, settings, the session counter — so it demands the literal
+    // `confirm` argument (which completion never offers) rather than firing on a bare line.
+    if args != ["confirm"] {
+        let _ = write!(
+            ctx,
+            "usage: /system/eeprom wipe confirm
+erases the WHOLE store (keys, peers, settings) and reboots"
+        );
+        return Outcome::code(R_BAD_ARG);
+    }
+    // ~5 s CPU stall while the EEPROM zeroes (docs/storage.md); the response goes out after,
+    // then the framework flushes it and reboots into a virgin store.
+    match ctx.kv.raw().wipe() {
+        Ok(()) => {
+            let _ = write!(ctx, "eeprom wiped - rebooting");
+            Outcome {
+                result: R_OK,
+                reboot: true,
+            }
+        }
+        Err(_) => {
+            let _ = write!(ctx, "wipe failed");
+            Outcome::code(R_STORAGE)
+        }
+    }
 }
 
 fn cmd_export(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {

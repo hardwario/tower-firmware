@@ -211,6 +211,24 @@ impl<'d> Kv<'d> {
         self.storage
     }
 
+    /// Factory reset: zero the ENTIRE EEPROM — every record, both superblocks — returning the
+    /// store to its virgin state ([`tower_kv::init`] re-initializes it on the next boot), and
+    /// reset the in-RAM maintenance state. **~5 s of CPU-stalling word writes**
+    /// (docs/storage.md); callers must reboot immediately after (the shell's
+    /// `/system/eeprom wipe confirm` does) so no subsystem keeps RAM state derived from the
+    /// wiped store. Exists because the store has no per-key deletion — the live set only grows.
+    pub fn wipe(&mut self) -> Result<(), Error> {
+        let zeros = [0u8; 64];
+        let mut off = 0u32;
+        while off < self.capacity {
+            let n = 64u32.min(self.capacity - off) as usize;
+            self.storage.write(off, &zeros[..n])?;
+            off += n as u32;
+        }
+        self.maint = MaintState::new();
+        Ok(())
+    }
+
     /// Store raw bytes under `key`. Use this for scalars (`&x.to_le_bytes()`) or
     /// any pre-encoded blob — no serializer involved. (Codec in [`tower_kv`].)
     ///
@@ -370,6 +388,12 @@ impl Nv {
     /// mid-operation. Same operation as [`compact`](Self::compact); the name states the intent.
     pub fn compact_now(&self) -> Result<(), Error> {
         self.compact()
+    }
+
+    /// Factory reset — see [`Kv::wipe`]. Deliberately does not wake the maintenance task:
+    /// the caller reboots immediately and the next boot starts from a virgin store.
+    pub fn wipe(&self) -> Result<(), Error> {
+        self.with(|kv| kv.wipe())
     }
 
     /// One bounded maintenance slice (see [`Kv::maintain`]); `false` on error (best-effort,
