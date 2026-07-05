@@ -1,7 +1,7 @@
 //! thermometer — log the TMP112 temperature every 2 s.
 //!
 //! The console and the TMP112 (one-shot mode) are already set up by the board,
-//! so the app is just the read loop. Watch it with `just logs`.
+//! so the app is just the read loop. Watch it with `tower logs`.
 //!
 //!   just flash example thermometer
 

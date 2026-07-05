@@ -13,14 +13,18 @@
 #
 # Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
 # the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes the firmware's
-# framed console (`just logs`, not a raw serial terminal). Install it on your PATH (e.g.
-# `cargo install --path ../github/tower-cli`, or grab a release binary).
+# framed console (`tower logs`, not a raw serial terminal). Install it on your PATH (e.g.
+# `cargo install --path ../github/tower-cli`, or grab a release binary). Device control on its
+# own (logs, console, reset, erase, devices) is `tower`'s job — call the CLI directly; the
+# justfile only wraps the steps that need the kind/name/features build context.
+#
+# The HIL bench harness lives in its own repo (github.com/hardwario/tower-hil) and builds its
+# images from this checkout; the tower-protocol pin check lives in CI here
+# (tools/protocol_pin_check.py) and, developer-facing, in the TOWER control plane (/lockstep).
 #
 # CROSS-PLATFORM: every recipe is a single program invocation (no bash, no sed/awk/ls pipelines),
-# so the same `just` recipes run on Linux, macOS, and Windows. The one genuinely script-shaped
-# step lives in Python (tools/protocol_pin_check.py) rather than inline shell.
-# Windows uses cmd.exe (below) so exit codes propagate to CI; the one directory listing that must
-# differ per-OS has [unix] / [windows] variants.
+# so the same `just` recipes run on Linux, macOS, and Windows. Windows uses cmd.exe (below) so
+# exit codes propagate to CI.
 
 # On Windows, run recipe lines with cmd.exe (always present; propagates child exit codes — unlike
 # `-Command` PowerShell). Unix keeps the default `sh`. See the cross-platform note above.
@@ -28,9 +32,6 @@ set windows-shell := ["cmd.exe", "/c"]
 
 # Merged firmware image written by `build` and flashed by `flash`.
 bin := "target/firmware.bin"
-
-# Python launcher: `python3` on Unix, `python` on Windows (the python.org installer name).
-python := if os() == "windows" { "python" } else { "python3" }
 
 # Optional serial device; empty => let `tower` auto-detect the only USB serial device present.
 # Read from TOWER_DEVICE; passed to `tower`/`jolt` as `-d`.
@@ -42,9 +43,11 @@ _device_flag := if device == "" { "" } else { "-d " + device }
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 
-# Host triple — host-side tests must build for the host, since the workspace default target
-# (thumbv6m, see .cargo/config.toml) has no libtest / panic handler. `--print host-tuple` avoids
-# parsing `rustc -vV` and works on every OS.
+# Host triple, needed by `test` ONLY: the committed .cargo/config.toml pins the repo's DEFAULT
+# cargo target to thumbv6m (so bare `cargo build`/`cargo run` cross-compile for the L0) — which
+# also applies to `cargo test`, and thumbv6m has no libtest / panic handler. The explicit host
+# --target undoes that one default; it cannot be dropped without dropping the config default.
+# `--print host-tuple` avoids parsing `rustc -vV` and works on every OS.
 host := trim(`rustc --print host-tuple`)
 
 # NOTE on comments below: `just --list` shows the LAST comment line above a recipe, so each recipe
@@ -64,23 +67,65 @@ default:
 #     just flash app radio_push_button
 # `just examples` / `just apps` list the names of each kind.
 
+# Hand-maintained (keeps the recipe OS-independent — no ls/sed vs PowerShell split): add an
+# `@echo <name>` line, kept sorted, when you add examples/<name>.rs.
 # List the example apps (examples/*.rs) — build/flash/run them as kind `example`.
-[unix]
 examples:
-    @ls examples/*.rs | sed 's|examples/||; s|\.rs$||'
+    @echo accelerometer
+    @echo blinky
+    @echo button
+    @echo console_demo
+    @echo console_full
+    @echo console_panic
+    @echo crypto_aes_kat
+    @echo crypto_ccm_kat
+    @echo crypto_frame_loopback
+    @echo edge_frame_limits
+    @echo edge_rapid
+    @echo edge_recovery
+    @echo events_demo
+    @echo fhss_compliance
+    @echo fhss_kat
+    @echo fhss_sweep
+    @echo i2cscan
+    @echo lowpower
+    @echo net_bulk
+    @echo net_bulk_stream
+    @echo net_bulk_stress
+    @echo net_channel
+    @echo net_confirmed
+    @echo net_duty_kat
+    @echo net_p2p
+    @echo net_pairing
+    @echo net_persist
+    @echo net_secure_ping
+    @echo net_star
+    @echo radio_afa
+    @echo radio_band
+    @echo radio_beacon
+    @echo radio_csma
+    @echo radio_cw
+    @echo radio_fhss
+    @echo radio_gateway
+    @echo radio_id
+    @echo radio_interop
+    @echo radio_linkdiag
+    @echo radio_node
+    @echo radio_regdump
+    @echo radio_sleep
+    @echo radio_state
+    @echo shell_demo
+    @echo storage
+    @echo strip
+    @echo thermometer
+    @echo watchdog
 
-[windows]
-examples:
-    @powershell -NoProfile -Command "Get-ChildItem examples/*.rs | Select-Object -ExpandProperty BaseName"
-
+# Hand-maintained, same deal as `examples`: add an `@echo <name>` line for a new apps/<name>.rs.
 # List the TOWER IoT Kit product firmwares (apps/*.rs) — build/flash/run them as kind `app`.
-[unix]
 apps:
-    @ls apps/*.rs | sed 's|apps/||; s|\.rs$||'
-
-[windows]
-apps:
-    @powershell -NoProfile -Command "Get-ChildItem apps/*.rs | Select-Object -ExpandProperty BaseName"
+    @echo radio_climate_monitor
+    @echo radio_dongle_gateway
+    @echo radio_push_button
 
 # `kind` is example|app; set TOWER_FEATURES to pass cargo features (e.g. a radio example's role):
 #   just build example blinky
@@ -109,29 +154,6 @@ run kind name: (flash kind name)
     tower {{_device_flag}} logs
 
 
-# === Console & device control =====================================================================
-
-# Stream the decoded framed console logs from the running MCU (extra args -> `tower logs`).
-logs *args:
-    tower {{_device_flag}} logs {{args}}
-
-# Open the full-screen TUI console (logs + events + interactive shell).
-console:
-    tower {{_device_flag}} console
-
-# Reset the MCU into the application (add `--bootloader` to enter the system bootloader).
-reset *args:
-    tower {{_device_flag}} reset {{args}}
-
-# Erase the entire device flash, then reset into the application.
-erase:
-    tower {{_device_flag}} erase
-
-# List the connected serial devices (TOWER boards).
-devices:
-    tower devices
-
-
 # === Tests & checks ===============================================================================
 
 # Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
@@ -142,41 +164,6 @@ devices:
 test *args:
     cargo test -p tower-kv --target {{host}} {{args}}
     cargo test -p tower-radio-core --target {{host}} {{args}}
-
-# postcard is NOT self-describing, so a tower-protocol tag mismatch silently mis-decodes the wire
-# (never a build error) — this makes it a hard failure. Local half of the CI `lockstep` job (which
-# also fetches tower-cli's pin); the golden rule in the repo CLAUDE.md. tools/protocol_pin_check.py.
-# Verify the tower-protocol git-tag pin is identical across all in-repo manifests.
-check-protocol-pin:
-    {{python}} tools/protocol_pin_check.py
-
-
-# === Hardware-in-the-loop (HIL) ===================================================================
-#
-# The HIL harness (tools/hil, a std host crate excluded from the workspace) drives
-# the real bench: a TOWER Core Module (J-Link SWD + Nordic PPK2) + a TOWER Radio Dongle (USB). It
-# decodes the framed console natively (tower-protocol) and asserts on typed Log/Event + seq-gaps.
-# The bench roster lives in tools/hil/hil.toml (re-resolved against `tower devices` at startup).
-#
-# `--test-threads=1` is LOAD-BEARING: the serial ports are exclusive, so tests must not run
-# concurrently. HW-touching tests are `#[ignore]`d, so `--ignored` opts INTO the bench run; a plain
-# `cargo test` (which `cargo check`/CI would do) only COMPILES them.
-
-# Run the smoke + radio + extended HIL groups on the bench (needs the Dongle + Core; NOT run in
-# CI). The `power` group is compiled out (no `power` feature), so this never touches the PPK2.
-hil *args:
-    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} -- --ignored --test-threads=1 {{args}}
-
-# Run ONLY the feature-gated power HIL group (needs the Core on J-Link + PPK2, FTDI UNPLUGGED).
-# The `power_` name filter is load-bearing: `--features power` merely ADDS power.rs — without the
-# filter, `--ignored` would ALSO run the smoke/radio/extended groups, whose `tower flash` of the
-# FTDI-detached Core times out on a power bench. `hil-full` is the unfiltered "everything" run.
-hil-power *args:
-    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 power_ {{args}}
-
-# Run every HIL group (smoke + radio + extended + power) on the fully-cabled bench.
-hil-full *args:
-    cargo test --manifest-path tools/hil/Cargo.toml --target {{host}} --features power -- --ignored --test-threads=1 {{args}}
 
 
 # === Maintenance ==================================================================================

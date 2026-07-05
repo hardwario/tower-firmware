@@ -3,7 +3,7 @@
 #
 # For the USB-bootloader workflow (build raw .bin, flash, stream the framed console) use `just`,
 # which takes the target KIND then NAME:
-#   just build example blinky | just flash example blinky | just logs   (see the justfile)
+#   just build example blinky | just flash example blinky | tower logs   (see the justfile)
 
 [build]
 target = "thumbv6m-none-eabi"

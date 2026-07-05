@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Verify the tower-protocol git-tag pin is identical everywhere (the golden lockstep rule).
 
-The console wire format lives in the separate `tower-protocol` repo, pinned here by git
-tag in THREE manifests. postcard is NOT self-describing, so a tag mismatch does not error at
-build time — it silently mis-decodes bytes on the wire. This guard turns that latent hazard
-into a hard failure.
+The console wire format lives in the separate `tower-protocol` repo, pinned here by git tag
+in TWO manifests — and by the sibling consumer repos `tower-cli` and `tower-hil`. postcard is
+NOT self-describing, so a tag mismatch does not error at build time — it silently mis-decodes
+bytes on the wire. This guard turns that latent hazard into a hard failure.
 
 Usage:
-    protocol_pin_check.py                       # local half: the firmware manifests agree
-    protocol_pin_check.py --cli-url <raw-url>   # also fetch tower-cli's Cargo.toml and compare
+    protocol_pin_check.py                        # local half: the firmware manifests agree
+    protocol_pin_check.py --peer-url <raw-url>   # also fetch a consumer repo's Cargo.toml and
+                                                 # compare (repeatable: tower-cli, tower-hil)
 
 The in-repo manifests (see the repo CLAUDE.md lockstep note):
     Cargo.toml
     crates/tower-kv/Cargo.toml
-    tools/hil/Cargo.toml
 
-Plain python3/python (no shell, no coreutils) so it runs the same on Linux, macOS, Windows —
-matching the justfile's cross-platform convention. `just check-protocol-pin` runs the local
-half; CI adds --cli-url to also pin the host CLI in lockstep.
+Plain python3/python (no shell, no coreutils) so it runs the same on Linux, macOS, Windows.
+CI runs this with --peer-url for tower-cli and tower-hil; the developer-facing check across
+the LOCAL working trees lives in the TOWER control plane (/lockstep).
 """
 
 import os
@@ -29,7 +29,6 @@ import urllib.request
 MANIFESTS = [
     "Cargo.toml",
     "crates/tower-kv/Cargo.toml",
-    "tools/hil/Cargo.toml",
 ]
 
 # Match e.g.:  tower-protocol = { git = "...", tag = "v1.0.0", features = [...] }
@@ -51,10 +50,9 @@ _LOCK = re.compile(
 )
 
 # In-repo lockfiles that pin the resolved tower-protocol SHA (the workspace lock covers the root
-# crate + tower-kv; the out-of-workspace HIL harness has its own).
+# crate + tower-kv).
 LOCKFILES = [
     "Cargo.lock",
-    "tools/hil/Cargo.lock",
 ]
 
 
@@ -76,6 +74,16 @@ def sha_in_lock(text: str):
 def repo_root() -> str:
     # tools/protocol_pin_check.py -> repo root is the parent of tools/.
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def peer_name(url: str) -> str:
+    """A display name for a peer manifest URL — the GitHub repo segment when recognizable."""
+    parts = url.split("/")
+    if "raw.githubusercontent.com" in parts:
+        i = parts.index("raw.githubusercontent.com")
+        if len(parts) > i + 2:
+            return parts[i + 2]
+    return url
 
 
 def main() -> None:
@@ -127,64 +135,68 @@ def main() -> None:
             "ERROR: tower-protocol RESOLVED-SHA mismatch across in-repo lockfiles "
             f"({ {rel: s[:12] for rel, s in lock_shas.items()} }). The tag strings agree but the "
             "lockfiles resolved to different commits — a re-cut tag / stale cargo git cache. "
-            "Run `cargo update -p tower-protocol` (both the workspace and tools/hil) so every lock "
-            "resolves to the same commit."
+            "Run `cargo update -p tower-protocol` so every lock resolves to the same commit."
         )
     if distinct_shas:
         firmware_sha = distinct_shas.pop()
         print(f"firmware tower-protocol resolved SHA: {firmware_sha}")
 
-    # Optional: cross-repo lockstep against the host CLI.
-    cli_url = None
+    # Optional: cross-repo lockstep against the other consumers (tower-cli, tower-hil).
+    peer_urls = []
     args = sys.argv[1:]
     i = 0
     while i < len(args):
-        if args[i] == "--cli-url" and i + 1 < len(args):
-            cli_url = args[i + 1]
+        if args[i] == "--peer-url" and i + 1 < len(args):
+            peer_urls.append(args[i + 1])
             i += 2
         else:
-            sys.exit(f"protocol-pin: unexpected argument {args[i]!r}")
-    if cli_url is None:
-        return
+            sys.exit(
+                f"protocol-pin: unexpected argument {args[i]!r} "
+                "(usage: --peer-url <raw-Cargo.toml-url>, repeatable)"
+            )
 
-    print(f"fetching tower-cli Cargo.toml: {cli_url}")
-    try:
-        with urllib.request.urlopen(cli_url, timeout=30) as resp:
-            cli_toml = resp.read().decode("utf-8")
-    except Exception as e:  # noqa: BLE001 — surface any fetch error as a clear failure
-        sys.exit(f"protocol-pin: failed to fetch tower-cli Cargo.toml: {e}")
-    cli_tag = tag_in(cli_toml, "tower-cli Cargo.toml")
-    print(f"tower-cli tower-protocol pin: {cli_tag}")
-    if cli_tag != firmware_tag:
-        sys.exit(
-            f"ERROR: tower-protocol LOCKSTEP BROKEN — firmware pins {firmware_tag} but "
-            f"tower-cli pins {cli_tag}. The two repos MUST move together (silent mis-decode "
-            "otherwise). Bump both in the same change-set."
-        )
-    print(f"lockstep OK: firmware and tower-cli both pin {firmware_tag}")
-
-    # Resolved-SHA cross-check against the CLI too (the re-cut hazard crosses repos). Derive the
-    # CLI's Cargo.lock URL from its Cargo.toml URL (side by side); best-effort — tolerate its
-    # absence, but a determinable SHA mismatch under a matching tag is the exact drift to catch.
-    if firmware_sha is not None and cli_url.endswith("Cargo.toml"):
-        cli_lock_url = cli_url[: -len("Cargo.toml")] + "Cargo.lock"
+    for url in peer_urls:
+        name = peer_name(url)
+        print(f"fetching {name} Cargo.toml: {url}")
         try:
-            with urllib.request.urlopen(cli_lock_url, timeout=30) as resp:
-                got = sha_in_lock(resp.read().decode("utf-8"))
-        except Exception as e:  # noqa: BLE001 — best-effort; don't fail if the lock isn't published
-            print(f"  (note: could not fetch/parse tower-cli Cargo.lock ({e}) — SHA check skipped)")
-            got = None
-        if got is not None:
-            cli_sha = got[1]
-            print(f"tower-cli tower-protocol resolved SHA: {cli_sha}")
-            if cli_sha != firmware_sha:
-                sys.exit(
-                    f"ERROR: tower-protocol RESOLVED-SHA mismatch — firmware locked {firmware_sha} "
-                    f"but tower-cli locked {cli_sha}, though both label tag {firmware_tag}. This "
-                    "is the re-cut-tag hazard (same tag name, different commit). Re-run "
-                    "`cargo update -p tower-protocol` in both repos so they resolve identically."
-                )
-            print(f"lockstep SHA OK: firmware and tower-cli both resolve {firmware_sha}")
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                peer_toml = resp.read().decode("utf-8")
+        except Exception as e:  # noqa: BLE001 — surface any fetch error as a clear failure
+            sys.exit(f"protocol-pin: failed to fetch {name} Cargo.toml: {e}")
+        peer_tag = tag_in(peer_toml, f"{name} Cargo.toml")
+        print(f"{name} tower-protocol pin: {peer_tag}")
+        if peer_tag != firmware_tag:
+            sys.exit(
+                f"ERROR: tower-protocol LOCKSTEP BROKEN — firmware pins {firmware_tag} but "
+                f"{name} pins {peer_tag}. The consumer repos MUST move together (silent "
+                "mis-decode otherwise). Bump them in the same change-set."
+            )
+        print(f"lockstep OK: firmware and {name} both pin {firmware_tag}")
+
+        # Resolved-SHA cross-check against the peer too (the re-cut hazard crosses repos). Derive
+        # the peer's Cargo.lock URL from its Cargo.toml URL (side by side); best-effort — tolerate
+        # its absence, but a determinable SHA mismatch under a matching tag is the exact drift to
+        # catch.
+        if firmware_sha is not None and url.endswith("Cargo.toml"):
+            lock_url = url[: -len("Cargo.toml")] + "Cargo.lock"
+            try:
+                with urllib.request.urlopen(lock_url, timeout=30) as resp:
+                    got = sha_in_lock(resp.read().decode("utf-8"))
+            except Exception as e:  # noqa: BLE001 — best-effort; the lock may not be published
+                print(f"  (note: could not fetch/parse {name} Cargo.lock ({e}) — SHA check skipped)")
+                got = None
+            if got is not None:
+                peer_sha = got[1]
+                print(f"{name} tower-protocol resolved SHA: {peer_sha}")
+                if peer_sha != firmware_sha:
+                    sys.exit(
+                        f"ERROR: tower-protocol RESOLVED-SHA mismatch — firmware locked "
+                        f"{firmware_sha} but {name} locked {peer_sha}, though both label tag "
+                        f"{firmware_tag}. This is the re-cut-tag hazard (same tag name, different "
+                        "commit). Re-run `cargo update -p tower-protocol` in both repos so they "
+                        "resolve identically."
+                    )
+                print(f"lockstep SHA OK: firmware and {name} both resolve {firmware_sha}")
 
 
 if __name__ == "__main__":

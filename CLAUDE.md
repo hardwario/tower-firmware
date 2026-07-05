@@ -4,34 +4,35 @@ Embassy-based, `no_std` firmware SDK for the HARDWARIO TOWER Core Module (STM32L
 Cortex-M0+). The crate is a library; runnable programs come in two kinds — educational
 `examples/` (Cargo `--example`) and TOWER IoT Kit **product skeletons** in `apps/` (Cargo
 `[[bin]]`, `--bin`; each runs its non-radio logic, with the radio wiring left as a TODO). Build/flash with `just`, which takes the kind then the name
-(`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`,
-`just logs`) over the UART bootloader via the
-`tower` CLI. Subsystem guides: `docs/radio.md`, `docs/console.md`. Host tests:
+(`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`)
+over the UART bootloader via the
+`tower` CLI. Standalone device control (logs/console/reset/erase/devices) is the CLI's own
+job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`. Host tests:
 `just test` (the `tower-kv` + `tower-radio-core` crates — the firmware itself is `no_std`
 and can't `cargo test`).
 
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep
 
 The console wire format lives in a **separate repo**, github.com/hardwario/tower-protocol,
-pinned here **by git tag in three places**: `Cargo.toml`, `crates/tower-kv/Cargo.toml`, and
-`tools/hil/Cargo.toml` (the out-of-workspace HIL harness, which decodes frames natively).
-The host CLI `tower-cli` pins the **same tag** — the two repos MUST move
+pinned here **by git tag in two places**: `Cargo.toml` and `crates/tower-kv/Cargo.toml`.
+The host CLI `tower-cli` and the bench harness `tower-hil` (its own repo,
+github.com/hardwario/tower-hil) pin the **same tag** — all consumers MUST move
 together, because postcard isn't self-describing (mismatched versions silently mis-decode).
-`just check-protocol-pin` verifies all the in-repo pins agree.
+CI verifies the pins (`tools/protocol_pin_check.py`, which also fetches the tower-cli and
+tower-hil pins); the developer-facing check lives in the TOWER control plane (`/lockstep`).
 
 **If you change the protocol, or need a newer tower-protocol:** make the change in the
 tower-protocol repo and follow its `CLAUDE.md` release runbook, then bump it here in the same
 change-set:
 
 ```sh
-# set tag = "vX.Y.Z" in Cargo.toml, crates/tower-kv/Cargo.toml, tools/hil/Cargo.toml
+# set tag = "vX.Y.Z" in Cargo.toml and crates/tower-kv/Cargo.toml
 cargo update -p tower-protocol   # covers the workspace: root, tower-kv
-cargo update --manifest-path tools/hil/Cargo.toml -p tower-protocol
 just test            # + build an example
 ```
 
-…and bump **tower-cli** to the same tag too. The protocol's own codec tests run in the
-tower-protocol repo, not here. For local protocol co-dev, add `paths = ["/abs/path/to/tower-protocol"]`
+…and bump **tower-cli** and **tower-hil** to the same tag too. The protocol's own codec tests
+run in the tower-protocol repo, not here. For local protocol co-dev, add `paths = ["/abs/path/to/tower-protocol"]`
 to your `~/.cargo/config.toml` (this repo's `.cargo/config.toml` is committed for the build target,
 so the override can't live there).
 

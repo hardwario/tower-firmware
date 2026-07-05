@@ -47,9 +47,10 @@ Host-only unit tests: `just test`.
 | `/dev/cu.usbserial-2120` | **TOWER Core Module** | SEGGER **J-Link** (SWD flash via `probe-rs`) + Nordic **PPK2** (scriptable current supply/measure) | radio NODE; the **power** target (STOP-floor measurements) |
 | `/dev/cu.usbserial-2140` | **TOWER Radio Dongle** | USB-powered (VBUS); flashed via `tower flash` | radio GATEWAY; the **smoke** target (one-shot KAT verdicts) |
 
-Confirm ports with `tower devices`; the automated harness (`tools/hil`, run via `just hil` /
-`just hil-power` / `just hil-full`) reads this roster from `tools/hil/hil.toml` and re-resolves it
-at startup, failing fast if a board is absent. Confirm I2C population by flashing `i2cscan`: with
+Confirm ports with `tower devices`; the automated harness lives in its own repo,
+[tower-hil](https://github.com/hardwario/tower-hil) (run `just hil` / `just hil-power` /
+`just hil-full` there — it builds images from this checkout, default `../firmware`). It reads
+this roster from its `hil.toml` and re-resolves it at startup, failing fast if a board is absent. Confirm I2C population by flashing `i2cscan`: with
 no sensor module attached, **`thermometer` and `accelerometer` report a sensor-absent error** —
 expected on a bare Core, not a fault. A sensor module additionally shows `0x49` (TMP112) and `0x19`
 (LIS2DH12).
@@ -63,8 +64,9 @@ Default radio role assignment for two-board tests:
 > console alive, which inhibits STOP by design — so a plugged-in board never reaches the µA floor.
 > The PPK2 supplies the Core at **1.8 V** (the regulator/brown-out knee, not 3 V) after a
 > power-cycle (clears the ~200 µA debug-domain residual a probe leaves); readings are never sampled
-> mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). The `just hil-power`
-> test enforces all three, and skips with an "unplug the FTDI" message if the console still answers.
+> mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). tower-hil's
+> `just hil-power` test enforces all three, and skips with an "unplug the FTDI" message if the
+> console still answers.
 
 ## 3. Capture methodology (read this before running)
 

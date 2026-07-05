@@ -6,9 +6,10 @@
 # the extracted no_std leaf crates (tower-kv, tower-radio-core) — run via `just test`, which
 # builds those for the host triple.
 #
-# The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in THREE
-# manifests here AND in tower-cli, and postcard is not self-describing, so a tag mismatch silently
-# mis-decodes the wire rather than erroring. It must be caught in CI.
+# The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in TWO
+# manifests here AND in the sibling consumer repos (tower-cli, tower-hil), and postcard is not
+# self-describing, so a tag mismatch silently mis-decodes the wire rather than erroring. It must
+# be caught in CI.
 
 name: CI
 
@@ -87,26 +88,11 @@ jobs:
       - name: clippy (thumbv6m — lib, examples, bins)
         run: cargo clippy --lib --examples --bins -- -D warnings
 
-  # 3b. Compile the HIL harness. It is workspace-excluded (host std crate) and its hardware tests
-  #     are `#[ignore]`d, so `cargo test --no-run` proves the harness API stays in sync with the
-  #     tower-protocol / jolt tags it pins WITHOUT any hardware — exactly what the harness's own
-  #     docs claim `cargo test` does, but which otherwise only ever happened on the bench machine.
-  hil-compile:
-    name: HIL harness compiles
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install libudev (serialport dep)
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-      - uses: Swatinem/rust-cache@v2
-      - name: Compile the HIL tests (host, no hardware run)
-        run: cargo test --manifest-path tools/hil/Cargo.toml --no-run
-
   # 4. The golden rule: tower-protocol must be pinned to the SAME git tag in all in-repo
-  #    manifests AND in tower-cli. postcard is not self-describing — a mismatch mis-decodes the
-  #    wire without a build error, so it has to be checked explicitly.
+  #    manifests AND in the sibling consumer repos (tower-cli, tower-hil). postcard is not
+  #    self-describing — a mismatch mis-decodes the wire without a build error, so it has to be
+  #    checked explicitly. (The HIL harness itself lives — and compile-checks — in
+  #    github.com/hardwario/tower-hil.)
   lockstep:
     name: tower-protocol lockstep
     runs-on: ubuntu-latest
@@ -114,10 +100,11 @@ jobs:
       - uses: actions/checkout@v5
       - name: Ensure python3 is available
         run: python3 --version
-      # Local half (the firmware manifests agree) + cross-repo half (tower-cli pins the same
-      # tag), fetched from the tower-cli default branch. See tools/protocol_pin_check.py and the
-      # local-only `just check-protocol-pin` recipe.
-      - name: Verify tower-protocol pin (firmware + tower-cli)
+      # Local half (the firmware manifests agree) + cross-repo half (tower-cli and tower-hil pin
+      # the same tag), fetched from each repo's default branch. See tools/protocol_pin_check.py;
+      # the developer-facing check across local working trees is the control plane's /lockstep.
+      - name: Verify tower-protocol pin (firmware + tower-cli + tower-hil)
         run: >-
           python3 tools/protocol_pin_check.py
-          --cli-url https://raw.githubusercontent.com/hardwario/tower-cli/main/Cargo.toml
+          --peer-url https://raw.githubusercontent.com/hardwario/tower-cli/main/Cargo.toml
+          --peer-url https://raw.githubusercontent.com/hardwario/tower-hil/main/Cargo.toml

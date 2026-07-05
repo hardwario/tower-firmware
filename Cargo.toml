@@ -11,10 +11,6 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
 members = ["crates/tower-kv", "crates/tower-radio-core"]
-# The HIL harness is a std host crate — excluded so workspace builds (which target thumbv6m via
-# .cargo/config.toml) don't try to cross-compile it. Run it with an explicit host target:
-# `just hil` (see the justfile).
-exclude = ["tools/hil"]
 resolver = "2"
 
 [dependencies]

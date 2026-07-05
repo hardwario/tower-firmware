@@ -1,7 +1,5 @@
 .DS_Store
 /target
-# Out-of-workspace std tools with their own build dirs (not covered by /target).
-/tools/hil/target
-# Python sidecar bytecode (tools/hil/ppk2d.py).
+# Python tooling bytecode (tools/protocol_pin_check.py, tools/hwtest).
 __pycache__/
 *.pyc

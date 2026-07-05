@@ -35,7 +35,7 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 just examples                  # list example names      (just apps → product names)
 just run example thermometer    # build + flash an example, watch the console from boot
 just run app radio_push_button  # same, for a ready-made TOWER IoT Kit product (apps/)
-just logs                       # re-attach to a running MCU's framed console (no reset)
+tower logs                      # re-attach to a running MCU's framed console (no reset)
 ```
 
 ## Module layout
@@ -195,8 +195,7 @@ See `thermometer.rs` (≈12 lines of logic) for the minimal real example.
 > updating a fielded unit means plugging into it.
 
 Prerequisites (one-time): `cargo install just cargo-binutils probe-rs-tools`
-and `rustup component add llvm-tools`. `just check-protocol-pin` also needs
-`python3` (`python` on Windows).
+and `rustup component add llvm-tools`.
 
 `build`/`flash`/`run`/`size` take a kind (`example` or `app`) then the name:
 
@@ -206,7 +205,7 @@ just build example blinky            # → target/firmware.bin (+ size)
 just flash example blinky            # build + flash over the UART bootloader (tower)
 just flash app radio_push_button     # same, for a ready-made TOWER IoT Kit product (apps/)
 just run   example thermometer       # build + flash, then stream the framed console logs
-just logs                            # stream the framed console from the running MCU (tower logs)
+tower logs                           # stream the framed console from the running MCU (the CLI directly)
 just flash example blinky --no-verify  # extra args pass through to `tower flash`
 ```
 

@@ -5,7 +5,7 @@
 //! idle, since the low-power executor wakes for the feeder's timer. To watch it bite, replace the
 //! loop body with `loop {}` (a hang): the feeder stops and the MCU resets after ~8 s.
 //!
-//!   just flash example watchdog     (then: just logs)
+//!   just flash example watchdog     (then: tower logs)
 
 #![no_std]
 #![no_main]

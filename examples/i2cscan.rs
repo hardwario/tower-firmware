@@ -1,7 +1,7 @@
 //! i2cscan — probe the I2C2 bus (PB10/PB11) and log responding addresses.
 //!
 //! A maker diagnostic: confirms the bus works and finds device addresses (e.g.
-//! which address the TMP112 is strapped to). Watch with `just logs`.
+//! which address the TMP112 is strapped to). Watch with `tower logs`.
 //!
 //! Uses the standard `Board` setup like the other samples, then reclaims the raw
 //! I2C2 bus from the (shut-down) TMP112 driver via `release()` to probe it.
