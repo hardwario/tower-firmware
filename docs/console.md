@@ -420,22 +420,28 @@ frame and a `seq` gap each print a one-line warning.
 
 ### The TUI (`tower console`)
 
-A four-pane [ratatui](https://ratatui.rs) terminal app — Device Events, Shell Command,
-Shell Responses, Device Logs — all on one serial drain:
+A three-pane [ratatui](https://ratatui.rs) terminal app — Device Events, the SSH-style
+Interactive Shell (scrollback + a `> ` prompt with in-pane TAB hints), Device Logs — all
+on one serial drain (35/65 split):
 
 ```
  HARDWARIO TOWER Console v0.1.0 — /dev/cu.usbserial-140 ●
 ┌Device Events──────────────┐┌Device Logs────────────────────────────────┐
 │12:01 measurement temp=23.5 ││12:01 [  64.030] INFO  app: heartbeat 32    │
 │                            ││12:01 [  66.031] WARN  app: link flaky      │
-┌Shell Command──────────────┐│                                            │
-│/ system settings print     ││                                            │
-┌Shell Responses────────────┐│                                            │
+┌Interactive Shell──────────┐│                                            │
 │> /system settings print    ││                                            │
 │identity = node-7           ││                                            │
+│> /system/eeprom print      ││                                            │
+│flips: 3 / 100000 (0.0%)    ││                                            │
+│> _                         ││                                            │
 └────────────────────────────┘└────────────────────────────────────────────┘
- Shift-Tab Focus  F3 Zoom  F5 Pause  F8 Clear  F10 Quit          2026-06-28 12:01:09
+ <Shift-Tab> Focus  <F3> Zoom  <F5> Pause  <F8> Clear  <Shift-F8> Clear All …
 ```
+
+Only the `clock [uptime] LEVEL` prefix of a log line is severity-tinted; command syntax is
+highlighted (paths / commands / `key=value`), and `F5` pauses the *view* only — frames keep
+being captured while the viewport holds still.
 
 | Key | Action |
 |---|---|

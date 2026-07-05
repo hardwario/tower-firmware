@@ -205,7 +205,7 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | C2 | console_panic | B | countdown `alive — deliberate panic in Ns`, then one ERROR frame `panicked at … console_panic.rs:LINE` emitted by the PAC-level panic handler, then a RESET: boot banner + `crash` ERROR frame re-reporting the panic from the breadcrumb (`/system/crash print` agrees) | panic frame leads with `0x00` to flush a partial frame; if console not up, the breadcrumb still records (verify via the post-reset report); message clipped to 192 B; crash-loops by design → bootguard backoff after 8 |
 | C3 | events_demo | A (`tower events`) | `EVENT measurement count=… temp_c=… unit=cdeg` each second + periodic `heartbeat`; interleaves with logs in `tower logs` | field cap 6; value/name length clip on char boundary; events apply backpressure (never dropped) |
 | C4 | shell_demo | S | `tower exec` of `/system/resource print`, `/system/settings print`; set/get all 5 kinds (Str/Uint/Int/Bool/Enum); app cmds merged under `/system`; nested `/radio …`; `/export` | out-of-range rejected (`R_BAD_ARG`); unknown cmd (`R_NOT_FOUND`); TAB ambiguous vs unique (`tower complete`); enum/bool value completion; **persistence across reset**; chunked `resource print` (>192 B → multi-frame) |
-| C5 | console_full | X (TUI) / S | `tower console` shows 4 live panes; or drive shell via `tower exec` | pane focus/zoom/pause; rapid updates no flicker |
+| C5 | console_full | X (TUI) / S | `tower console` shows 3 live panes (Events / Interactive Shell / Logs); or drive shell via `tower exec` | pane focus/zoom/pause; rapid updates no flicker |
 
 ### D. Crypto & frame KATs (single board, no peer) — mode B
 | ID | Example | Pass | Vector / edge |

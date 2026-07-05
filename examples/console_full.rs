@@ -1,6 +1,6 @@
 //! console_full — the showcase for `tower console` (the TUI). Serves the shell and
-//! emits live logs (every level) plus periodic structured events, so all four panes
-//! — Device Events / Shell Command / Shell Responses / Device Logs — have content.
+//! emits live logs (every level) plus periodic structured events, so all three panes
+//! — Device Events / Interactive Shell / Device Logs — have content.
 //!
 //! Drive it with:  `tower console`
 //!   try `/system identity print`, `/system/resource print`, TAB completion,
