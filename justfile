@@ -6,7 +6,7 @@
 #
 #   just examples                  # list example names    (just apps  lists product names)
 #   just flash example blinky      # build + flash the blinky example
-#   just run app radio_push_button # build + flash a product, then stream the (framed) console logs
+#   just run app radio_push_button # build + flash a product, then open the console TUI
 #
 # Override the serial device: TOWER_DEVICE=/dev/cu.usbserial-XXXX just flash example blinky
 # Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
@@ -149,9 +149,11 @@ size kind name:
 flash kind name *args: (build kind name)
     tower {{_device_flag}} flash {{bin}} {{args}}
 
-# Build + flash a target (kind example|app), then stream its framed console logs (resets first).
+# Flash ends by resetting into the app, so the console attaches from a fresh boot. For a plain
+# log stream instead of the TUI, use `tower logs` directly.
+# Build + flash a target (kind example|app), then open the console TUI (logs + events + shell).
 run kind name: (flash kind name)
-    tower {{_device_flag}} logs
+    tower {{_device_flag}} console
 
 
 # === Tests & checks ===============================================================================

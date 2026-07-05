@@ -33,7 +33,7 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 #           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
 #           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing needs neither)
 just examples                  # list example names      (just apps → product names)
-just run example thermometer    # build + flash an example, watch the console from boot
+just run example thermometer    # build + flash an example, then open the console TUI from boot
 just run app radio_push_button  # same, for a ready-made TOWER IoT Kit product (apps/)
 tower logs                      # re-attach to a running MCU's framed console (no reset)
 ```
@@ -204,7 +204,7 @@ just examples                        # list example names      (just apps → pr
 just build example blinky            # → target/firmware.bin (+ size)
 just flash example blinky            # build + flash over the UART bootloader (tower)
 just flash app radio_push_button     # same, for a ready-made TOWER IoT Kit product (apps/)
-just run   example thermometer       # build + flash, then stream the framed console logs
+just run   example thermometer       # build + flash, then open the console TUI (logs+events+shell)
 tower logs                           # stream the framed console from the running MCU (the CLI directly)
 just flash example blinky --no-verify  # extra args pass through to `tower flash`
 ```
