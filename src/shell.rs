@@ -89,6 +89,11 @@ pub enum Kind {
     /// One of a fixed set of string values (stored verbatim; the choices complete after
     /// `=`). For modes, regions, roles.
     Enum(&'static [&'static str]),
+    /// A 32-bit network **address**, shown and entered as hex (`0x1a2b3c4d`; a bare
+    /// `1a2b3c4d` is accepted too). Stored as 4 LE bytes. The literal `random` mints a
+    /// fresh non-zero address; `auto` (the stored `0`) resolves to the chip-UID-derived
+    /// default. See [`radio_address`]. For the radio `my_id` / node address.
+    Addr,
 }
 
 /// A persisted, named setting. The shell derives `/system settings print|set|get`
@@ -106,13 +111,38 @@ pub struct Setting {
     pub default: &'static str,
 }
 
+/// `NS_SHELL` local key of the base `address` setting (the radio `my_id`). Public so a
+/// provisioning path can pin it (see the cable-`Provision` handler).
+pub const ADDRESS_KEY: u8 = 0x01;
+
 /// SDK base settings; apps add their own via [`serve_ext`].
-static BASE_SETTINGS: &[Setting] = &[Setting {
-    key: 0x00,
-    name: "identity",
-    kind: Kind::Str { max: 32 },
-    default: "tower",
-}];
+static BASE_SETTINGS: &[Setting] = &[
+    Setting {
+        key: 0x00,
+        name: "identity",
+        kind: Kind::Str { max: 32 },
+        default: "tower",
+    },
+    // The device's 32-bit radio address (`my_id`). Default `auto` = the stored 0
+    // sentinel, which [`radio_address`] resolves to the chip-UID-derived address.
+    Setting {
+        key: ADDRESS_KEY,
+        name: "address",
+        kind: Kind::Addr,
+        default: "auto",
+    },
+];
+
+/// The device's effective 32-bit radio address: the `address` base setting when pinned
+/// to a non-zero value, else the chip-UID-derived default ([`board::unique_id32`]).
+/// This is the `my_id` / clear-header `src` a radio app should transmit under.
+pub fn radio_address(kv: Nv) -> u32 {
+    let mut b = [0u8; 4];
+    match kv.scope(NS_SHELL).get_bytes(ADDRESS_KEY, &mut b) {
+        Ok(Some(4)) if u32::from_le_bytes(b) != 0 => u32::from_le_bytes(b),
+        _ => crate::board::unique_id32(),
+    }
+}
 
 /// The merged settings table (SDK base + the app's) handed to handlers + completion.
 #[derive(Clone, Copy)]
@@ -669,19 +699,37 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         return Outcome::code(R_NOT_FOUND);
     };
     let mut buf = [0u8; MAX_SETTING];
-    let n = match encode_value(s.kind, value, &mut buf) {
-        Ok(n) => n,
-        Err(()) => {
-            let kind = s.kind;
-            let _ = write!(ctx, "invalid value for {name} (");
-            write_constraint(ctx, kind);
-            let _ = write!(ctx, ")");
-            return Outcome::code(R_BAD_ARG);
+    // `address=random` mints a fresh non-zero address here (the pure encoder has no RNG);
+    // everything else goes through the normal validated encode.
+    let (n, generated) = if matches!(s.kind, Kind::Addr) && value.eq_ignore_ascii_case("random") {
+        let mut a = crate::board::rand_u32();
+        if a == 0 {
+            a = 1;
+        }
+        buf[..4].copy_from_slice(&a.to_le_bytes());
+        (4, Some(a))
+    } else {
+        match encode_value(s.kind, value, &mut buf) {
+            Ok(n) => (n, None),
+            Err(()) => {
+                let kind = s.kind;
+                let _ = write!(ctx, "invalid value for {name} (");
+                write_constraint(ctx, kind);
+                let _ = write!(ctx, ")");
+                return Outcome::code(R_BAD_ARG);
+            }
         }
     };
     match ctx.kv.set_bytes(s.key, &buf[..n]) {
         Ok(()) => {
-            let _ = write!(ctx, "ok");
+            match generated {
+                Some(a) => {
+                    let _ = write!(ctx, "ok (0x{a:08x})");
+                }
+                None => {
+                    let _ = write!(ctx, "ok");
+                }
+            }
             Outcome::ok()
         }
         Err(_) => {
@@ -750,7 +798,31 @@ fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<
             buf[..b.len()].copy_from_slice(b);
             Ok(b.len())
         }
+        // `random` is resolved to a generated hex value in `settings_set` before this,
+        // so here `Addr` only ever sees `auto` (→ 0) or a hex literal.
+        Kind::Addr => {
+            let v = parse_addr(value).ok_or(())?;
+            buf[..4].copy_from_slice(&v.to_le_bytes());
+            Ok(4)
+        }
     }
+}
+
+/// Parse an [`Kind::Addr`] value: `auto` → `0` (the UID-derived sentinel), or hex
+/// (`0x1a2b3c4d` / bare `1a2b3c4d`, ≤ 8 digits) → the value. (`random` is handled by
+/// the caller.)
+fn parse_addr(value: &str) -> Option<u32> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Some(0);
+    }
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    if hex.is_empty() || hex.len() > 8 {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok()
 }
 
 /// Read a setting's current value (or its default if unset / unreadable) as text.
@@ -779,10 +851,23 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
                 let _ = out.push_str(if buf[0] != 0 { "true" } else { "false" });
                 return;
             }
+            // Show the *effective* address (hex): a stored 0 = "auto" resolves to the
+            // chip-UID-derived value, so `get address` reports what the radio actually uses.
+            Kind::Addr if n >= 4 => {
+                let a = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let eff = if a != 0 { a } else { crate::board::unique_id32() };
+                let _ = write!(out, "0x{eff:08x}");
+                return;
+            }
             _ => {}
         }
     }
-    let _ = out.push_str(s.default);
+    // Unset: an address still has an effective value (the UID-derived default).
+    if matches!(s.kind, Kind::Addr) {
+        let _ = write!(out, "0x{:08x}", crate::board::unique_id32());
+    } else {
+        let _ = out.push_str(s.default);
+    }
 }
 
 /// Write a human-readable constraint for `kind` (e.g. `uint 1..=3600`, `enum p2p|star`).
@@ -805,6 +890,9 @@ fn write_constraint(ctx: &mut Ctx<'_>, kind: Kind) {
             for (i, c) in choices.iter().enumerate() {
                 let _ = write!(ctx, "{}{c}", if i == 0 { "" } else { "|" });
             }
+        }
+        Kind::Addr => {
+            let _ = write!(ctx, "hex 32-bit | auto | random");
         }
     }
 }
@@ -887,6 +975,7 @@ fn complete(
                     let vals: &[&'static str] = match s.kind {
                         Kind::Enum(choices) => choices,
                         Kind::Bool => &["true", "false"],
+                        Kind::Addr => &["auto", "random"],
                         _ => &[],
                     };
                     for &v in vals {

@@ -69,10 +69,9 @@ use tower_protocol::{MsgType, decode_frame};
 
 // --- persistence (NS_APP) --------------------------------------------------------
 
-/// Provision record: `(gw_id, key, band, channel)` (postcard).
+/// Provision record: `(gw_id, key, band, channel)` (postcard). The node's own radio
+/// address is the SDK `address` base setting (`shell::radio_address`), not stored here.
 const KEY_PROVISION: u8 = 0x00;
-/// Operator override of the UID-derived radio id (u32 LE; absent = derived).
-const KEY_MY_ID: u8 = 0x01;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 struct Provisioned {
@@ -344,15 +343,8 @@ async fn run(b: Board) {
     let kv = b.kv;
     let app_kv = kv.scope(NS_APP);
 
-    let my_id = {
-        let mut idb = [0u8; 4];
-        match app_kv.get_bytes(KEY_MY_ID, &mut idb) {
-            // 0 is the reserved "unset" sentinel — also shields against stale bytes a
-            // previous firmware left at this key (dirty-EEPROM boards read id 0 here).
-            Ok(Some(4)) if u32::from_le_bytes(idb) != 0 => u32::from_le_bytes(idb),
-            _ => tower::board::unique_id32(),
-        }
-    };
+    // This node's radio address = the `address` base setting (pinned or UID-derived).
+    let my_id = shell::radio_address(kv);
     let mut provision: Option<Provisioned> = app_kv.get::<Provisioned>(KEY_PROVISION).ok().flatten();
 
     // Accelerometer: reclaim the shared I²C2 bus and arm the tilt interrupt (register
@@ -794,9 +786,15 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                 return;
             }
+            // An optional address override pins the `address` base setting (the same
+            // one `system address` edits), so the node comes up under it after reboot.
             let effective_id = match p.my_id {
                 Some(id) if id != 0 => {
-                    if app_kv.set_bytes(KEY_MY_ID, &id.to_le_bytes()).is_err() {
+                    if kv
+                        .scope(NS_SHELL)
+                        .set_bytes(shell::ADDRESS_KEY, &id.to_le_bytes())
+                        .is_err()
+                    {
                         respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                         return;
                     }

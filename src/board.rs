@@ -288,15 +288,32 @@ pub fn preinit_csr() -> u32 {
 /// See [`preinit_csr`].
 static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// This unit's stable 32-bit radio id: CRC-32/IEEE over the STM32's 96-bit unique
-/// device ID, clamped to never be 0 (`0` is the "host not yet known" dest in the
-/// pairing JOIN_REQ, and a natural "unset" sentinel in stored records). Collisions
-/// across a fleet are birthday-bounded (~2⁻³² per pair) — acceptable for network
-/// addressing; product apps let an operator override it via a persisted `NS_APP`
-/// record (mgmt `Provision.my_id`), which also covers the collision escape hatch.
+/// This unit's stable 32-bit radio address, derived from the STM32's 96-bit unique
+/// device ID: CRC-32/IEEE over the UID, clamped to never be 0 (`0` is the "host not yet
+/// known" dest in the pairing JOIN_REQ, and the "unset / auto" sentinel of the
+/// [`shell` `address` setting](crate::shell::radio_address)). Collisions across a fleet
+/// are birthday-bounded (~2⁻³² per pair) — acceptable for network addressing; an
+/// operator can pin an explicit or random address instead (`system address`).
 pub fn unique_id32() -> u32 {
     let id = tower_protocol::crc::crc32_ieee(&embassy_stm32::uid::uid());
     if id == 0 { 1 } else { id }
+}
+
+/// A best-effort random `u32` — **not cryptographic**. Seeds an xorshift from the chip
+/// UID, the current uptime tick, and a rolling internal state, so successive calls (and
+/// different units) diverge; the live entropy is *when* it is called. Enough to mint a
+/// unique network address (`system address random`); for secret randomness use a real
+/// TRNG.
+pub fn rand_u32() -> u32 {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static STATE: AtomicU32 = AtomicU32::new(0);
+    let mut x =
+        STATE.load(Ordering::Relaxed) ^ unique_id32() ^ (embassy_time::Instant::now().as_ticks() as u32) | 1; // never seed the xorshift with 0 (it would stick at 0)
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    STATE.store(x, Ordering::Relaxed);
+    x
 }
 
 /// Assert the STM32L0 STOP-mode power tuning in `PWR_CR`:

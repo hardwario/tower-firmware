@@ -58,9 +58,8 @@ use tower_protocol::{MsgType, decode_frame};
 
 /// Registry format version marker (`tower_gw_core::registry::FORMAT_VERSION`).
 const KEY_FORMAT: u8 = 0x00;
-/// Operator override of the UID-derived radio id (u32 LE; absent = derived).
-const KEY_MY_ID: u8 = 0x01;
-/// Registry buckets 0..=5 (one `tower-gw-core` bucket per KV value).
+/// Registry buckets 0..=5 (one `tower-gw-core` bucket per KV value). The gateway's own
+/// radio address is the `address` base setting (`shell::radio_address`).
 const KEY_BUCKET_BASE: u8 = 0x10;
 
 /// The registry's bucket store: `NS_APP` locals `0x10..=0x15`.
@@ -333,16 +332,9 @@ async fn run(b: Board) {
     let app_kv = kv.scope(NS_APP);
     let mut buckets = EepromBuckets { kv: app_kv };
 
-    // Identity: operator override (mgmt Provision.my_id — reserved) else UID-derived.
-    let my_id = {
-        let mut idb = [0u8; 4];
-        match app_kv.get_bytes(KEY_MY_ID, &mut idb) {
-            // 0 is the reserved "unset" sentinel — also shields against stale bytes a
-            // previous firmware left at this key (dirty-EEPROM boards read id 0 here).
-            Ok(Some(4)) if u32::from_le_bytes(idb) != 0 => u32::from_le_bytes(idb),
-            _ => tower::board::unique_id32(),
-        }
-    };
+    // The gateway's own radio address = the `address` base setting (pinned or
+    // UID-derived); set it with `system address` (e.g. `set address=random`).
+    let my_id = shell::radio_address(kv);
     STAT_ID.store(my_id, Ordering::Relaxed);
     let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT_VERSION]);
 
