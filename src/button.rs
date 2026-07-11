@@ -29,11 +29,13 @@
 // only uses a subset.
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::Input;
 use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
 /// A debounced button event.
@@ -111,6 +113,23 @@ impl Default for ButtonChannel {
     }
 }
 
+/// Pending simulated-press duration (ms), delivered to the scan task. See [`simulate`].
+/// Module-global (one virtual button); with two real buttons the signal reaches
+/// whichever scan task is idle first — fine for the single-button products that use it.
+static SIM: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+
+/// Inject a **simulated press held for `ms` milliseconds** into the button scan
+/// machine. Unlike feeding a finished event, this drives the *same* debounce / click /
+/// hold recognition (and its configured [`Config`] timing) over a synthetic
+/// pressed→released profile, so the event(s) it yields are derived exactly as for a
+/// real press: a press shorter than `debounce_press` is rejected, one within
+/// `click_timeout` yields a click, one past `hold_time` yields a hold, etc. Callable
+/// from anywhere (e.g. a shell command) without a [`Button`] handle. The events surface
+/// through the normal [`Button::next_event`] stream.
+pub fn simulate(ms: u32) {
+    SIM.signal(ms);
+}
+
 /// Cheap, copyable handle for consuming button events.
 #[derive(Clone, Copy)]
 pub struct Button {
@@ -122,6 +141,11 @@ impl Button {
     /// events past the queue depth are dropped.
     pub async fn next_event(&self) -> Event {
         self.ch.inner.receive().await
+    }
+
+    /// Handle form of [`simulate`] — inject a simulated press of `ms` milliseconds.
+    pub fn simulate(&self, ms: u32) {
+        simulate(ms);
     }
 }
 
@@ -187,18 +211,27 @@ impl Source {
         }
     }
 
-    /// Wait while the button is idle: EXTI sleeps until the pressed level (the
-    /// MCU may STOP); polled just waits one scan interval.
-    async fn idle_wait(&mut self, active_high: bool, scan_interval: Duration) {
+    /// Wait while the button is idle, waking on a physical press edge OR a
+    /// [`simulate`] request. EXTI sleeps on the pin edge (the MCU may STOP); polled
+    /// waits one scan interval. Returns `Some(ms)` when a simulated press of that
+    /// length was requested, `None` for a physical edge / poll tick.
+    async fn idle_wait(&mut self, active_high: bool, scan_interval: Duration) -> Option<u32> {
         match self {
             Source::Exti(i) => {
-                if active_high {
-                    i.wait_for_high().await;
+                let edge = if active_high {
+                    select(i.wait_for_high(), SIM.wait()).await
                 } else {
-                    i.wait_for_low().await;
+                    select(i.wait_for_low(), SIM.wait()).await
+                };
+                match edge {
+                    Either::First(()) => None,
+                    Either::Second(ms) => Some(ms),
                 }
             }
-            Source::Polled(_) => Timer::after(scan_interval).await,
+            Source::Polled(_) => match select(Timer::after(scan_interval), SIM.wait()).await {
+                Either::First(()) => None,
+                Either::Second(ms) => Some(ms),
+            },
         }
     }
 }
@@ -210,10 +243,20 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
     let mut candidate_since: Option<Instant> = None; // when raw first differed
     let mut press_instant = Instant::now(); // start of the debounced press
     let mut hold_fired = false;
+    let mut sim_until: Option<Instant> = None; // active simulated press ends at this instant
 
     loop {
         let now = Instant::now();
-        let raw = input.is_high() == active_high;
+        // A simulated press reads as "pressed" until its window ends; then it clears and
+        // the physical pin takes over again (which, off the bench, reads released) — so
+        // the machine debounces the synthetic release and fires Release/Click naturally.
+        if matches!(sim_until, Some(until) if now >= until) {
+            sim_until = None;
+        }
+        let raw = match sim_until {
+            Some(_) => true,
+            None => input.is_high() == active_high,
+        };
 
         if raw != pressed {
             // Candidate transition — require the new level to hold long enough.
@@ -246,12 +289,15 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
             }
         }
 
-        if !pressed && !raw && candidate_since.is_none() {
+        if !pressed && !raw && candidate_since.is_none() && sim_until.is_none() {
             // Idle (released, stable): EXTI sleeps on the next press edge; polled
-            // waits one scan interval. Either way we resume the loop on return.
-            input.idle_wait(active_high, config.scan_interval).await;
+            // waits one scan interval; either also wakes on a simulate() request, which
+            // starts a synthetic press the machine then recognises like a real one.
+            if let Some(ms) = input.idle_wait(active_high, config.scan_interval).await {
+                sim_until = Some(Instant::now() + Duration::from_millis(ms as u64));
+            }
         } else {
-            // A press is in progress — keep polling.
+            // A press (real or simulated) is in progress — keep polling.
             Timer::after(config.scan_interval).await;
         }
     }

@@ -36,9 +36,10 @@
 //! `temp-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
 //! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable);
 //! button timing `debounce-press`, `debounce-release`, `click-timeout`, `hold-time`
-//! (ms — applied at boot). The `/button sim <press|release|click|hold>` command injects
-//! synthetic events through the full path (enable check → LED + radio) — the console
-//! "finger" for testing without a physical press, also used by the HIL bench.
+//! (ms — applied at boot). The `/button simulate <ms>` command injects a synthetic press
+//! of that length through the *real* recognition machine (debounce/click/hold) and on
+//! into reporting — the console "finger" for testing without a physical press, also
+//! used by the HIL bench.
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -46,10 +47,8 @@
 #![no_std]
 #![no_main]
 
-use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_futures::select::{Either4, select4};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
 use tower::board::GuardedI2c;
@@ -198,40 +197,34 @@ static BTN_SETTINGS: &[shell::Setting] = &[
     },
 ];
 
-// --- synthetic button events (the HIL bench's finger) ------------------------------
+// --- synthetic button press (the console "finger" / HIL bench) ---------------------
 
-/// `/button sim …` → main loop. Same `button::Event` type as the real button, selected
-/// in the same arm, so the full count/radio path is exercised — not a parallel one.
-static SIM_CH: Channel<CriticalSectionRawMutex, button::Event, 4> = Channel::new();
+/// Longest press `/button simulate` will inject (10 s — well past any hold-time).
+const SIM_MAX_MS: u32 = 10_000;
 
-fn cmd_sim(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
+/// `/button simulate <ms>` — inject a synthetic press held `<ms>` milliseconds into the
+/// button driver, which derives the event(s) through the *real* recognition machine
+/// (debounce / click-timeout / hold-time). So a short press debounces away, a tap
+/// yields a click, a long press yields a hold — the same path a physical press takes,
+/// exercising the configured button timing (which feeding a finished event would skip).
+fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
     use core::fmt::Write as _;
-    let ev = match args.first().copied() {
-        Some("press") => button::Event::Press,
-        Some("release") => button::Event::Release,
-        Some("click") => button::Event::Click,
-        Some("hold") => button::Event::Hold,
-        _ => {
-            let _ = write!(ctx, "usage: /button sim <press|release|click|hold>");
-            return shell::Outcome::code(shell::R_BAD_ARG);
+    match args.first().and_then(|s| s.parse::<u32>().ok()) {
+        Some(ms) if (1..=SIM_MAX_MS).contains(&ms) => {
+            button::simulate(ms);
+            let _ = write!(ctx, "simulating a {ms} ms press");
+            shell::Outcome::ok()
         }
-    };
-    if SIM_CH.try_send(ev).is_ok() {
-        let _ = write!(ctx, "ok");
-        shell::Outcome::ok()
-    } else {
-        let _ = write!(ctx, "sim queue full");
-        shell::Outcome::code(shell::R_STORAGE)
+        _ => {
+            let _ = write!(ctx, "usage: /button simulate <ms> (1..={SIM_MAX_MS})");
+            shell::Outcome::code(shell::R_BAD_ARG)
+        }
     }
 }
 
 static BTN_COMMANDS: &[shell::Entry] = &[shell::Entry::menu(
     "button",
-    &[shell::Entry::cmd(
-        "sim",
-        shell::Args::Names(&["press", "release", "click", "hold"]),
-        cmd_sim,
-    )],
+    &[shell::Entry::cmd("simulate", shell::Args::None, cmd_simulate)],
 )];
 
 // --- LED patterns -------------------------------------------------------------------
@@ -443,18 +436,15 @@ async fn run(b: Board) {
     loop {
         let timer_due = next_temp.min(next_heartbeat);
         match select4(
-            select(btn.next_event(), SIM_CH.receive()),
+            btn.next_event(),
             Timer::at(timer_due),
             accel_int.wait_for_high(),
             console::mgmt_next(),
         )
         .await
         {
-            // --- button (real or simulated — same path) ---
+            // --- button (real or simulated — same recognition path) ---
             Either4::First(ev) => {
-                let ev = match ev {
-                    Either::First(e) | Either::Second(e) => e,
-                };
                 let kind = match ev {
                     button::Event::Press => ButtonKind::Press,
                     button::Event::Release => ButtonKind::Release,
