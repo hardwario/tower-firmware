@@ -98,7 +98,7 @@ macro_rules! app {
             entry = "cortex_m_rt::entry"
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
-            let board = $crate::board::Board::take(spawner);
+            let mut board = $crate::board::Board::take(spawner);
             // Background EEPROM maintenance (incremental compaction + dead-half pre-blanking),
             // on by default so the multi-second synchronous flip stall can't land mid-operation
             // (docs/storage.md). Event-driven: costs an idle node zero wakeups.
@@ -114,6 +114,11 @@ macro_rules! app {
             $crate::console::emit_crash_report();
             let __setup = $setup;
             __setup(&board);
+            // Common TOWER power-on LED signature (500 ms off → 2 s on → 500 ms off).
+            // Runs after the SDK is up (console/shell serving, so the host link is
+            // live throughout) and before the application's `run` — every board, every
+            // app, the same 3 s boot indication.
+            $crate::board::Board::boot_indicator(&mut board).await;
             $run(board).await
         }
     };

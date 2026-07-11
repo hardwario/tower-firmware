@@ -72,6 +72,10 @@ enum Command {
     Background(Option<Pattern>),
     /// Play a one-shot sequence at priority over the background.
     Play(Pattern),
+    /// Play a one-shot pulse train `[on `on_ms`, off `off_ms`] × count` — a
+    /// [`Pattern`] whose timings are known only at runtime (e.g. a configurable
+    /// button-feedback flash), which a `'static` [`Pattern`] can't express.
+    Pulse { on_ms: u32, off_ms: u32, count: u16 },
     /// Change the background→instant switch gap.
     SwitchDelay(Duration),
 }
@@ -108,6 +112,19 @@ impl Led {
     /// Play `seq` once, at priority over the background pattern.
     pub fn play(&self, seq: Pattern) {
         let _ = self.ch.inner.try_send(Command::Play(seq));
+    }
+
+    /// Play a one-shot pulse train — `[on `on_ms`, off `off_ms`] × count` — at
+    /// priority over the background. Unlike [`play`](Self::play), the timings are
+    /// runtime values (for a configurable flash), so no `'static` [`Pattern`] is
+    /// needed. `count == 0` is a no-op.
+    pub fn pulse(&self, on_ms: u32, off_ms: u32, count: u16) {
+        let _ = self.ch.inner.try_send(Command::Pulse { on_ms, off_ms, count });
+    }
+
+    /// One-shot single flash: LED on for `ms`. Shorthand for a 1-count [`pulse`](Self::pulse).
+    pub fn flash(&self, ms: u32) {
+        self.pulse(ms, 0, 1);
     }
 
     /// Set the looping background pattern, or `None` to turn the background off.
@@ -172,6 +189,21 @@ async fn dispatcher(mut pin: Output<'static>, ch: &'static LedChannel, active_hi
                     Timer::after(switch_delay).await;
                 }
                 play(&mut pin, seq, active_high).await;
+                apply(&mut pin, false, active_high);
+            }
+            Command::Pulse { on_ms, off_ms, count } => {
+                if background.is_some() {
+                    apply(&mut pin, false, active_high);
+                    Timer::after(switch_delay).await;
+                }
+                for _ in 0..count {
+                    apply(&mut pin, true, active_high);
+                    Timer::after_millis(on_ms as u64).await;
+                    apply(&mut pin, false, active_high);
+                    if off_ms > 0 {
+                        Timer::after_millis(off_ms as u64).await;
+                    }
+                }
                 apply(&mut pin, false, active_high);
             }
         }

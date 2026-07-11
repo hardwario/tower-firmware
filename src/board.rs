@@ -9,7 +9,7 @@
 use embassy_executor::Spawner;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler};
 use embassy_stm32::flash::Flash;
-use embassy_stm32::gpio::Pull;
+use embassy_stm32::gpio::{Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals::{DMA1_CH3, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
@@ -105,7 +105,36 @@ pub struct Board {
     pub radio_irq: ExtiInput<'static, Async>,
 }
 
+/// Boot indicator timings — the common HARDWARIO TOWER power-on signature every
+/// board plays before its application starts (driven by [`Board::boot_indicator`],
+/// called from the [`app!`](crate::app) macro). Total 3 s.
+const BOOT_SETTLE_MS: u64 = 500; // do nothing first — let the supply settle (a
+// battery can bounce on its contacts at insertion), so a brown-out during this
+// window re-runs cleanly rather than mid-application.
+const BOOT_ON_MS: u64 = 2000; // LED solid on — "powered, booting".
+const BOOT_TAIL_MS: u64 = 500; // LED off — a clear gap before the app takes the LED.
+
 impl Board {
+    /// Play the common TOWER power-on LED signature on the board LED (PH1,
+    /// active-high): **500 ms off → 2 s on → 500 ms off**, then return. Called by
+    /// the [`app!`](crate::app) macro after the SDK is up and before the app's
+    /// `run`, so every board — whatever the app — shows the same 3 s boot
+    /// indication. Borrows the LED pin for the duration and hands it back, so the
+    /// app still owns `board.led` for its own [`led::init`](crate::led::init).
+    ///
+    /// Async, not blocking: the awaits let the console come up and drain the boot
+    /// backlog during the signature (the `Hello`/boot logs are emitted meanwhile),
+    /// so only the *application* is delayed by the 3 s, not the host link.
+    pub async fn boot_indicator(&mut self) {
+        let mut led = Output::new(self.led.reborrow(), Level::Low, Speed::Low);
+        embassy_time::Timer::after_millis(BOOT_SETTLE_MS).await;
+        led.set_high();
+        embassy_time::Timer::after_millis(BOOT_ON_MS).await;
+        led.set_low();
+        embassy_time::Timer::after_millis(BOOT_TAIL_MS).await;
+        // `led` drops here → the pin is released back to `self.led` for the app.
+    }
+
     /// Initialise the board and return its resources. Call once at start-up —
     /// typically via [`app!`](crate::app). Performs the always-on setup: clocks,
     /// the serial console, TMP112 shutdown, and **USB-aware power management**
