@@ -20,14 +20,13 @@
 //!   `JoinOpen` (host-initiated OTA join).
 //!
 //! Each of the four button events has a **master enable**: a disabled event is ignored
-//! entirely — neither reported over radio nor shown on the LED. An enabled event both
-//! sends its uplink and flashes the LED (its flash on-time is configurable; `0` = no
-//! LED, e.g. to save power). Distinct **shapes** keep events apart on the single LED —
-//! press/release/hold are one pulse, a click is a double-blink — because a quick tap
-//! fires Press on the down edge and Release+Click together on the up edge, so a shared
-//! shape would blend. The default is the coherent **gesture** scheme: click + hold on,
-//! press + release off (the edges blend with a click on a tap); enable press/release
-//! for raw-edge reporting.
+//! entirely — neither reported over radio nor shown on the LED. The event *recognition*
+//! timing is configurable (debounce, click-timeout, hold-time — what the physical input
+//! means); the LED feedback is a fixed indicator (press/release/hold a single pulse, a
+//! click a double-blink — distinct shapes because a quick tap fires Press on the down
+//! edge and Release+Click together on the up edge, so a shared shape would blend). The
+//! default is the coherent **gesture** scheme: click + hold on, press + release off;
+//! enable press/release for raw-edge reporting.
 //!
 //! All boards also play the common power-on signature first (500 ms off → 2 s on →
 //! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)) — this
@@ -35,11 +34,11 @@
 //!
 //! Settings (remote-shell reconfigurable, `/system settings set …`): `temp-period`,
 //! `temp-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
-//! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable) +
-//! `led-{…}-ms` (LED flash on-time, 0–5000 ms, 0 = no LED). The `/button sim
-//! <press|release|click|hold>` command injects synthetic events through the full path
-//! (enable check → LED + radio) — the console "finger" for testing without a physical
-//! press, also used by the HIL bench.
+//! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable);
+//! button timing `debounce-press`, `debounce-release`, `click-timeout`, `hold-time`
+//! (ms — applied at boot). The `/button sim <press|release|click|hold>` command injects
+//! synthetic events through the full path (enable check → LED + radio) — the console
+//! "finger" for testing without a physical press, also used by the HIL bench.
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -91,21 +90,29 @@ const SET_TEMP_DELTA: u8 = 0x11;
 const SET_ACCEL: u8 = 0x12;
 const SET_HEARTBEAT: u8 = 0x13;
 
-// Per-button-event configuration. `<event>` is the master enable: a disabled event is
-// ignored entirely — NOT reported over radio and no LED. `led-<event>-ms` is that
-// event's LED flash on-time when enabled (0 = report it but don't flash the LED, e.g.
-// to save power). Each of the four events is independently switchable and timed.
+// Per-button-event master enable: a disabled event is ignored entirely — NOT reported
+// over radio and no LED. Each of the four events is independently switchable.
 const SET_PRESS: u8 = 0x20;
-const SET_LED_PRESS_MS: u8 = 0x21;
 const SET_RELEASE: u8 = 0x22;
-const SET_LED_RELEASE_MS: u8 = 0x23;
 const SET_CLICK: u8 = 0x24;
-const SET_LED_CLICK_MS: u8 = 0x25;
 const SET_HOLD: u8 = 0x26;
-const SET_LED_HOLD_MS: u8 = 0x27;
-/// Shared flash-duration bounds (ms) for every event's LED. 0 = no LED for that event.
-const LED_MS_MIN: u32 = 0;
-const LED_MS_MAX: u32 = 5000;
+
+// Button *recognition* timing (ms) → `button::Config`. These shape what the physical
+// input means: how long the level must hold to count as a press/release, the longest
+// press+release that still reads as a click, and the hold-to-trigger duration. Read
+// once at boot (a change needs a reboot, like `accel`).
+const SET_DEBOUNCE_PRESS: u8 = 0x30;
+const SET_DEBOUNCE_RELEASE: u8 = 0x31;
+const SET_CLICK_TIMEOUT: u8 = 0x32;
+const SET_HOLD_TIME: u8 = 0x33;
+
+// Fixed LED-feedback shapes/timings (not user-configurable — the LED is just an
+// indicator). press/release/hold flash a single pulse; a click is a double-blink of
+// two `LED_CLICK_MS` blinks so it reads apart from an adjacent press on the one LED.
+const LED_PRESS_MS: u32 = 250;
+const LED_RELEASE_MS: u32 = 250;
+const LED_CLICK_MS: u32 = 100;
+const LED_HOLD_MS: u32 = 1000;
 
 static BTN_SETTINGS: &[shell::Setting] = &[
     shell::Setting {
@@ -132,27 +139,16 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         kind: shell::Kind::Uint { min: 60, max: 86_400 },
         default: "900",
     },
-    // Button events. `<event>` enables the event (report over radio + LED feedback); a
-    // disabled event is ignored entirely. `led-<event>-ms` is the LED flash on-time
-    // (0 = report but no LED). Default = the coherent **gesture** scheme: click + hold
-    // ON, press + release OFF — a click is a quick press+release, so reporting all four
-    // is redundant and their LEDs blend on a tap; enable press/release for raw edges.
-    // Shapes keep them apart on the one LED: edges/hold = one pulse, click = a
-    // double-blink (each blink the configured length).
+    // Button events — each a master enable (report over radio + fixed LED feedback); a
+    // disabled event is ignored entirely. Default = the coherent **gesture** scheme:
+    // click + hold ON, press + release OFF (a click is a quick press+release, so
+    // reporting all four is redundant and their LEDs blend on a tap; enable
+    // press/release for raw edges).
     shell::Setting {
         key: SET_PRESS,
         name: "press",
         kind: shell::Kind::Bool,
         default: "off",
-    },
-    shell::Setting {
-        key: SET_LED_PRESS_MS,
-        name: "led-press-ms",
-        kind: shell::Kind::Uint {
-            min: LED_MS_MIN,
-            max: LED_MS_MAX,
-        },
-        default: "250",
     },
     shell::Setting {
         key: SET_RELEASE,
@@ -161,28 +157,10 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         default: "off",
     },
     shell::Setting {
-        key: SET_LED_RELEASE_MS,
-        name: "led-release-ms",
-        kind: shell::Kind::Uint {
-            min: LED_MS_MIN,
-            max: LED_MS_MAX,
-        },
-        default: "250",
-    },
-    shell::Setting {
         key: SET_CLICK,
         name: "click",
         kind: shell::Kind::Bool,
         default: "on",
-    },
-    shell::Setting {
-        key: SET_LED_CLICK_MS,
-        name: "led-click-ms",
-        kind: shell::Kind::Uint {
-            min: LED_MS_MIN,
-            max: LED_MS_MAX,
-        },
-        default: "100",
     },
     shell::Setting {
         key: SET_HOLD,
@@ -190,12 +168,31 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         kind: shell::Kind::Bool,
         default: "on",
     },
+    // Button recognition timing (ms) — applied at boot (reboot to change).
     shell::Setting {
-        key: SET_LED_HOLD_MS,
-        name: "led-hold-ms",
+        key: SET_DEBOUNCE_PRESS,
+        name: "debounce-press",
+        kind: shell::Kind::Uint { min: 1, max: 1000 },
+        default: "20",
+    },
+    shell::Setting {
+        key: SET_DEBOUNCE_RELEASE,
+        name: "debounce-release",
+        kind: shell::Kind::Uint { min: 1, max: 1000 },
+        default: "20",
+    },
+    shell::Setting {
+        key: SET_CLICK_TIMEOUT,
+        name: "click-timeout",
+        kind: shell::Kind::Uint { min: 50, max: 5000 },
+        default: "500",
+    },
+    shell::Setting {
+        key: SET_HOLD_TIME,
+        name: "hold-time",
         kind: shell::Kind::Uint {
-            min: LED_MS_MIN,
-            max: LED_MS_MAX,
+            min: 100,
+            max: 10_000,
         },
         default: "1000",
     },
@@ -286,25 +283,28 @@ fn event_enabled(kv: Nv, ev: button::Event) -> bool {
     read_bool_setting(kv, key, default)
 }
 
-/// Flash the LED for one (already enabled) button event, per its configured on-time
-/// (`0` = no LED). Distinct shapes: press/release/hold are a single pulse; a click is a
-/// double-blink (each blink the configured length) so it reads apart from an adjacent
-/// press even on the one LED. Immediate, fire-and-forget — the LED dispatcher owns the
-/// timing; the uplink follows independently.
-fn led_feedback(led: &led::Led, kv: Nv, ev: button::Event) {
-    let (ms_key, ms_default) = match ev {
-        button::Event::Press => (SET_LED_PRESS_MS, 250),
-        button::Event::Release => (SET_LED_RELEASE_MS, 250),
-        button::Event::Click => (SET_LED_CLICK_MS, 100),
-        button::Event::Hold => (SET_LED_HOLD_MS, 1000),
-    };
-    let ms = read_u32_setting(kv, ms_key, ms_default);
-    if ms == 0 {
-        return; // enabled event, LED suppressed
-    }
+/// Flash the LED for one (already enabled) button event with its fixed shape:
+/// press/release/hold a single pulse, a click a double-blink so it reads apart from an
+/// adjacent press even on the one LED. Immediate, fire-and-forget — the LED dispatcher
+/// owns the timing; the uplink follows independently.
+fn led_feedback(led: &led::Led, ev: button::Event) {
     match ev {
-        button::Event::Click => led.pulse(ms, ms, 2), // double-blink (on ms / off ms) ×2
-        _ => led.flash(ms),
+        button::Event::Press => led.flash(LED_PRESS_MS),
+        button::Event::Release => led.flash(LED_RELEASE_MS),
+        button::Event::Click => led.pulse(LED_CLICK_MS, LED_CLICK_MS, 2),
+        button::Event::Hold => led.flash(LED_HOLD_MS),
+    }
+}
+
+/// Build the button recognition config from the persisted timing settings (read once
+/// at boot). `scan_interval` stays a fixed internal poll rate.
+fn button_config(kv: Nv) -> button::Config {
+    button::Config {
+        scan_interval: Duration::from_millis(5),
+        debounce_press: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_PRESS, 20) as u64),
+        debounce_release: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_RELEASE, 20) as u64),
+        click_timeout: Duration::from_millis(read_u32_setting(kv, SET_CLICK_TIMEOUT, 500) as u64),
+        hold_time: Duration::from_millis(read_u32_setting(kv, SET_HOLD_TIME, 1000) as u64),
     }
 }
 
@@ -343,7 +343,7 @@ async fn run(b: Board) {
         b.spawner,
         b.button,
         button::Polarity::ActiveHigh,
-        button::Config::default(),
+        button_config(b.kv), // debounce / click-timeout / hold-time from settings
         &BTN_CH,
     );
     let mut accel_int = b.accel_int;
@@ -483,7 +483,7 @@ async fn run(b: Board) {
                 if !event_enabled(kv, ev) {
                     continue;
                 }
-                led_feedback(&led, kv, ev); // immediate local feedback (LED-ms 0 = none)
+                led_feedback(&led, ev); // immediate local feedback (fixed shape)
                 // Click/Hold are the semantic events — worth more repetitions than the
                 // raw press/release edges around them.
                 let reps = match kind {
