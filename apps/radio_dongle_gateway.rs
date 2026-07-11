@@ -58,8 +58,9 @@ use tower_protocol::{MsgType, decode_frame};
 
 /// Registry format version marker (`tower_gw_core::registry::FORMAT_VERSION`).
 const KEY_FORMAT: u8 = 0x00;
-/// Registry buckets 0..=5 (one `tower-gw-core` bucket per KV value). The gateway's own
-/// radio address is the `address` base setting (`shell::radio_address`).
+/// Registry buckets, locals `0x10..=0x12` (one `tower-gw-core` bucket per KV value;
+/// `registry::BUCKETS` = 3). `0x13..=0x15` stay reserved for bucket growth. The gateway's
+/// own radio address is the `address` base setting (`shell::radio_address`).
 const KEY_BUCKET_BASE: u8 = 0x10;
 
 /// The registry's bucket store: `NS_APP` locals `0x10..=0x15`.
@@ -181,13 +182,20 @@ struct LinkStat {
     uplinks: u16,
 }
 
-// One link-stat slot per registered node (16 = registry CAPACITY / net-layer
-// MAX_PEERS): a slot fills on a node's first uplink and frees on NodeRemove.
-struct Stats([Option<LinkStat>; 16]);
+// The registry, the net peer table, and the link-stat array MUST stay the same size:
+// if the registry could hold more nodes than the peer table, the boot mirror would
+// silently drop the excess and those nodes' uplinks would fail CCM auth against the
+// default lane — paired nodes going dead with no host-visible signal. MAX_PEERS has
+// moved twice already (64→32→16); pin the coupling here, the one crate that sees both.
+const _: () = assert!(registry::CAPACITY == tower::radio::net::MAX_PEERS);
+
+// One link-stat slot per registered node (registry CAPACITY == net-layer MAX_PEERS,
+// pinned above): a slot fills on a node's first uplink and frees on NodeRemove.
+struct Stats([Option<LinkStat>; registry::CAPACITY]);
 
 impl Stats {
     const fn new() -> Self {
-        Self([None; 16])
+        Self([None; registry::CAPACITY])
     }
     fn on_uplink(&mut self, id: u32, rssi_dbm: i16) {
         let rssi = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8;
@@ -335,7 +343,22 @@ async fn run(b: Board) {
     // UID-derived); set it with `system address` (e.g. `set address=random`).
     let my_id = shell::radio_address(kv);
     STAT_ID.store(my_id, Ordering::Relaxed);
-    let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT_VERSION]);
+    // Registry format guard: refuse buckets written by a NEWER format (a firmware
+    // downgrade) instead of mis-decoding them as empty and stamping the marker back —
+    // which would silently discard every pairing. v1-or-unset stamps and proceeds.
+    let mut fmt = [0u8; 1];
+    let newer_format =
+        matches!(app_kv.get_bytes(KEY_FORMAT, &mut fmt), Ok(Some(1)) if fmt[0] > registry::FORMAT_VERSION);
+    if newer_format {
+        log::error!(
+            target: "gateway",
+            "registry format v{} is newer than this firmware understands (v{}) — registry left untouched; update the firmware",
+            fmt[0],
+            registry::FORMAT_VERSION
+        );
+    } else {
+        let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT_VERSION]);
+    }
 
     let band = read_band_setting(kv);
     let channel = read_u32_setting(kv, SET_CHANNEL, 0) as u8;
@@ -369,12 +392,19 @@ async fn run(b: Board) {
         }
     };
 
-    // Install every registered node into the peer table, bucket-at-a-time.
+    // Install every registered node into the peer table, bucket-at-a-time. CAPACITY ==
+    // MAX_PEERS is pinned above, so a refusal here is a real invariant break — a node
+    // the registry holds but the radio won't decrypt for. Say so instead of going mute.
+    // (Skipped under the newer-format guard: those buckets must not be interpreted.)
     let mut node_count = 0u32;
-    for i in 0..registry::BUCKETS {
-        for rec in registry::load(&buckets, i).iter() {
-            net.add_peer(rec.id, &rec.key);
-            node_count += 1;
+    if !newer_format {
+        for i in 0..registry::BUCKETS {
+            for rec in registry::load(&buckets, i).iter() {
+                if !net.add_peer(rec.id, &rec.key) {
+                    warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", rec.id);
+                }
+                node_count += 1;
+            }
         }
     }
     STAT_NODES.store(node_count, Ordering::Relaxed);
@@ -394,9 +424,14 @@ async fn run(b: Board) {
     let mut last_stat = Instant::now();
 
     loop {
-        // 1. Drain management requests (host → gateway). Non-blocking so the radio
-        //    keeps priority; depth-1 channel means a dropped burst is just retried.
-        while let Some(frame) = console::mgmt_try_next() {
+        // 1. Serve management requests (host → gateway) — but at most two per loop
+        //    iteration, so a host polling faster than the response-transmit time can't
+        //    starve the radio recv slice below (depth-1 channel: a dropped burst is
+        //    just retried by the host anyway).
+        for _ in 0..2 {
+            let Some(frame) = console::mgmt_try_next() else {
+                break;
+            };
             let Ok((MsgType::MgmtRequest, _seq, payload)) = decode_frame(&frame) else {
                 continue;
             };
@@ -424,7 +459,14 @@ async fn run(b: Board) {
         // 2. Radio: either a pairing-window slice or a receive slice — the two share
         //    the one radio, and pairing mode is explicit + short-lived.
         if let Some(sess) = pairing.as_ref() {
-            if Instant::now() >= sess.deadline {
+            if registry::count(&buckets) >= registry::CAPACITY {
+                // The registry filled while the window was open (a concurrent cable
+                // NodeAdd): close early instead of letting a node complete the JOIN,
+                // persist its side, and then be refused — half-paired and unreachable.
+                respond_empty(sess.req_id, mgmt::MGMT_FULL).await;
+                led.set_background(Some(HEARTBEAT));
+                pairing = None;
+            } else if Instant::now() >= sess.deadline {
                 respond_empty(sess.req_id, mgmt::MGMT_TIMEOUT).await;
                 led.set_background(Some(HEARTBEAT));
                 pairing = None;
@@ -522,7 +564,9 @@ async fn commit_pairing(
     };
     match registry::add(buckets, &rec) {
         Ok(()) => {
-            net.add_peer(node_id, &key);
+            if !net.add_peer(node_id, &key) {
+                warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", node_id);
+            }
             STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
             info!(target: "gateway", "paired node {:08X}", node_id);
             respond_record(req_id, &Paired { node_id }).await;
@@ -617,7 +661,9 @@ async fn handle_mgmt(
                 },
             ) {
                 Ok(()) => {
-                    net.add_peer(id, &key);
+                    if !net.add_peer(id, &key) {
+                        warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", id);
+                    }
                     STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
                     info!(target: "gateway", "node {:08X} added ({})", id, name);
                     respond_empty(req_id, mgmt::MGMT_OK).await;
@@ -726,15 +772,18 @@ async fn handle_mgmt(
         }
         MgmtOp::QueueDrop { node, item } => {
             let dropped = match item {
-                Some(id) => match queue.pop(id) {
-                    Some(it) if it.node == node => 1,
-                    Some(it) => {
-                        // Wrong node for that id — refuse without losing the item.
-                        let _ = queue.push(it.node, it.ttl_s, it.data(), now_ms);
+                // Check the id→node binding BEFORE popping: a pop-then-re-push refusal
+                // would re-mint the item under a fresh id (dangling the host's handle)
+                // and move it to the back of its node's FIFO.
+                Some(id) => {
+                    let owner = queue.iter().find(|it| it.id == id).map(|it| it.node);
+                    if owner == Some(node) {
+                        queue.pop(id);
+                        1
+                    } else {
                         0
                     }
-                    None => 0,
-                },
+                }
                 None => queue.drop_node(node),
             };
             net.set_pending(node, queue.count_for(node) > 0);

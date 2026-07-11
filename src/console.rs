@@ -69,8 +69,11 @@ const MAX_MSG: usize = 192;
 const MOD_LEN: usize = 24;
 /// Max shell-response text buffered per message. Longer than one frame holds — the
 /// writer splits it into [`SHELL_CHUNK`]-sized frames (`chunk`/`last`), which the
-/// host reassembles by `cmd_id`.
+/// host reassembles by `cmd_id`. Must equal [`crate::shell::RESP_CAP`] (asserted): if
+/// this shrank alone, responses would silently clip AFTER the shell already computed
+/// its `R_OK`/`R_TRUNCATED` verdict — a "complete" `/export` that isn't.
 const MAX_RESP: usize = 256;
+const _: () = assert!(MAX_RESP == crate::shell::RESP_CAP);
 /// Shell-response text bytes per frame. Kept well under the ~240-byte payload budget
 /// (a [`ShellResponse`] header is ~9 bytes) so a frame never fails to encode.
 const SHELL_CHUNK: usize = 192;

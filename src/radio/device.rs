@@ -239,7 +239,7 @@ impl Spirit1 {
     /// 2026-07-11: a node locked at ~9.6 mA after its first post-STOP uplink, radio
     /// confirmed in SLEEP the whole time). Masking every IRQ and reading the
     /// read-to-clear status word forces nIRQ high before we sleep, so the pin can't
-    /// veto STOP. Re-armed by [`rx`]/[`tx`], which set their own masks.
+    /// veto STOP. Re-armed by [`Self::rx`]/[`Self::tx`], which set their own masks.
     pub async fn to_sleep(&mut self) -> Result<(), RadioError> {
         self.set_irq_mask(0)?;
         let _ = self.irq_status();

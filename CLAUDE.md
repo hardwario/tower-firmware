@@ -10,8 +10,8 @@ TODO). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`)
 over the UART bootloader via the
 `tower` CLI. Standalone device control (logs/console/reset/erase/devices) is the CLI's own
-job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/gateway.md` (the push-button + gateway product). Host tests:
-`just test` (the `tower-kv` + `tower-net-core` + `tower-radio-core` + `tower-gw-core` crates —
+job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/storage.md`, `docs/gateway.md` (the push-button + gateway product). Host tests:
+`just test` (the `tower-kv` + `tower-net-core` + `tower-radio-core` + `tower-gw-core` + `tower-shell-core` crates —
 the firmware itself is `no_std` and can't `cargo test`).
 
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep

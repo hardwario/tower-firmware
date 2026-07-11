@@ -13,8 +13,14 @@
 
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
-/// Protocol version (`bits[7:5]` of `ver_type`).
+/// Protocol version (`bits[7:5]` of `ver_type`). Caps at 7 — and value 7 is reserved
+/// as the extension escape ("real version elsewhere"), never a normal bump, so fielded
+/// firmwares that hard-reject unknown versions can still be reasoned about at v8+.
 pub const VERSION: u8 = 1;
+const _: () = assert!(
+    VERSION < 7,
+    "radio frame version field is 3 bits; 7 is the reserved escape"
+);
 /// Header size without a bulk index (ver_type+flags+src+dest+counter).
 pub const HDR_LEN: usize = 14;
 /// Header size with the 3-byte bulk index.

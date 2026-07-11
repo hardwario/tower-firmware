@@ -251,7 +251,9 @@ impl Net {
     /// compliance histogram.
     #[must_use]
     pub fn fhss_channel_airtime_ms(&self, ch: u8) -> u32 {
-        self.fhss.airtime_ms[ch as usize] as u32
+        // `.get`, not `[]`: a caller-supplied `ch >= FHSS_N` must return 0, not panic
+        // (a panic on this public diagnostic getter is a HardFault reset on the L0).
+        self.fhss.airtime_ms.get(ch as usize).map_or(0, |&v| v as u32)
     }
 
     /// Channel for slot `slot_abs` under `seed`.

@@ -161,7 +161,7 @@ The radio stack adds ~20 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`) — the
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
 and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
 file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
-net_confirmed`.
+example net_confirmed`.
 
 ### Writing an app
 

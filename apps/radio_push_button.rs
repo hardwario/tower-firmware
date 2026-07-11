@@ -648,6 +648,13 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
     delivered
 }
 
+/// Last remote-shell command executed, for at-least-once dedup: bit 24 = valid,
+/// bits 23..16 = result, bits 15..0 = cmd_id. Written only by the main task (M0+
+/// load/store is enough). RAM-only — survives the delivery retries that matter
+/// (same boot); a reboot-command redelivery after the reboot re-executes, bounded
+/// by the item's TTL and ended by the first delivery ACK that gets through.
+static LAST_REMOTE_CMD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
 /// whether a downlink actually arrived (false = window expired, stop chaining).
 async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
@@ -665,9 +672,24 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
         }
         let (cmd_id, result, reboot, out) = match decode_node_cmd(rx.data()) {
             Ok(NodeCmd::Shell { cmd_id, line }) => {
+                // The gateway's queue is at-least-once: if our delivery ACK is lost it
+                // re-sends the same command under a fresh counter (the replay lane
+                // can't help). Executing twice is wrong for anything non-idempotent
+                // (`system reboot`, a toggling set), so dedup by cmd_id: on a repeat,
+                // skip run_line and just re-complete the protocol with the cached
+                // result (the full text already went up with the first execution).
+                use core::sync::atomic::Ordering::Relaxed;
+                let last = LAST_REMOTE_CMD.load(Relaxed);
+                if last & (1 << 24) != 0 && (last & 0xFFFF) as u16 == cmd_id {
+                    let result = ((last >> 16) & 0xFF) as u8;
+                    info!(target: "button", "remote shell: duplicate cmd {} — not re-run", cmd_id);
+                    send_shell_chunks(net, gw_id, cmd_id, result, "").await;
+                    return true;
+                }
                 info!(target: "button", "remote shell: {}", line);
                 let mut out: heapless::String<{ shell::RESP_CAP }> = heapless::String::new();
                 let (result, reboot) = shell::run_line(line, &mut out);
+                LAST_REMOTE_CMD.store((1 << 24) | ((result as u32) << 16) | cmd_id as u32, Relaxed);
                 (cmd_id, result, reboot, out)
             }
             Err(tower_protocol::Error::BadVersion { got }) => {
@@ -675,11 +697,13 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
                     target: "button",
                     "downlink schema v{} unsupported (this build: v{})", got, RADIO_SCHEMA_VERSION
                 );
-                return true;
+                // Nothing exchanged that would clear the pending flag — stop chaining
+                // rather than burn another full RX window on the same bad item.
+                return false;
             }
             Err(_) => {
                 warn!(target: "button", "downlink malformed — dropped");
-                return true;
+                return false;
             }
         };
         send_shell_chunks(net, gw_id, cmd_id, result, out.as_str()).await;
@@ -782,12 +806,12 @@ async fn handle_mgmt(
                 band: p.band,
                 channel: p.channel,
             };
-            if app_kv.set(KEY_PROVISION, &rec).is_err() {
-                respond_empty(req_id, mgmt::MGMT_STORAGE).await;
-                return;
-            }
             // An optional address override pins the `address` base setting (the same
             // one `system address` edits), so the node comes up under it after reboot.
+            // Written FIRST: the provision record below is the single commit point, so
+            // a storage failure can't leave the node durably provisioned while the
+            // host was told MGMT_STORAGE (a dangling address pin, by contrast, has no
+            // radio effect until a provision succeeds).
             let effective_id = match p.my_id {
                 Some(id) if id != 0 => {
                     if kv
@@ -802,6 +826,10 @@ async fn handle_mgmt(
                 }
                 _ => my_id,
             };
+            if app_kv.set(KEY_PROVISION, &rec).is_err() {
+                respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                return;
+            }
             respond_record(req_id, &ProvisionAck { id: effective_id }).await;
             info!(target: "button", "provisioned for gateway {:08X} — rebooting", p.gw_id);
             // Band/channel/id take effect at Net::new — reboot into the new identity

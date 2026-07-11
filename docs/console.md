@@ -303,8 +303,9 @@ Settings are **declarative**: an app provides a `&'static [Setting]` table and t
 shell derives `print` / `set` / `get` / `export` and completion from it — no
 per-setting code. Each `Setting.key` is a **`u8` local** within the shell's EEPROM
 namespace (`NS_SHELL`) — the shell prefixes it, so app keys can't collide with other
-subsystems. The SDK base table reserves `0x00` (`identity`) and `0x01` (`address`); pick
-any other `u8` for your app settings.
+subsystems. **`0x00..=0x0F` is reserved for the SDK base table** (`identity` = `0x00`,
+`address` = `0x01`, the rest headroom for base growth); app settings start at `0x10`.
+The partition is load-bearing: a key collision silently aliases two settings' storage.
 
 ```rust
 use tower::shell::{Setting, Kind};

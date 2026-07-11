@@ -100,8 +100,10 @@ pub enum Kind {
 /// and `/export` from the table — no per-setting code.
 pub struct Setting {
     /// Local key within the shell namespace (`NS_SHELL`); the shell prefixes it, so a setting can
-    /// never collide with another subsystem's keys. App settings pick any free local (the base
-    /// `identity` setting uses `0x00`).
+    /// never collide with another subsystem's keys. **`0x00..=0x0F` is reserved for the SDK base
+    /// table** (`identity` = `0x00`, `address` = `0x01`, the rest headroom for base growth) — app
+    /// settings start at `0x10`. A collision doesn't error: two settings would silently alias the
+    /// same stored bytes, so the partition is load-bearing for persisted config.
     pub key: u8,
     /// Name used on the command line and in `print`/`export`.
     pub name: &'static str,
@@ -134,7 +136,7 @@ static BASE_SETTINGS: &[Setting] = &[
 ];
 
 /// The device's effective 32-bit radio address: the `address` base setting when pinned
-/// to a non-zero value, else the chip-UID-derived default ([`board::unique_id32`]).
+/// to a non-zero value, else the chip-UID-derived default ([`crate::board::unique_id32`]).
 /// This is the `my_id` / clear-header `src` a radio app should transmit under.
 pub fn radio_address(kv: Nv) -> u32 {
     let mut b = [0u8; 4];
@@ -651,10 +653,28 @@ fn cmd_export(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let table = ctx.settings;
     for s in table.iter() {
         let mut val = String::<MAX_SETTING>::new();
-        read_value(ctx.kv, s, &mut val);
+        // `get` deliberately shows an unset/auto address as the *effective* UID-derived
+        // value — but exporting that literal would pin it on whatever device replays
+        // the export (two nodes sharing one radio address share a replay lane: the
+        // lower-counter one goes silently dead). Export the stored sentinel instead.
+        if matches!(s.kind, Kind::Addr) && stored_addr(ctx.kv, s.key).unwrap_or(0) == 0 {
+            let _ = val.push_str("auto");
+        } else {
+            read_value(ctx.kv, s, &mut val);
+        }
         let _ = write!(ctx, "/system settings set {}={}\r\n", s.name, val);
     }
     Outcome::ok()
+}
+
+/// The raw stored `Addr` value for `key`, `None` when unset/unreadable (both of which
+/// read back as the `auto` sentinel `0` for export purposes).
+fn stored_addr(kv: Scoped, key: u8) -> Option<u32> {
+    let mut b = [0u8; 4];
+    match kv.get_bytes(key, &mut b) {
+        Ok(Some(4)) => Some(u32::from_le_bytes(b)),
+        _ => None,
+    }
 }
 
 // ---- derived settings commands ----------------------------------------------
@@ -693,6 +713,18 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         let _ = write!(ctx, "usage: set <name>=<value>");
         return Outcome::code(R_BAD_ARG);
     };
+    // The tokenizer splits on `/`, space, and tab, so a value containing one arrives
+    // as EXTRA tokens (`identity=a/b` → ["identity=a", "b"]). Storing just the first
+    // piece and answering `ok` would be silent truncation — reject instead.
+    let consumed = if args.first().is_some_and(|a| a.contains('=')) {
+        1
+    } else {
+        2
+    };
+    if args.len() > consumed {
+        let _ = write!(ctx, "value must not contain '/', space, or tab");
+        return Outcome::code(R_BAD_ARG);
+    }
     let table = ctx.settings;
     let Some(s) = table.find(name) else {
         let _ = write!(ctx, "no such setting: {name}");
