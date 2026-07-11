@@ -299,12 +299,74 @@ pub fn unique_id32() -> u32 {
     if id == 0 { 1 } else { id }
 }
 
-/// A best-effort random `u32` — **not cryptographic**. Seeds an xorshift from the chip
-/// UID, the current uptime tick, and a rolling internal state, so successive calls (and
-/// different units) diverge; the live entropy is *when* it is called. Enough to mint a
-/// unique network address (`system address random`); for secret randomness use a real
-/// TRNG.
+/// A random `u32` from the STM32L0's hardware **TRNG** (analog-noise entropy source,
+/// RM0367 §21). The L0's RNG is clocked off HSI48 (48 MHz RC), which the TOWER clock
+/// tree keeps *off* — there is no USB — so this momentarily spins HSI48 up, gates the
+/// RNG on, draws one conditioned word, then powers both back down to leave the STOP-mode
+/// baseline exactly as it found it. No `.await` inside, so it runs to completion without
+/// another task racing the RCC. If the RNG never readies (or a clock error trips), it
+/// falls back to [`rand_u32_sw`] so the caller always gets a usable non-zero value.
+///
+/// One-shot use only (minting a `system address random`); the per-packet backoff/pairing
+/// randomness in the net layer stays on its own cheap software PRNG. Network addresses are
+/// not secrets; AES keys remain host-minted by design (see the gateway pairing flow).
 pub fn rand_u32() -> u32 {
+    use embassy_stm32::pac::rcc::vals::Clk48sel;
+    use embassy_stm32::pac::{RCC, RNG};
+
+    // Bring up HSI48 and point the 48 MHz clock mux at it (reset default is the PLL,
+    // which we don't run). Bail to the SW path if the RC never stabilises.
+    RCC.crrcr().modify(|w| w.set_hsi48on(true));
+    let mut spins = 0u32;
+    while !RCC.crrcr().read().hsi48rdy() {
+        spins += 1;
+        if spins > 100_000 {
+            RCC.crrcr().modify(|w| w.set_hsi48on(false));
+            return rand_u32_sw();
+        }
+    }
+    RCC.ccipr().modify(|w| w.set_clk48sel(Clk48sel::HSI48));
+    RCC.ahbenr().modify(|w| w.set_rngen(true));
+    RNG.cr().write(|w| w.set_rngen(true)); // rngen=1, ie=0, ced=0 (clock-check on)
+
+    // Wait for a conditioned word. A seed error (SEIS) means "clear it, toss a word,
+    // retry"; a clock error (CEIS) or a stall drops us to the SW fallback.
+    let mut out = 0u32;
+    'read: for _ in 0..64 {
+        spins = 0;
+        loop {
+            let sr = RNG.sr().read();
+            if sr.ceis() {
+                break 'read;
+            }
+            if sr.seis() {
+                RNG.sr().modify(|w| w.set_seis(false));
+                let _ = RNG.dr().read();
+                break; // retry the outer loop
+            }
+            if sr.drdy() {
+                out = RNG.dr().read();
+                break 'read;
+            }
+            spins += 1;
+            if spins > 100_000 {
+                break 'read;
+            }
+        }
+    }
+
+    // Return the clock tree to its low-power baseline.
+    RNG.cr().write(|w| w.set_rngen(false));
+    RCC.ahbenr().modify(|w| w.set_rngen(false));
+    RCC.crrcr().modify(|w| w.set_hsi48on(false));
+
+    if out != 0 { out } else { rand_u32_sw() }
+}
+
+/// Software fallback for [`rand_u32`] — **not cryptographic**. An xorshift seeded from the
+/// chip UID, the uptime tick, and a rolling internal state, so successive calls (and
+/// different units) diverge. Used only if the hardware TRNG is somehow unavailable.
+fn rand_u32_sw() -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
     static STATE: AtomicU32 = AtomicU32::new(0);
     let mut x =
