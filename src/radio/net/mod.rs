@@ -9,7 +9,7 @@
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
 //! Keys are per-peer: [`Net::add_peer`] binds an `id` to its own AES key and
-//! replay lane (star ≤32 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
+//! replay lane (star ≤16 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
 //! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, docs/radio.md).
 //!
@@ -69,14 +69,18 @@ const KEY_LASTSEEN: u8 = 0x01;
 /// defeating a replayed beacon capture. `0x02` is free (peer lanes start at `KEY_LASTSEEN_BASE`).
 const KEY_FHSS_EPOCH: u8 = 0x02;
 
-/// Peer-table capacity. A gateway in a star holds up to 32 nodes; a P2P device
+/// Peer-table capacity. A gateway in a star holds up to 16 nodes; a P2P device
 /// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
-/// is a usage policy, not a different type. Sized at 32 (not 64) so the table
-/// (`[Option<Peer>; MAX_PEERS]`, ~32 B/slot) costs ~1 KB, not ~2 KB, of the Net
-/// future in `.bss` — RAM that (with flip-link) is stack headroom on this 20 KB part.
-pub const MAX_PEERS: usize = 32;
+/// is a usage policy, not a different type. Sized at 16 (was 64, then 32): the
+/// table (`[Option<Peer>; MAX_PEERS]`, ~36 B/slot) lives in every Net app's
+/// statically-allocated future, and with flip-link each slot is stack headroom the
+/// 20 KB part loses — the gateway product's boot peak is what forced the last
+/// halving (2026-07-11: 32 slots left it ~0.7 KB under the ~9 KB measured Net-app
+/// stack peak → HardFault loop before the first Hello). 16 also halves the
+/// replay-lane KV-key census (tower_kv::MAX_KEYS = 64 is a global budget).
+pub const MAX_PEERS: usize = 16;
 /// Local base (within `NS_NET`) for per-peer last-seen lanes (slot `i` → `KEY_LASTSEEN_BASE + i`,
-/// `i < MAX_PEERS = 32`, so lanes occupy locals `0x10..=0x2F`).
+/// `i < MAX_PEERS = 16`, so lanes occupy locals `0x10..=0x1F`).
 const KEY_LASTSEEN_BASE: u8 = 0x10;
 
 /// A registered peer: its ID, per-peer AES key, and replay state (docs/radio.md).
@@ -318,7 +322,7 @@ impl Net {
     /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
     /// its own replay lane. The peer's persisted last-seen is restored. Returns
     /// `false` only if the table is full (and the id is new) — check the return in
-    /// production code. Up to [`MAX_PEERS`] peers (star ≤32 / P2P ≤8 by policy, docs/radio.md).
+    /// production code. Up to [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
     pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
         if let Some(i) = self.peer_slot(id) {
             self.peers[i].as_mut().unwrap().key = *key; // re-key in place

@@ -213,7 +213,9 @@ async fn run(b: Board) {
     let my_id = {
         let mut idb = [0u8; 4];
         match app_kv.get_bytes(KEY_MY_ID, &mut idb) {
-            Ok(Some(4)) => u32::from_le_bytes(idb),
+            // 0 is the reserved "unset" sentinel — also shields against stale bytes a
+            // previous firmware left at this key (dirty-EEPROM boards read id 0 here).
+            Ok(Some(4)) if u32::from_le_bytes(idb) != 0 => u32::from_le_bytes(idb),
             _ => tower::board::unique_id32(),
         }
     };

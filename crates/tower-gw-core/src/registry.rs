@@ -28,11 +28,11 @@ use serde::{Deserialize, Serialize};
 pub const FORMAT_VERSION: u8 = 1;
 /// Records per bucket. 6 × ~39 B encoded ≈ 235 B — one tower-kv value.
 pub const PER_BUCKET: usize = 6;
-/// Bucket count. 6 × [`PER_BUCKET`] = 36 slots ≥ the 32-peer capacity.
-pub const BUCKETS: usize = 6;
+/// Bucket count. 3 × [`PER_BUCKET`] = 18 slots ≥ the 16-peer capacity.
+pub const BUCKETS: usize = 3;
 /// Usable node capacity — matches the net layer's `MAX_PEERS` (the registry must
 /// never hold more nodes than the RAM peer table can serve).
-pub const CAPACITY: usize = 32;
+pub const CAPACITY: usize = 16;
 /// Longest node name, bytes (UTF-8) — mirrors `tower_protocol::mgmt::MAX_NODE_NAME`.
 pub const MAX_NAME: usize = 16;
 /// Encoded-bucket ceiling, pinned by test. tower-kv's `MAX_VALUE` is 256.

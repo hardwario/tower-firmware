@@ -180,7 +180,7 @@ happens *before* the replay comparison, so a forged frame can't poison the state
 **Peer table & topologies.** Keys are per-peer. `add_peer(id, &key)` binds
 a sender ID to its own AES key and its own replay lane; an unregistered peer falls
 back to the `NetConfig::key` default lane (the single-link case). One table holds
-up to `MAX_PEERS = 32`:
+up to `MAX_PEERS = 16`:
 
 ```rust
 net.add_peer(NODE_A, &KEY_A);          // star hub: each node under its own key
@@ -188,7 +188,7 @@ net.add_peer(NODE_B, &KEY_B);
 net.peer_count();  net.remove_peer(NODE_A);  net.peer_last_seen(NODE_B);
 ```
 
-- **Star** (≤32 nodes): the gateway registers every node; `recv` reads the clear
+- **Star** (≤16 nodes): the gateway registers every node; `recv` reads the clear
   `src`, picks that node's key, and tracks a separate last-seen per node. Each node
   ships with only its own key.
 - **P2P** (≤8 peers): both ends `add_peer` the other under a shared link key and
