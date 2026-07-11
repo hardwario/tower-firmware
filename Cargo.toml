@@ -12,7 +12,13 @@ description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (S
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
-members = ["crates/tower-gw-core", "crates/tower-kv", "crates/tower-net-core", "crates/tower-radio-core"]
+members = [
+    "crates/tower-gw-core",
+    "crates/tower-kv",
+    "crates/tower-net-core",
+    "crates/tower-radio-core",
+    "crates/tower-shell-core",
+]
 resolver = "2"
 
 [dependencies]
@@ -105,6 +111,11 @@ tower-net-core = { path = "crates/tower-net-core" }
 # codec + RAM downlink-queue policy). Extracted like the other `crates/` so the gateway's
 # bookkeeping can be unit-tested on the host (`just test`). no_std.
 tower-gw-core = { path = "crates/tower-gw-core" }
+
+# Pure kernels behind the `address` shell setting (value parse + the `address random`
+# xorshift). Extracted like the other `crates/` so the parse/PRNG logic is host-tested
+# (`just test`) — the firmware `src/` is no_std and can't cargo test. no_std.
+tower-shell-core = { path = "crates/tower-shell-core" }
 
 # Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
 # (bump in lockstep with `tower-cli` on any wire change).

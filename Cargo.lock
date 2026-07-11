@@ -1030,6 +1030,7 @@ dependencies = [
  "tower-net-core",
  "tower-protocol",
  "tower-radio-core",
+ "tower-shell-core",
 ]
 
 [[package]]
@@ -1069,6 +1070,10 @@ version = "0.1.0"
 dependencies = [
  "aes",
 ]
+
+[[package]]
+name = "tower-shell-core"
+version = "0.1.0"
 
 [[package]]
 name = "tracing"

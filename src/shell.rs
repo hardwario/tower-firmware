@@ -801,28 +801,11 @@ fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<
         // `random` is resolved to a generated hex value in `settings_set` before this,
         // so here `Addr` only ever sees `auto` (→ 0) or a hex literal.
         Kind::Addr => {
-            let v = parse_addr(value).ok_or(())?;
+            let v = tower_shell_core::parse_addr(value).ok_or(())?;
             buf[..4].copy_from_slice(&v.to_le_bytes());
             Ok(4)
         }
     }
-}
-
-/// Parse an [`Kind::Addr`] value: `auto` → `0` (the UID-derived sentinel), or hex
-/// (`0x1a2b3c4d` / bare `1a2b3c4d`, ≤ 8 digits) → the value. (`random` is handled by
-/// the caller.)
-fn parse_addr(value: &str) -> Option<u32> {
-    if value.eq_ignore_ascii_case("auto") {
-        return Some(0);
-    }
-    let hex = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value);
-    if hex.is_empty() || hex.len() > 8 {
-        return None;
-    }
-    u32::from_str_radix(hex, 16).ok()
 }
 
 /// Read a setting's current value (or its default if unset / unreadable) as text.

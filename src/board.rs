@@ -363,17 +363,16 @@ pub fn rand_u32() -> u32 {
     if out != 0 { out } else { rand_u32_sw() }
 }
 
-/// Software fallback for [`rand_u32`] — **not cryptographic**. An xorshift seeded from the
-/// chip UID, the uptime tick, and a rolling internal state, so successive calls (and
-/// different units) diverge. Used only if the hardware TRNG is somehow unavailable.
+/// Software fallback for [`rand_u32`] — **not cryptographic**. Mixes the chip UID, the
+/// uptime tick, and a rolling internal state, then runs one xorshift step (host-tested in
+/// [`tower_shell_core::xorshift32_nonzero`], which forces the seed non-zero). Used only if
+/// the hardware TRNG is somehow unavailable; successive calls (and different units) diverge.
 fn rand_u32_sw() -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
     static STATE: AtomicU32 = AtomicU32::new(0);
-    let mut x =
-        STATE.load(Ordering::Relaxed) ^ unique_id32() ^ (embassy_time::Instant::now().as_ticks() as u32) | 1; // never seed the xorshift with 0 (it would stick at 0)
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
+    let seed =
+        STATE.load(Ordering::Relaxed) ^ unique_id32() ^ (embassy_time::Instant::now().as_ticks() as u32);
+    let x = tower_shell_core::xorshift32_nonzero(seed);
     STATE.store(x, Ordering::Relaxed);
     x
 }
