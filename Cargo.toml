@@ -108,7 +108,7 @@ tower-gw-core = { path = "crates/tower-gw-core" }
 
 # Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
 # (bump in lockstep with `tower-cli` on any wire change).
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.3.0" }
 
 # Bounded buffers for the framed console (the TX queue item, log/print scratch).
 # Matches the version already in the lockfile (pulled transitively by embassy).

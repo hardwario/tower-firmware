@@ -12,4 +12,4 @@ description = "no_std key-value codec over byte-addressable EEPROM, extracted fr
 # so EEPROM records stay byte-compatible with the firmware. Pinned to the same tower-protocol
 # tag as the firmware (see the repo CLAUDE.md lockstep note).
 [dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.3.0" }
