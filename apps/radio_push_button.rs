@@ -173,13 +173,13 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         key: SET_DEBOUNCE_PRESS,
         name: "debounce-press",
         kind: shell::Kind::Uint { min: 1, max: 1000 },
-        default: "20",
+        default: "30",
     },
     shell::Setting {
         key: SET_DEBOUNCE_RELEASE,
         name: "debounce-release",
         kind: shell::Kind::Uint { min: 1, max: 1000 },
-        default: "20",
+        default: "30",
     },
     shell::Setting {
         key: SET_CLICK_TIMEOUT,
@@ -301,8 +301,8 @@ fn led_feedback(led: &led::Led, ev: button::Event) {
 fn button_config(kv: Nv) -> button::Config {
     button::Config {
         scan_interval: Duration::from_millis(5),
-        debounce_press: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_PRESS, 20) as u64),
-        debounce_release: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_RELEASE, 20) as u64),
+        debounce_press: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_PRESS, 30) as u64),
+        debounce_release: Duration::from_millis(read_u32_setting(kv, SET_DEBOUNCE_RELEASE, 30) as u64),
         click_timeout: Duration::from_millis(read_u32_setting(kv, SET_CLICK_TIMEOUT, 500) as u64),
         hold_time: Duration::from_millis(read_u32_setting(kv, SET_HOLD_TIME, 1000) as u64),
     }
