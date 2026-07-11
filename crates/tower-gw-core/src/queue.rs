@@ -280,4 +280,43 @@ mod tests {
         assert_eq!(it.age_s(65_000), 60);
         assert_eq!(it.age_s(4_000), 0, "clock skew clamps to 0, not underflow");
     }
+
+    /// `age_s` saturates at u16::MAX rather than wrapping for an item older than ~18 h.
+    #[test]
+    fn age_s_saturates() {
+        let mut q = Queue::new();
+        let id = q.push(NODE_A, u16::MAX, b"x", 0).unwrap();
+        let it = q.iter().find(|it| it.id == id).unwrap();
+        assert_eq!(it.age_s(100_000_000), u16::MAX, "age clamps, not wraps");
+    }
+
+    /// A `ttl_s == 0` item is expired the instant it is queued (`0 >= 0`): peek skips it and
+    /// expire() reports it. Degenerate, but a reachable host input.
+    #[test]
+    fn zero_ttl_expires_immediately() {
+        let mut q = Queue::new();
+        let id = q.push(NODE_A, 0, b"x", 1_000).unwrap();
+        assert!(
+            q.peek_for(NODE_A, 1_000).is_none(),
+            "zero-TTL item is never deliverable"
+        );
+        let mut expired = heapless::Vec::<(u16, u32), 4>::new();
+        q.expire(1_000, |i, n| expired.push((i, n)).unwrap());
+        assert_eq!(expired.as_slice(), &[(id, NODE_A)]);
+        assert!(q.is_empty());
+    }
+
+    /// A per-node slot frees on pop and is reusable — the FIFO cap is by live count, not a
+    /// high-water mark.
+    #[test]
+    fn per_node_slot_reuse_after_pop() {
+        let mut q = Queue::new();
+        let mut ids = heapless::Vec::<u16, 4>::new();
+        for i in 0..PER_NODE_CAP {
+            ids.push(q.push(NODE_A, 60, &[i as u8], 0).unwrap()).unwrap();
+        }
+        assert_eq!(q.push(NODE_A, 60, b"x", 0), Err(PushError::PerNodeFull));
+        q.pop(ids[0]).unwrap();
+        assert!(q.push(NODE_A, 60, b"reused", 0).is_ok(), "freed slot is reusable");
+    }
 }

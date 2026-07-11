@@ -47,7 +47,7 @@ async fn run(_b: Board) {
     let mut pass = true;
     // Quiet on success: this KAT fires ~13 checks back-to-back with no `.await` between
     // them, so the writer task never runs to drain the console queue mid-burst. Logging
-    // every ✓ would overflow the depth-8 TX queue (drop-newest) and silently drop the
+    // every ✓ would overflow the depth-4 TX queue (drop-newest) and silently drop the
     // final verdict line. We only log *failures* (rare) plus the single verdict at the
     // end — the verdict is the answer; per-check detail appears only when something breaks.
     let mut check = |name: &str, ok: bool| {

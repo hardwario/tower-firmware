@@ -4,8 +4,8 @@
 //!
 //! Two constraints shape this module:
 //! * `tower_kv::MAX_KEYS = 64` is a *global* cap on distinct KV keys and `NS_NET`
-//!   alone holds 35, so the registry cannot spend one key per node — six records per
-//!   bucket × six buckets covers the 32-peer table in 6 keys.
+//!   alone holds 19, so the registry cannot spend one key per node — six records per
+//!   bucket × three buckets covers the 16-peer table in 3 keys.
 //! * The STM32L083 has 20 KB of RAM and a HW-measured ~9 KB stack peak for any `Net`
 //!   app (see the firmware's stack-overflow history): a resident registry copy
 //!   (~1.7 KB inside the app's statically-allocated task future) is RAM the stack
@@ -213,6 +213,43 @@ mod tests {
         }
     }
 
+    /// The persisted `NodeRecord` postcard layout IS the on-EEPROM format — a serde field
+    /// reorder or a postcard bump would silently mis-decode every stored bucket on upgrade
+    /// (the same silent-drift class the protocol golden vectors guard). Pin the exact bytes
+    /// AND the format marker, so a layout change is a conscious, versioned decision.
+    #[test]
+    fn node_record_golden_bytes() {
+        assert_eq!(
+            FORMAT_VERSION, 1,
+            "if the record layout changes, bump FORMAT_VERSION deliberately"
+        );
+        let mut name: String<MAX_NAME> = String::new();
+        name.push_str("kitchen").unwrap();
+        let r = NodeRecord {
+            id: 0x0102_0304,
+            key: [
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+                0x1f,
+            ],
+            flags: 0x05,
+            name,
+        };
+        let mut out = [0u8; 64];
+        let n = postcard::to_slice(&r, &mut out).unwrap().len();
+        assert_eq!(
+            &out[..n],
+            &[
+                0x84, 0x86, 0x88, 0x08, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
+                0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x05, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e
+            ]
+        );
+        // Decode back: a reorder trips the bytes above; a decode regression trips these fields.
+        let back: NodeRecord = postcard::from_bytes(&out[..n]).unwrap();
+        assert_eq!(back.id, 0x0102_0304);
+        assert_eq!((back.key[0], back.key[15], back.flags), (0x10, 0x1f, 0x05));
+        assert_eq!(back.name.as_str(), "kitchen");
+    }
+
     /// A max-size bucket (6 records, 16-byte names) must encode within one tower-kv value.
     #[test]
     fn max_bucket_fits_one_kv_value() {
@@ -257,8 +294,8 @@ mod tests {
         assert_eq!(find(&io, 7).unwrap().name.as_str(), "new");
     }
 
-    /// Slots free up on remove and are reused; capacity is enforced at CAPACITY (32),
-    /// not the 36 physical slots.
+    /// Slots free up on remove and are reused; capacity is enforced at CAPACITY (16),
+    /// not the 18 physical slots.
     #[test]
     fn capacity_and_slot_reuse() {
         let mut io = Mem::default();
@@ -319,5 +356,37 @@ mod tests {
             seen += load(&io, i).len();
         }
         assert_eq!(seen, total);
+    }
+
+    /// find/update/remove must reach a node that landed in a later bucket, not just bucket 0
+    /// — the cross-bucket loop bodies of those three fns were only asserted on bucket-0 nodes.
+    #[test]
+    fn mutate_spilled_node() {
+        let mut io = Mem::default();
+        // 13 nodes fill bucket 0 (6) + bucket 1 (6) + bucket 2 (1); id 13 lands in bucket 2.
+        for i in 1..=(PER_BUCKET as u32 * 2 + 1) {
+            add(&mut io, &rec(i, "n")).unwrap();
+        }
+        assert!(!load(&io, 2).is_empty(), "node spilled into bucket 2");
+        let spilled = PER_BUCKET as u32 * 2 + 1;
+        assert_eq!(find(&io, spilled).unwrap().id, spilled);
+        update(&mut io, spilled, Some("attic"), Some(0b10)).unwrap();
+        let n = find(&io, spilled).unwrap();
+        assert_eq!((n.name.as_str(), n.flags), ("attic", 0b10));
+        remove(&mut io, spilled).unwrap();
+        assert!(find(&io, spilled).is_none());
+        assert_eq!(count(&io), PER_BUCKET * 2);
+    }
+
+    /// A name of exactly `MAX_NAME` bytes is accepted and its *content* survives the store
+    /// (existing tests check only the over-long reject side and the encoded *size*).
+    #[test]
+    fn name_exactly_max_len_roundtrips() {
+        let mut io = Mem::default();
+        add(&mut io, &rec(1, "")).unwrap();
+        let max_name = "sixteen-byte-nam"; // exactly MAX_NAME bytes
+        assert_eq!(max_name.len(), MAX_NAME);
+        update(&mut io, 1, Some(max_name), None).unwrap();
+        assert_eq!(find(&io, 1).unwrap().name.as_str(), max_name);
     }
 }

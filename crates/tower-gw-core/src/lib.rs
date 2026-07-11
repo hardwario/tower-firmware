@@ -11,9 +11,9 @@
 //!   tests) and never held resident — the 20 KB part cannot afford a ~1.7 KB RAM
 //!   mirror next to its ~9 KB stack peak. Bucketing itself is not an optimisation:
 //!   `tower_kv::MAX_KEYS = 64` is a *global* cap on distinct KV keys and `NS_NET`
-//!   alone holds 35 (watermark + last-seen + epoch + 32 replay lanes), so
-//!   one-key-per-node would blow the budget; six records per bucket × six buckets
-//!   covers the 32-peer table in 6 keys.
+//!   alone holds 19 (watermark + last-seen + epoch + 16 replay lanes), so
+//!   one-key-per-node would blow the budget; six records per bucket × three buckets
+//!   covers the 16-peer table in 3 keys.
 //! * [`queue`] — the RAM downlink queue: a small global pool of opaque payloads
 //!   (host-built `radio::NodeCmd` envelopes), per-node FIFO, TTL expiry, and stable
 //!   u16 item ids for dequeue/TX reporting. RAM-only by design — a gateway reboot

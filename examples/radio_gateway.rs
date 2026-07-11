@@ -6,7 +6,7 @@
 //! and decrypts them (AES-CCM), applies the replay rule, auto-ACKs, and prints the
 //! decoded sensor sample with link quality. Registers each node in the peer table
 //! so every node is decoded under its own key with its own replay lane — add more
-//! `add_peer(...)` calls to grow the star (up to 64 nodes).
+//! `add_peer(...)` calls to grow the star (up to 16 nodes).
 
 #![no_std]
 #![no_main]

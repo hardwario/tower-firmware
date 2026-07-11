@@ -57,7 +57,7 @@ async fn run(b: Board) {
 
     let spi = radio.spi();
     // This dump emits ~26 lines in one go. They're all `info!` with no `.await` between
-    // them, so without pacing the writer task never runs to drain the depth-8 console
+    // them, so without pacing the writer task never runs to drain the depth-4 console
     // queue and most of the dump (drop-newest) is lost. A short delay per line lets the
     // UART flush each frame (~5 ms at 115200) so the whole table is observable.
     let pace = || embassy_time::Timer::after_millis(8);

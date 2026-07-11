@@ -168,7 +168,7 @@ fn default_lane_key(my_id: u32) -> [u8; 16] {
     k
 }
 
-/// RAM-only per-node link stats. Packed to 12 B/entry (32 entries = 384 B of the app
+/// RAM-only per-node link stats. Packed to 12 B/entry (16 entries = 192 B of the app
 /// future); deliberately NOT persisted — per-uplink EEPROM writes would burn the part
 /// (docs/storage.md). `NodeEntry.last_seen_s` is documented as "since gateway boot".
 #[derive(Clone, Copy)]
@@ -181,9 +181,8 @@ struct LinkStat {
     uplinks: u16,
 }
 
-// 16 tracked nodes, not the full 32-node capacity: entries beyond 16 concurrent
-// talkers report "never seen" until a slot frees (NodeRemove) — an accepted v1 limit
-// on the RAM-starved part; the registry itself still holds 32.
+// One link-stat slot per registered node (16 = registry CAPACITY / net-layer
+// MAX_PEERS): a slot fills on a node's first uplink and frees on NodeRemove.
 struct Stats([Option<LinkStat>; 16]);
 
 impl Stats {
@@ -236,7 +235,7 @@ struct ChunkStream {
     chunk: u16,
     len: usize,
     // 128, not the full 192-byte chunk budget: this buffer lives across awaits (in
-    // the app future); a few more chunks on a 32-node list is cheaper than the RAM.
+    // the app future); a few more chunks on a 16-node list is cheaper than the RAM.
     buf: [u8; 128],
 }
 
@@ -396,7 +395,7 @@ async fn run(b: Board) {
 
     loop {
         // 1. Drain management requests (host → gateway). Non-blocking so the radio
-        //    keeps priority; depth-2 channel means a dropped burst is just retried.
+        //    keeps priority; depth-1 channel means a dropped burst is just retried.
         while let Some(frame) = console::mgmt_try_next() {
             let Ok((MsgType::MgmtRequest, _seq, payload)) = decode_frame(&frame) else {
                 continue;
