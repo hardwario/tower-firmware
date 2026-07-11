@@ -19,26 +19,27 @@
 //!   probe), `Provision` (host-minted credentials; key never rides the shell), and
 //!   `JoinOpen` (host-initiated OTA join).
 //!
-//! On the down/up edge and on a recognised click/hold, the LED flashes local feedback
-//! (in addition to the radio uplink). Each of the four events is independently
-//! switchable and timed; only enabled events light. Distinct **shapes** keep them
-//! apart on the single LED — press/release/hold are one pulse of the configured
-//! length, a click is a double-blink — because a quick tap fires Press on the down
-//! edge and Release+Click together on the up edge, so a shared shape would blend. The
-//! default is the coherent **gesture** scheme: click + hold on, press + release off
-//! (the edges blend with a click on a tap); enable press/release for raw-edge feedback.
+//! Each of the four button events has a **master enable**: a disabled event is ignored
+//! entirely — neither reported over radio nor shown on the LED. An enabled event both
+//! sends its uplink and flashes the LED (its flash on-time is configurable; `0` = no
+//! LED, e.g. to save power). Distinct **shapes** keep events apart on the single LED —
+//! press/release/hold are one pulse, a click is a double-blink — because a quick tap
+//! fires Press on the down edge and Release+Click together on the up edge, so a shared
+//! shape would blend. The default is the coherent **gesture** scheme: click + hold on,
+//! press + release off (the edges blend with a click on a tap); enable press/release
+//! for raw-edge reporting.
 //!
 //! All boards also play the common power-on signature first (500 ms off → 2 s on →
 //! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)) — this
-//! app's own LED behaviour begins after that.
+//! app's own behaviour begins after that.
 //!
 //! Settings (remote-shell reconfigurable, `/system settings set …`): `temp-period`,
 //! `temp-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
-//! boot), `heartbeat`; per-event LED `led-{press,release,click,hold}` (on/off) +
-//! `led-{…}-ms` (flash on-time, 20–5000 ms). The `/button sim
+//! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable) +
+//! `led-{…}-ms` (LED flash on-time, 0–5000 ms, 0 = no LED). The `/button sim
 //! <press|release|click|hold>` command injects synthetic events through the full path
-//! (LED feedback + radio) — the console "finger" for testing without a physical press,
-//! also used by the HIL bench.
+//! (enable check → LED + radio) — the console "finger" for testing without a physical
+//! press, also used by the HIL bench.
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -90,19 +91,20 @@ const SET_TEMP_DELTA: u8 = 0x11;
 const SET_ACCEL: u8 = 0x12;
 const SET_HEARTBEAT: u8 = 0x13;
 
-// Per-button-event LED feedback: an enable flag + the on-time of the flash. Each of
-// the four button events is independently switchable and timed. `-ms` is one pulse's
-// on-time (min/max shared across all four for consistency).
-const SET_LED_PRESS: u8 = 0x20;
+// Per-button-event configuration. `<event>` is the master enable: a disabled event is
+// ignored entirely — NOT reported over radio and no LED. `led-<event>-ms` is that
+// event's LED flash on-time when enabled (0 = report it but don't flash the LED, e.g.
+// to save power). Each of the four events is independently switchable and timed.
+const SET_PRESS: u8 = 0x20;
 const SET_LED_PRESS_MS: u8 = 0x21;
-const SET_LED_RELEASE: u8 = 0x22;
+const SET_RELEASE: u8 = 0x22;
 const SET_LED_RELEASE_MS: u8 = 0x23;
-const SET_LED_CLICK: u8 = 0x24;
+const SET_CLICK: u8 = 0x24;
 const SET_LED_CLICK_MS: u8 = 0x25;
-const SET_LED_HOLD: u8 = 0x26;
+const SET_HOLD: u8 = 0x26;
 const SET_LED_HOLD_MS: u8 = 0x27;
-/// Shared flash-duration bounds (ms) for every button-event LED setting.
-const LED_MS_MIN: u32 = 20;
+/// Shared flash-duration bounds (ms) for every event's LED. 0 = no LED for that event.
+const LED_MS_MIN: u32 = 0;
 const LED_MS_MAX: u32 = 5000;
 
 static BTN_SETTINGS: &[shell::Setting] = &[
@@ -130,15 +132,16 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         kind: shell::Kind::Uint { min: 60, max: 86_400 },
         default: "900",
     },
-    // Button-event LED feedback. Edges (press/release) and hold flash a single pulse;
-    // a click is a distinct double-blink so it reads apart from an adjacent press even
-    // on the one LED. Default = the coherent **gesture** scheme: click + hold ON,
-    // press + release OFF. The edges are off by default because a click is a quick
-    // press+release, so lighting all four blends on a tap; enable press/release for
-    // raw-edge feedback instead.
+    // Button events. `<event>` enables the event (report over radio + LED feedback); a
+    // disabled event is ignored entirely. `led-<event>-ms` is the LED flash on-time
+    // (0 = report but no LED). Default = the coherent **gesture** scheme: click + hold
+    // ON, press + release OFF — a click is a quick press+release, so reporting all four
+    // is redundant and their LEDs blend on a tap; enable press/release for raw edges.
+    // Shapes keep them apart on the one LED: edges/hold = one pulse, click = a
+    // double-blink (each blink the configured length).
     shell::Setting {
-        key: SET_LED_PRESS,
-        name: "led-press",
+        key: SET_PRESS,
+        name: "press",
         kind: shell::Kind::Bool,
         default: "off",
     },
@@ -152,8 +155,8 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         default: "250",
     },
     shell::Setting {
-        key: SET_LED_RELEASE,
-        name: "led-release",
+        key: SET_RELEASE,
+        name: "release",
         kind: shell::Kind::Bool,
         default: "off",
     },
@@ -167,8 +170,8 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         default: "250",
     },
     shell::Setting {
-        key: SET_LED_CLICK,
-        name: "led-click",
+        key: SET_CLICK,
+        name: "click",
         kind: shell::Kind::Bool,
         default: "on",
     },
@@ -182,8 +185,8 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         default: "100",
     },
     shell::Setting {
-        key: SET_LED_HOLD,
-        name: "led-hold",
+        key: SET_HOLD,
+        name: "hold",
         kind: shell::Kind::Bool,
         default: "on",
     },
@@ -271,24 +274,34 @@ fn read_bool_setting(kv: Nv, local: u8, default: bool) -> bool {
     }
 }
 
-/// Flash the LED for one button event, per its configured enable + on-time. Only
-/// enabled events light. Distinct shapes: press/release/hold are a single pulse of
-/// the configured length; a click is a double-blink (each blink the configured
-/// length) so it reads apart from an adjacent press even on the one LED. Immediate,
-/// fire-and-forget (the LED dispatcher owns the timing) — the uplink follows
-/// independently.
-fn led_feedback(led: &led::Led, kv: Nv, ev: button::Event) {
-    // Defaults mirror BTN_SETTINGS: gesture events (click/hold) on, edges off.
-    let (en_key, ms_key, en_default, ms_default) = match ev {
-        button::Event::Press => (SET_LED_PRESS, SET_LED_PRESS_MS, false, 250),
-        button::Event::Release => (SET_LED_RELEASE, SET_LED_RELEASE_MS, false, 250),
-        button::Event::Click => (SET_LED_CLICK, SET_LED_CLICK_MS, true, 100),
-        button::Event::Hold => (SET_LED_HOLD, SET_LED_HOLD_MS, true, 1000),
+/// Whether a button event is enabled (reported over radio + LED). Defaults mirror
+/// `BTN_SETTINGS`: the gesture events (click/hold) on, the raw edges (press/release) off.
+fn event_enabled(kv: Nv, ev: button::Event) -> bool {
+    let (key, default) = match ev {
+        button::Event::Press => (SET_PRESS, false),
+        button::Event::Release => (SET_RELEASE, false),
+        button::Event::Click => (SET_CLICK, true),
+        button::Event::Hold => (SET_HOLD, true),
     };
-    if !read_bool_setting(kv, en_key, en_default) {
-        return;
-    }
+    read_bool_setting(kv, key, default)
+}
+
+/// Flash the LED for one (already enabled) button event, per its configured on-time
+/// (`0` = no LED). Distinct shapes: press/release/hold are a single pulse; a click is a
+/// double-blink (each blink the configured length) so it reads apart from an adjacent
+/// press even on the one LED. Immediate, fire-and-forget — the LED dispatcher owns the
+/// timing; the uplink follows independently.
+fn led_feedback(led: &led::Led, kv: Nv, ev: button::Event) {
+    let (ms_key, ms_default) = match ev {
+        button::Event::Press => (SET_LED_PRESS_MS, 250),
+        button::Event::Release => (SET_LED_RELEASE_MS, 250),
+        button::Event::Click => (SET_LED_CLICK_MS, 100),
+        button::Event::Hold => (SET_LED_HOLD_MS, 1000),
+    };
     let ms = read_u32_setting(kv, ms_key, ms_default);
+    if ms == 0 {
+        return; // enabled event, LED suppressed
+    }
     match ev {
         button::Event::Click => led.pulse(ms, ms, 2), // double-blink (on ms / off ms) ×2
         _ => led.flash(ms),
@@ -450,10 +463,10 @@ async fn run(b: Board) {
                 };
                 let idx = kind as usize;
                 counts[idx] = counts[idx].wrapping_add(1);
-                // Immediate local feedback for every enabled event (real or simulated),
-                // independent of pairing state and of the uplink that follows.
-                led_feedback(&led, kv, ev);
 
+                // Pairing is a fixed gesture, not a reportable event: while unpaired a
+                // long hold always starts the OTA join, regardless of the per-event
+                // enables (which govern normal reporting once paired).
                 if provision.is_none() {
                     if matches!(ev, button::Event::Hold) {
                         provision = ota_join(&mut net, my_id, band, channel, kv, &led).await;
@@ -462,8 +475,15 @@ async fn run(b: Board) {
                             send_info(&mut net, provision, &counts).await;
                         }
                     }
-                    continue; // unpaired: nothing to send events to
+                    continue; // unpaired: no gateway to report events to
                 }
+
+                // The per-event enable is the master switch: a disabled event is
+                // ignored entirely — no LED, no radio.
+                if !event_enabled(kv, ev) {
+                    continue;
+                }
+                led_feedback(&led, kv, ev); // immediate local feedback (LED-ms 0 = none)
                 // Click/Hold are the semantic events — worth more repetitions than the
                 // raw press/release edges around them.
                 let reps = match kind {
