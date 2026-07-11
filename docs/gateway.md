@@ -209,12 +209,30 @@ uplink cycle.
 
 ### RAM budget
 
-The 20 KB part measures a ~9 KB stack peak for any `Net` app, so everything an app keeps resident
-beyond the SDK baseline must fit in ~2 KB or the stack loses the difference. This is why
-`MAX_PEERS` is **16** (not 32), the registry lives on EEPROM, the queue is 4 items, and link stats
-are 12-byte packed. Re-check `just size app radio_dongle_gateway` after growing anything resident.
-(History: an over-budget build HardFaulted at boot via stack overflow into `.bss` — flip-link now
-turns that into a link error instead.)
+flip-link splits the 20 KB SRAM into **statics at the top** (`.data`/`.bss`/`.uninit`) and the
+**stack below** them, so a stack overflow faults below the RAM base instead of silently corrupting
+`.bss`. Everything an app keeps *resident* eats the statics half and shrinks the stack half:
+
+| App | Statics | Stack budget | Measured peak (SWD stack-paint, 2026-07-11) |
+|---|---:|---:|---|
+| `radio_push_button` | ~10.8 KB | ~9.4 KB | **~6.8 KB** (radio-send + button + KV; stable under compaction churn) |
+| `radio_dongle_gateway` | ~11.4 KB | ~8.6 KB | ~3.3 KB console-idle; deep registry/mgmt paths not bench-driveable standalone, **est. ~7.5 KB** |
+
+The statics are **~67 % async task futures** — Embassy stores each task's across-`await` state
+resident, so `__embassy_main`'s future alone is ~4.3 KB (the app's own main-loop state, not
+framework overhead). That's *why* the stack peak is only ~7 KB and not ~15: async trades a deep
+transient stack for resident static state. It also means growing resident state (a bigger
+`MAX_PEERS`, more buffers held across awaits) shrinks the stack directly — which is how an
+early over-budget gateway build HardFaulted at boot (stack overflow; flip-link now makes that a
+link/boot fault, not `.bss` corruption). Hence `MAX_PEERS` **16** (not 32), the registry on
+EEPROM (transient bucket locals), the 4-item queue, and 12-byte packed link stats.
+
+**Guard:** `just ram-budget` (and CI) fails if any product bin leaves less than an 8 KB stack —
+a regression tripwire so a future-inflating change is caught at PR time, not at a bench HardFault.
+Re-check `just size app radio_dongle_gateway` after growing anything resident; if a bin genuinely
+needs more, raise the floor *and re-measure the high-water mark on hardware*, don't just nudge it.
+TODO: a two-board HIL-driven stack-paint read of the gateway's deep paths (registry-bucket codec +
+mgmt chunking + radio bridge) to replace the ~7.5 KB estimate with a measured number.
 
 ---
 

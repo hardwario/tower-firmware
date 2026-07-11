@@ -174,6 +174,15 @@ test *args:
     cargo test -p tower-shell-core --target {{host}} {{args}}
 
 
+# flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
+# leave enough stack (floor 8 KB; measured peaks ~6.8 KB node / est ~7.5 KB gateway — see
+# docs/gateway.md "RAM budget"). Builds the bins, then checks the ELF layout. Run in CI.
+# Guard the RAM budget: fail if any product bin's statics leave too little stack.
+ram-budget:
+    cargo build --release --bins
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+
+
 # === Maintenance ==================================================================================
 
 # Remove build artifacts.

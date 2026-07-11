@@ -47,6 +47,10 @@ jobs:
       # (see .cargo/config.toml).
       - name: Build lib + product bins + examples
         run: cargo build --release --lib --bins --examples
+      # flip-link puts the stack below the statics on the 20 KB part; guard that every
+      # product bin still leaves enough stack (see tools/check_ram_budget.py + docs/gateway.md).
+      - name: RAM budget guard
+        run: python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
       # The ~20 two-board examples gate their sender/node/peer halves behind role features, so a
       # default-feature build leaves that half of the matrix compile-unchecked. Build each role
       # so an API change that only a role-gated branch uses can't merge green (and then fail
