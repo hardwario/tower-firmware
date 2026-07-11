@@ -1,13 +1,28 @@
-//! radio_push_button — TOWER IoT Kit product firmware (SKELETON).
+//! radio_push_button — TOWER IoT Kit product firmware: a wireless push button with
+//! thermometer + accelerometer, built as a **sleeping node**.
 //!
-//! A battery push-button node: on each click it (will) send a secured radio message to the
-//! gateway, then drop back to STOP low-power between presses. The on-board LED flashes as
-//! local feedback.
+//! Every button press / release / click / hold sends a secured radio message carrying
+//! that event's running count; temperature is measured on a settable period and sent
+//! on-change (threshold) or at latest every heartbeat; the accelerometer's tilt
+//! interrupt wakes the node for motion/orientation events. Between events the MCU
+//! STOPs (µA) and the SPIRIT1 sleeps — downlinks reach the node via the gateway's
+//! queue: each confirmed uplink's ACK carries a *pending* flag, and when set the node
+//! holds a short RX window, executes the delivered remote-shell line in the standard
+//! shell dispatcher ([`shell::run_line`]), and streams the response back as chunked
+//! radio messages. No tab completion over the air — completion is a per-transport
+//! feature and the radio transport simply doesn't offer it.
 //!
-//! This is a starting skeleton — button events are handled and logged; the radio send is
-//! marked TODO. The `net_*` examples and `docs/radio.md` (the `net` node role) show the
-//! full pattern: build the radio with `Spirit1::new(b.radio_*)`, then `Net::new(radio, b.kv,
-//! NetConfig { .. })`, pair with a gateway, and `net.send(..)`.
+//! Pairing:
+//! * **OTA** — hold the button ≥1 s while unprovisioned: the node runs the 3-way JOIN
+//!   against any gateway with an open window and persists `(gw, key)`.
+//! * **Cable** — on USB, the node serves the management channel: `Describe` (role
+//!   probe), `Provision` (host-minted credentials; key never rides the shell), and
+//!   `JoinOpen` (host-initiated OTA join).
+//!
+//! Settings (remote-shell reconfigurable, `/system settings set …`): `temp-period`,
+//! `temp-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
+//! boot), `heartbeat`. The `/button sim <press|release|click|hold>` command injects
+//! synthetic events through the full radio path — the HIL bench's "finger".
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -15,14 +30,160 @@
 #![no_std]
 #![no_main]
 
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_time::Duration;
-use log::info;
-use tower::{app, board::Board, button, led, watchdog};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Instant, Timer};
+use log::{info, warn};
+use tower::board::GuardedI2c;
+use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
+use tower::radio::Spirit1;
+use tower::radio::config::Band;
+use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW, SendResult};
+use tower::storage::{NS_APP, NS_SHELL, Nv};
+use tower::tmp112::{self, Tmp112};
+use tower::{app, board::Board, button, console, led, shell, watchdog};
+use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, Joined, MgmtOp, ProvisionAck};
+use tower_protocol::msg::MgmtRequest;
+use tower_protocol::radio::{
+    AccelKind, ButtonKind, MAX_RADIO_PAYLOAD, NodeCmd, NodeInfo, NodeMsg, NodeShellChunk,
+    RADIO_SCHEMA_VERSION, RADIO_SHELL_CHUNK, decode_node_cmd, encode_node_msg,
+};
+use tower_protocol::{MsgType, decode_frame};
 
-static BTN_CH: button::ButtonChannel = button::ButtonChannel::new();
+// --- persistence (NS_APP) --------------------------------------------------------
+
+/// Provision record: `(gw_id, key, band, channel)` (postcard).
+const KEY_PROVISION: u8 = 0x00;
+/// Operator override of the UID-derived radio id (u32 LE; absent = derived).
+const KEY_MY_ID: u8 = 0x01;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct Provisioned {
+    gw_id: u32,
+    key: [u8; 16],
+    band: u8,
+    channel: u8,
+}
+
+// --- settings (NS_SHELL locals) ----------------------------------------------------
+
+const SET_TEMP_PERIOD: u8 = 0x10;
+const SET_TEMP_DELTA: u8 = 0x11;
+const SET_ACCEL: u8 = 0x12;
+const SET_HEARTBEAT: u8 = 0x13;
+
+static BTN_SETTINGS: &[shell::Setting] = &[
+    shell::Setting {
+        key: SET_TEMP_PERIOD,
+        name: "temp-period",
+        kind: shell::Kind::Uint { min: 5, max: 86_400 },
+        default: "60",
+    },
+    shell::Setting {
+        key: SET_TEMP_DELTA,
+        name: "temp-delta",
+        kind: shell::Kind::Uint { min: 0, max: 10_000 },
+        default: "50",
+    },
+    shell::Setting {
+        key: SET_ACCEL,
+        name: "accel",
+        kind: shell::Kind::Enum(&["off", "low", "medium", "high"]),
+        default: "medium",
+    },
+    shell::Setting {
+        key: SET_HEARTBEAT,
+        name: "heartbeat",
+        kind: shell::Kind::Uint { min: 60, max: 86_400 },
+        default: "900",
+    },
+];
+
+// --- synthetic button events (the HIL bench's finger) ------------------------------
+
+/// `/button sim …` → main loop. Same `button::Event` type as the real button, selected
+/// in the same arm, so the full count/radio path is exercised — not a parallel one.
+static SIM_CH: Channel<CriticalSectionRawMutex, button::Event, 4> = Channel::new();
+
+fn cmd_sim(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
+    use core::fmt::Write as _;
+    let ev = match args.first().copied() {
+        Some("press") => button::Event::Press,
+        Some("release") => button::Event::Release,
+        Some("click") => button::Event::Click,
+        Some("hold") => button::Event::Hold,
+        _ => {
+            let _ = write!(ctx, "usage: /button sim <press|release|click|hold>");
+            return shell::Outcome::code(shell::R_BAD_ARG);
+        }
+    };
+    if SIM_CH.try_send(ev).is_ok() {
+        let _ = write!(ctx, "ok");
+        shell::Outcome::ok()
+    } else {
+        let _ = write!(ctx, "sim queue full");
+        shell::Outcome::code(shell::R_STORAGE)
+    }
+}
+
+static BTN_COMMANDS: &[shell::Entry] = &[shell::Entry::menu(
+    "button",
+    &[shell::Entry::cmd(
+        "sim",
+        shell::Args::Names(&["press", "release", "click", "hold"]),
+        cmd_sim,
+    )],
+)];
+
+// --- LED patterns -------------------------------------------------------------------
+
 static LED_CH: led::LedChannel = led::LedChannel::new();
 static CLICK: led::Pattern = &[led::Step::on(60)];
+/// Double-blink background: not paired with any gateway yet (hold the button to pair).
+static UNPROVISIONED: led::Pattern = &[
+    led::Step::on(60),
+    led::Step::off(120),
+    led::Step::on(60),
+    led::Step::off(1760),
+];
+/// Fast blink while the OTA join runs.
+static JOINING: led::Pattern = &[led::Step::on(100), led::Step::off(150)];
+
+/// Post-uplink RX window when the gateway's ACK advertises a queued downlink. The
+/// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst) — 1 s
+/// covers it with margin.
+const DOWNLINK_WINDOW: Duration = Duration::from_secs(1);
+/// Shell-response chunks ride confirmed uplinks with extra reps: the gateway's
+/// single-owner loop may be busy retrying a queued downlink when a chunk goes out.
+const CHUNK_REPS: u8 = 5;
+
+fn read_u32_setting(kv: Nv, local: u8, default: u32) -> u32 {
+    let mut b = [0u8; 4];
+    match kv.scope(NS_SHELL).get_bytes(local, &mut b) {
+        Ok(Some(4)) => u32::from_le_bytes(b),
+        _ => default,
+    }
+}
+
+fn read_accel_setting(kv: Nv) -> Option<Sensitivity> {
+    let mut b = [0u8; 8];
+    match kv.scope(NS_SHELL).get_bytes(SET_ACCEL, &mut b) {
+        Ok(Some(n)) => match &b[..n] {
+            b"off" => None,
+            b"low" => Some(Sensitivity::Low),
+            b"high" => Some(Sensitivity::High),
+            _ => Some(Sensitivity::Medium),
+        },
+        _ => Some(Sensitivity::Medium),
+    }
+}
+
+/// The shared I²C2 bus, resident with the accelerometer (its tilt IRQ needs register
+/// access most often); `measure_temp` borrows it for each one-shot read. `None` only
+/// transiently inside a swap — see `board::Board` for the bus-sharing contract.
+type AccelBus = Option<Lis2dh12<GuardedI2c>>;
 
 async fn run(b: Board) {
     // Hardware safety net: a wedged unit resets itself instead of dying in the field. The
@@ -36,6 +197,7 @@ async fn run(b: Board) {
         &LED_CH,
         led::Polarity::ActiveHigh,
     );
+    static BTN_CH: button::ButtonChannel = button::ButtonChannel::new();
     let btn = button::init_exti(
         b.spawner,
         b.button,
@@ -43,23 +205,529 @@ async fn run(b: Board) {
         button::Config::default(),
         &BTN_CH,
     );
+    let mut accel_int = b.accel_int;
 
-    // TODO: bring up the SPIRIT1 radio as a node and pair with the gateway. See the
-    // `net_*` examples + the `net` node role in `docs/radio.md`, e.g.:
-    //   let radio = tower::radio::Spirit1::new(b.radio_spi, b.radio_sck, b.radio_mosi,
-    //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
-    //   let mut net = tower::radio::net::Net::new(radio, b.kv,
-    //                   NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await?;
-    info!(target: "button", "radio_push_button skeleton — press the button");
+    let kv = b.kv;
+    let app_kv = kv.scope(NS_APP);
+
+    let my_id = {
+        let mut idb = [0u8; 4];
+        match app_kv.get_bytes(KEY_MY_ID, &mut idb) {
+            Ok(Some(4)) => u32::from_le_bytes(idb),
+            _ => tower::board::unique_id32(),
+        }
+    };
+    let mut provision: Option<Provisioned> = app_kv.get::<Provisioned>(KEY_PROVISION).ok().flatten();
+
+    // Accelerometer: reclaim the shared I²C2 bus and arm the tilt interrupt (register
+    // state persists while powered, so this is a boot-time configuration; the `accel`
+    // setting applies on the next reboot).
+    let accel_sens = read_accel_setting(kv);
+    let mut bus = {
+        let mut accel = Lis2dh12::new(b.tmp112.release(), lis2dh12::ADDR_DEFAULT);
+        if let Some(sens) = accel_sens {
+            let _ = accel.init();
+            match accel.enable_tilt(TiltConfig::new(sens)) {
+                Ok(()) => info!(target: "button", "accel tilt armed"),
+                Err(_) => warn!(target: "button", "accel tilt enable failed"),
+            }
+        }
+        Some(accel)
+    };
+
+    let radio = Spirit1::new(
+        b.radio_spi,
+        b.radio_sck,
+        b.radio_mosi,
+        b.radio_miso,
+        b.radio_cs,
+        b.radio_sdn,
+        b.radio_irq,
+    );
+    let (band, channel, key) = match provision {
+        Some(p) => (
+            if p.band == mgmt::BAND_US915 {
+                Band::Us915
+            } else {
+                Band::Eu868
+            },
+            p.channel,
+            p.key,
+        ),
+        None => (Band::DEFAULT, 0, [0u8; 16]),
+    };
+    let mut net = match Net::new(
+        radio,
+        kv,
+        NetConfig {
+            my_id,
+            key,
+            band,
+            channel,
+        },
+    )
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            log::error!(target: "button", "net init: {e} — radio dead, local mode only");
+            return;
+        }
+    };
+    if let Some(p) = provision {
+        net.add_peer(p.gw_id, &p.key);
+    }
+    let _ = net.sleep().await; // radio sleeps between events from the start
+
+    info!(
+        target: "button",
+        "PUSH-BUTTON {:08X}: {}",
+        my_id,
+        if provision.is_some() { "paired" } else { "UNPAIRED — hold the button to pair" }
+    );
+    if provision.is_none() {
+        led.set_background(Some(UNPROVISIONED));
+    }
+
+    // Per-kind running counts since boot (RAM — a reset is a reboot, disambiguated
+    // host-side by the heartbeat's session_id).
+    let mut counts = [0u32; 4];
+    let mut last_temp_sent: Option<i32> = None;
+    let mut last_temp_tx = Instant::now();
+    let mut next_temp = Instant::now(); // measure immediately on boot
+    let mut next_heartbeat = Instant::now(); // boot Info doubles as the first heartbeat
 
     loop {
-        if let button::Event::Click = btn.next_event().await {
-            led.play(CLICK);
-            // TODO: send a secured radio message to the gateway here, e.g.
-            //   net.send(&payload).await;
-            info!(target: "button", "click — TODO: send radio message to the gateway");
+        let timer_due = next_temp.min(next_heartbeat);
+        match select4(
+            select(btn.next_event(), SIM_CH.receive()),
+            Timer::at(timer_due),
+            accel_int.wait_for_high(),
+            console::mgmt_next(),
+        )
+        .await
+        {
+            // --- button (real or simulated — same path) ---
+            Either4::First(ev) => {
+                let ev = match ev {
+                    Either::First(e) | Either::Second(e) => e,
+                };
+                let kind = match ev {
+                    button::Event::Press => ButtonKind::Press,
+                    button::Event::Release => ButtonKind::Release,
+                    button::Event::Click => ButtonKind::Click,
+                    button::Event::Hold => ButtonKind::Hold,
+                };
+                let idx = kind as usize;
+                counts[idx] = counts[idx].wrapping_add(1);
+                if matches!(ev, button::Event::Click) {
+                    led.play(CLICK);
+                }
+
+                if provision.is_none() {
+                    if matches!(ev, button::Event::Hold) {
+                        provision = ota_join(&mut net, my_id, band, channel, kv, &led).await;
+                        if provision.is_some() {
+                            led.set_background(None);
+                            send_info(&mut net, provision, &counts).await;
+                        }
+                    }
+                    continue; // unpaired: nothing to send events to
+                }
+                // Click/Hold are the semantic events — worth more repetitions than the
+                // raw press/release edges around them.
+                let reps = match kind {
+                    ButtonKind::Click | ButtonKind::Hold => 5,
+                    _ => 3,
+                };
+                let msg = NodeMsg::Button {
+                    kind,
+                    count: counts[idx],
+                };
+                uplink(&mut net, provision, &msg, reps).await;
+            }
+
+            // --- periodic: temperature and/or heartbeat due ---
+            Either4::Second(()) => {
+                let now = Instant::now();
+                if now >= next_temp {
+                    let period = read_u32_setting(kv, SET_TEMP_PERIOD, 60) as u64;
+                    next_temp = now + Duration::from_secs(period.max(5));
+                    if let Some(millic) = measure_temp(&mut bus).await {
+                        let delta_mc = read_u32_setting(kv, SET_TEMP_DELTA, 50) as i32 * 10;
+                        let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
+                        let changed = last_temp_sent.is_none_or(|last| (millic - last).abs() >= delta_mc);
+                        let stale = last_temp_tx.elapsed() >= Duration::from_secs(heartbeat);
+                        if provision.is_some() && (changed || stale) {
+                            let msg = NodeMsg::Temperature { millic };
+                            if uplink(&mut net, provision, &msg, 3).await {
+                                last_temp_sent = Some(millic);
+                                last_temp_tx = Instant::now();
+                            }
+                        }
+                    }
+                }
+                if now >= next_heartbeat {
+                    let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
+                    next_heartbeat = now + Duration::from_secs(heartbeat.max(60));
+                    if provision.is_some() {
+                        send_info(&mut net, provision, &counts).await;
+                    }
+                }
+            }
+
+            // --- accelerometer tilt interrupt ---
+            Either4::Third(()) => {
+                if let Some(face) = handle_tilt(&mut bus).await
+                    && provision.is_some()
+                {
+                    let msg = NodeMsg::Accel {
+                        kind: AccelKind::Motion,
+                        face,
+                    };
+                    uplink(&mut net, provision, &msg, 3).await;
+                }
+            }
+
+            // --- management over the cable (USB present by definition) ---
+            Either4::Fourth(frame) => {
+                let Ok((MsgType::MgmtRequest, _seq, payload)) = decode_frame(&frame) else {
+                    continue;
+                };
+                let Ok(req) = postcard::from_bytes::<MgmtRequest>(payload) else {
+                    continue;
+                };
+                handle_mgmt(req, &mut net, &mut provision, my_id, band, channel, kv, &led).await;
+                if provision.is_some() {
+                    led.set_background(None);
+                }
+            }
         }
     }
 }
 
-app!(run);
+/// OTA join (button held): run the 3-way JOIN for the standard window, persist the
+/// credentials on success.
+async fn ota_join(
+    net: &mut Net,
+    my_id: u32,
+    band: Band,
+    channel: u8,
+    kv: Nv,
+    led: &led::Led,
+) -> Option<Provisioned> {
+    info!(target: "button", "JOIN: looking for a pairing window ({} s)…", PAIRING_WINDOW.as_secs());
+    led.set_background(Some(JOINING));
+    let _ = net.wake().await;
+    let joined = net.join(my_id, PAIRING_WINDOW).await;
+    let _ = net.sleep().await;
+    match joined {
+        Some((gw_id, key)) => {
+            let p = Provisioned {
+                gw_id,
+                key,
+                band: if band == Band::Us915 {
+                    mgmt::BAND_US915
+                } else {
+                    mgmt::BAND_EU868
+                },
+                channel,
+            };
+            if kv.scope(NS_APP).set(KEY_PROVISION, &p).is_err() {
+                warn!(target: "button", "JOINED {:08X} but persist failed — will not survive reboot", gw_id);
+            } else {
+                info!(target: "button", "JOINED gateway {:08X}", gw_id);
+            }
+            net.add_peer(gw_id, &key);
+            Some(p)
+        }
+        None => {
+            warn!(target: "button", "join failed (no gateway window in range)");
+            led.set_background(Some(UNPROVISIONED));
+            None
+        }
+    }
+}
+
+/// One-shot temperature read: take the bus from the accelerometer, measure, hand it
+/// back (chip register state — the tilt config — persists across the swap).
+async fn measure_temp(bus: &mut AccelBus) -> Option<i32> {
+    let mut t = Tmp112::new(bus.take()?.release(), tmp112::ADDR_VPLUS);
+    let raw = t.oneshot().await;
+    let millic = raw.ok().map(tmp112::raw_to_millicelsius);
+    *bus = Some(Lis2dh12::new(t.release(), lis2dh12::ADDR_DEFAULT));
+    millic
+}
+
+/// Tilt IRQ: clear/validate the latched interrupt, settle, and report the face up
+/// (0 = unknown/moving).
+async fn handle_tilt(bus: &mut AccelBus) -> Option<u8> {
+    let Some(accel) = bus else {
+        return None; // bus mid-swap (can't happen: swaps are scoped to measure_temp)
+    };
+    if !accel.tilt_triggered().unwrap_or(false) {
+        return None; // spurious edge / rate-limited by the driver's min_interval
+    }
+    // Let the unit settle, then read which face is up for the event's context.
+    Timer::after_millis(300).await;
+    let face = accel.read().ok().and_then(|s| s.dice()).unwrap_or(0);
+    Some(face)
+}
+
+/// Send the identity/heartbeat `Info` (also the delivery opportunity for queued
+/// downlinks on an otherwise idle node).
+async fn send_info(net: &mut Net, provision: Option<Provisioned>, _counts: &[u32; 4]) {
+    let name = console::firmware_name();
+    let msg = NodeMsg::Info(NodeInfo {
+        firmware_name: name.as_str(),
+        firmware_version: console::firmware_version(),
+        session_id: console::session_id(),
+        sleeping: true,
+        battery_mv: None, // reserved until the SDK grows an ADC block
+    });
+    uplink(net, provision, &msg, 3).await;
+}
+
+/// One uplink cycle: wake the radio, send confirmed, honour the ACK's pending flag
+/// (downlink window + remote shell), then sleep the radio again.
+async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>, reps: u8) -> bool {
+    let Some(p) = provision else {
+        return false;
+    };
+    let mut buf = [0u8; MAX_RADIO_PAYLOAD];
+    let Ok(n) = encode_node_msg(msg, &mut buf) else {
+        warn!(target: "button", "uplink encode failed");
+        return false;
+    };
+    let _ = net.wake().await;
+    let result = net.send(p.gw_id, &buf[..n], true, reps).await;
+    let delivered = matches!(result, SendResult::Delivered);
+    if !delivered {
+        warn!(target: "button", "uplink: {result}");
+    }
+    while net.last_ack().is_some_and(|m| m.pending) {
+        if !downlink_window(net, p.gw_id).await {
+            break;
+        }
+        // The last response chunk's ACK re-advertises pending, chaining queued
+        // commands one per window without any polling.
+    }
+    let _ = net.sleep().await;
+    delivered
+}
+
+/// Hold RX open for one queued downlink; execute it and stream the response. Returns
+/// whether a downlink actually arrived (false = window expired, stop chaining).
+async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
+    let deadline = Instant::now() + DOWNLINK_WINDOW;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.as_ticks() == 0 {
+            return false;
+        }
+        let Some(rx) = net.recv(remaining).await else {
+            return false;
+        };
+        if rx.src != gw_id {
+            continue; // another node's traffic — not our downlink
+        }
+        let (cmd_id, result, reboot, out) = match decode_node_cmd(rx.data()) {
+            Ok(NodeCmd::Shell { cmd_id, line }) => {
+                info!(target: "button", "remote shell: {}", line);
+                let mut out: heapless::String<{ shell::RESP_CAP }> = heapless::String::new();
+                let (result, reboot) = shell::run_line(line, &mut out);
+                (cmd_id, result, reboot, out)
+            }
+            Err(tower_protocol::Error::BadVersion { got }) => {
+                warn!(
+                    target: "button",
+                    "downlink schema v{} unsupported (this build: v{})", got, RADIO_SCHEMA_VERSION
+                );
+                return true;
+            }
+            Err(_) => {
+                warn!(target: "button", "downlink malformed — dropped");
+                return true;
+            }
+        };
+        send_shell_chunks(net, gw_id, cmd_id, result, out.as_str()).await;
+        if reboot {
+            // The response is on the air; the reboot request came over radio, so there
+            // is no console to flush — reset now.
+            cortex_m::peripheral::SCB::sys_reset();
+        }
+        return true;
+    }
+}
+
+/// Stream a remote-shell response as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
+/// text bytes each, split at char boundaries; empty responses still send one final
+/// chunk so the host always completes the command).
+async fn send_shell_chunks(net: &mut Net, gw_id: u32, cmd_id: u16, result: u8, text: &str) {
+    let mut rest = text;
+    let mut chunk: u16 = 0;
+    loop {
+        let mut take = rest.len().min(RADIO_SHELL_CHUNK);
+        while take > 0 && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        let (head, tail) = rest.split_at(take);
+        let last = tail.is_empty();
+        let msg = NodeMsg::Shell(NodeShellChunk {
+            cmd_id,
+            result,
+            chunk,
+            last,
+            text: head,
+        });
+        let mut buf = [0u8; MAX_RADIO_PAYLOAD];
+        let Ok(n) = encode_node_msg(&msg, &mut buf) else {
+            return;
+        };
+        if !matches!(
+            net.send(gw_id, &buf[..n], true, CHUNK_REPS).await,
+            SendResult::Delivered
+        ) {
+            // A lost chunk shows up host-side as a chunk gap (incomplete response);
+            // aborting beats streaming the tail of a response the host can't anchor.
+            warn!(target: "button", "response chunk {} undelivered — aborting", chunk);
+            return;
+        }
+        if last {
+            return;
+        }
+        rest = tail;
+        chunk = chunk.wrapping_add(1);
+    }
+}
+
+/// Cable-side management: `Describe` / `Provision` / `JoinOpen` (USB present, since
+/// the console is USB-gated — exactly the cable-pairing situation).
+#[allow(clippy::too_many_arguments)]
+async fn handle_mgmt(
+    req: MgmtRequest<'_>,
+    net: &mut Net,
+    provision: &mut Option<Provisioned>,
+    my_id: u32,
+    band: Band,
+    channel: u8,
+    kv: Nv,
+    led: &led::Led,
+) {
+    let req_id = req.req_id;
+    match req.op {
+        MgmtOp::Describe => {
+            let name = console::firmware_name();
+            respond_record(
+                req_id,
+                &DeviceInfo {
+                    role: DeviceRole::Node,
+                    radio_schema_version: RADIO_SCHEMA_VERSION,
+                    net_id: my_id,
+                    band: match band {
+                        Band::Eu868 => mgmt::BAND_EU868,
+                        Band::Us915 => mgmt::BAND_US915,
+                    },
+                    channel,
+                    node_capacity: 0,
+                    node_count: 0,
+                    provisioned: provision.is_some(),
+                    gw_id: provision.map(|p| p.gw_id).unwrap_or(0),
+                    firmware_name: name.as_str(),
+                },
+            )
+            .await;
+        }
+        MgmtOp::Provision(p) => {
+            if p.gw_id == 0 || p.band > mgmt::BAND_US915 {
+                respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
+                return;
+            }
+            let app_kv = kv.scope(NS_APP);
+            let rec = Provisioned {
+                gw_id: p.gw_id,
+                key: p.key,
+                band: p.band,
+                channel: p.channel,
+            };
+            if app_kv.set(KEY_PROVISION, &rec).is_err() {
+                respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                return;
+            }
+            let effective_id = match p.my_id {
+                Some(id) if id != 0 => {
+                    if app_kv.set_bytes(KEY_MY_ID, &id.to_le_bytes()).is_err() {
+                        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                        return;
+                    }
+                    id
+                }
+                _ => my_id,
+            };
+            respond_record(req_id, &ProvisionAck { id: effective_id }).await;
+            info!(target: "button", "provisioned for gateway {:08X} — rebooting", p.gw_id);
+            // Band/channel/id take effect at Net::new — reboot into the new identity
+            // (also bumps session_id, so the host sees the reprovision).
+            console::flush().await;
+            cortex_m::peripheral::SCB::sys_reset();
+        }
+        MgmtOp::JoinOpen { window_s } => {
+            if window_s == 0 {
+                respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
+                return;
+            }
+            led.set_background(Some(JOINING));
+            let _ = net.wake().await;
+            let joined = net.join(my_id, Duration::from_secs(window_s as u64)).await;
+            let _ = net.sleep().await;
+            match joined {
+                Some((gw_id, key)) => {
+                    let rec = Provisioned {
+                        gw_id,
+                        key,
+                        band: if band == Band::Us915 {
+                            mgmt::BAND_US915
+                        } else {
+                            mgmt::BAND_EU868
+                        },
+                        channel,
+                    };
+                    if kv.scope(NS_APP).set(KEY_PROVISION, &rec).is_err() {
+                        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                        return;
+                    }
+                    net.add_peer(gw_id, &key);
+                    *provision = Some(rec);
+                    respond_record(req_id, &Joined { gw_id }).await;
+                }
+                None => {
+                    led.set_background(if provision.is_some() {
+                        None
+                    } else {
+                        Some(UNPROVISIONED)
+                    });
+                    respond_empty(req_id, mgmt::MGMT_TIMEOUT).await;
+                }
+            }
+        }
+        // Gateway-side ops: this device is a node.
+        _ => respond_empty(req_id, mgmt::MGMT_UNSUPPORTED).await,
+    }
+}
+
+async fn respond_empty(req_id: u16, result: u8) {
+    console::mgmt_chunk(req_id, result, 0, true, &[]).await;
+}
+
+async fn respond_record<T: serde::Serialize>(req_id: u16, record: &T) {
+    let mut buf = [0u8; 192];
+    match postcard::to_slice(record, &mut buf) {
+        Ok(bytes) => {
+            let n = bytes.len();
+            console::mgmt_chunk(req_id, mgmt::MGMT_OK, 0, true, &buf[..n]).await;
+        }
+        Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
+    }
+}
+
+app!(run, commands: BTN_COMMANDS, settings: BTN_SETTINGS);

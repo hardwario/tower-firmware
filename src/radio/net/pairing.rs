@@ -96,8 +96,10 @@ impl Net {
     /// Joiner: request pairing using `my_id` (the joiner's **own** ID, which it
     /// keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default). Sends
     /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
-    /// and returns the key on commit (or `None` on timeout).
-    pub async fn join(&mut self, my_id: u32, timeout: Duration) -> Option<[u8; 16]> {
+    /// and returns `(host_id, key)` on commit (or `None` on timeout) — the host id
+    /// is what a product node persists so it knows *which* gateway to talk to
+    /// after a reboot.
+    pub async fn join(&mut self, my_id: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
         }
@@ -136,7 +138,7 @@ impl Net {
                 Timer::after(ACK_TURNAROUND).await;
                 self.tx_pair(&conf_hdr, &conf).await;
                 self.advance_tx_counter();
-                return Some(key);
+                return Some((hdr.src, key));
             }
         }
         None

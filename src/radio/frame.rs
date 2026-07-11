@@ -21,6 +21,13 @@ pub const HDR_LEN: usize = 14;
 pub const HDR_LEN_BULK: usize = 17;
 /// Max application payload in a non-bulk frame (96 − 14 − 8).
 pub const MAX_PAYLOAD: usize = 74;
+// The shared radio-application schema (`tower_protocol::radio`) sizes its NodeMsg/NodeCmd
+// envelopes against this exact MTU (its encoders reject anything larger). If either side
+// drifts, node apps could build envelopes the net layer refuses — make it a compile error.
+const _: () = assert!(
+    tower_protocol::radio::MAX_RADIO_PAYLOAD == MAX_PAYLOAD,
+    "tower_protocol::radio::MAX_RADIO_PAYLOAD must equal the radio MTU"
+);
 /// Max payload (chunk) in a bulk frame (96 − 17 − 8 = 71, but the protocol caps
 /// bulk chunks at 64).
 pub const MAX_BULK_PAYLOAD: usize = 64;

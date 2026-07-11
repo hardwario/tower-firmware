@@ -169,6 +169,7 @@ test *args:
     cargo test -p tower-kv --target {{host}} {{args}}
     cargo test -p tower-net-core --target {{host}} {{args}}
     cargo test -p tower-radio-core --target {{host}} {{args}}
+    cargo test -p tower-gw-core --target {{host}} {{args}}
 
 
 # === Maintenance ==================================================================================

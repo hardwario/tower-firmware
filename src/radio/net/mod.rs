@@ -31,7 +31,8 @@ use embassy_time::{Duration, Instant, Timer};
 // The security-critical *decision* kernels (replay rule, TX-counter watermark/fail-closed,
 // ACK resolution) live in the host-testable `tower_net_core` leaf crate; this module keeps the
 // radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
-use tower_net_core::ack::{AckVerdict, AckWait};
+pub use tower_net_core::ack::AckMeta;
+use tower_net_core::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
 use tower_net_core::replay::{ReplayLane, ReplayVerdict};
 use tower_net_core::txctr::TxCounter;
 
@@ -85,6 +86,11 @@ struct Peer {
     key: [u8; 16],
     /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
     lane: ReplayLane,
+    /// A downlink is queued for this peer (app-maintained via [`Net::set_pending`]);
+    /// advertised in the flags byte of every ACK we send it. Must be set *before* the
+    /// uplink that should learn it arrives — the ACK goes out inside [`Net::recv`],
+    /// before the app sees the frame.
+    pending: bool,
 }
 
 /// Outcome of a [`Net::send`]. Inspect it — a `NotDelivered`/`Busy`/`DutyLimited`
@@ -146,6 +152,8 @@ pub struct Received {
     pub src: u32,
     pub counter: u32,
     pub rssi_dbm: i16,
+    /// Link/packet quality indicator (the SPIRIT1's PQI) for this reception.
+    pub lqi: u8,
     /// Whether the sender requested confirmation (an ACK was sent back).
     pub confirmed: bool,
     len: usize,
@@ -202,6 +210,10 @@ pub struct Net {
     afa: afa::Afa,
     /// US FHSS state (inert unless `access == Fhss`).
     fhss: fhss::Fhss,
+    /// Metadata of the ACK that resolved the most recent confirmed [`send`](Self::send)
+    /// (receiver-side RSSI + the pending-downlink flag). Cleared at the start of each
+    /// send; `None` after an unconfirmed or failed one.
+    last_ack: Option<AckMeta>,
 }
 
 impl Net {
@@ -262,6 +274,7 @@ impl Net {
             access: Access::Duty,
             afa: afa::Afa::disabled(),
             fhss: fhss::Fhss::disabled(),
+            last_ack: None,
         })
     }
 
@@ -333,6 +346,7 @@ impl Net {
                     id,
                     key: *key,
                     lane: ReplayLane::new(last_seen),
+                    pending: false,
                 });
                 return true;
             }
@@ -357,6 +371,30 @@ impl Net {
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.iter().filter(|p| p.is_some()).count()
+    }
+
+    /// Mark whether a downlink is queued for a registered peer — advertised in the
+    /// flags byte of every ACK sent to it, so a sleeping node knows to hold an RX
+    /// window open after its uplink. Set it **before** the uplink that should learn
+    /// it: the ACK goes out inside [`recv`](Self::recv), before the app sees the
+    /// frame. Returns `false` if the peer isn't registered.
+    pub fn set_pending(&mut self, id: u32, pending: bool) -> bool {
+        match self.peer_slot(id) {
+            Some(i) => {
+                self.peers[i].as_mut().unwrap().pending = pending;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Metadata of the ACK that resolved the most recent confirmed [`send`](Self::send):
+    /// the receiver-side RSSI it reported, and whether it advertises a queued downlink
+    /// for us (the sleeping-node RX-window cue). `None` after an unconfirmed, failed,
+    /// or not-yet-attempted send.
+    #[must_use]
+    pub fn last_ack(&self) -> Option<AckMeta> {
+        self.last_ack
     }
 
     /// Last-seen counter for a registered peer (`None` if not registered).
@@ -447,6 +485,7 @@ impl Net {
     /// the byte-identical frame up to `reps` times; unconfirmed sends transmit
     /// once. The transfer consumes exactly one TX counter value (docs/radio.md).
     pub async fn send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
+        self.last_ack = None; // stale ACK metadata must not outlive its send
         if self.txc.locked() {
             return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
         }
@@ -550,6 +589,7 @@ impl Net {
                     src: hdr.src,
                     counter: hdr.counter,
                     rssi_dbm: q.rssi_dbm,
+                    lqi: q.lqi,
                     confirmed,
                     len: plen,
                     buf: out,
@@ -615,7 +655,10 @@ impl Net {
                 continue;
             };
             let is_ack = hdr.frame_type == FrameType::Ack;
-            if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range]) == AckVerdict::Resolved {
+            if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range.clone()]) == AckVerdict::Resolved {
+                // Keep the resolving ACK's metadata (receiver RSSI + the wire-v3
+                // pending-downlink flag) for `last_ack()` — the sleeping-node cue.
+                self.last_ack = Some(ack_meta(&buf[range]));
                 return true;
             }
         }
@@ -631,12 +674,19 @@ impl Net {
         // Let the sender finish its TX→RX turnaround before we transmit.
         Timer::after(ACK_TURNAROUND).await;
         let ack_counter = self.txc.counter();
-        let mut payload = [0u8; 5];
+        let mut payload = [0u8; 6];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
         // Clamp to i8 range before packing: rssi_dbm is i16 and the SPIRIT1 noise floor reaches
         // below −128 dBm, where a bare `as i8` wraps (−130 → +126) and reports a strong link for
         // the weakest one. Clamp so the reported margin is monotonic at the edges.
         payload[4] = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
+        // Flags byte (wire v3): advertise a queued downlink so a sleeping sender holds an RX
+        // window open after this uplink. Appending is interop-safe — the ACK acceptance rule is
+        // `len >= 4` (pinned in tower-net-core), so pre-v3 peers simply ignore the byte.
+        payload[5] = match self.peer_slot(dest) {
+            Some(i) if self.peers[i].as_ref().unwrap().pending => ack_flags::PENDING,
+            _ => 0,
+        };
         let hdr = Header {
             frame_type: FrameType::Ack,
             flags: 0,
@@ -663,6 +713,24 @@ impl Net {
                 let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
             }
         }
+    }
+
+    /// Put the radio into its SLEEP state between transfers (registers retained; wake
+    /// with [`wake`](Self::wake) before the next TX/RX). The battery-node pattern —
+    /// see `examples/radio_sleep.rs`; `Net` never sleeps the radio on its own.
+    pub async fn sleep(&mut self) -> Result<(), RadioError> {
+        self.radio.to_sleep().await
+    }
+
+    /// Wake the radio from SLEEP back to READY (no re-configuration needed).
+    pub async fn wake(&mut self) -> Result<(), RadioError> {
+        self.radio.to_ready().await
+    }
+
+    /// Sample the ambient RSSI of the current receive channel, in dBm — the
+    /// gateway's channel-diagnostics primitive (`RadioStat::Channel`).
+    pub async fn rssi_sample(&mut self) -> Result<i16, RadioError> {
+        Ok(config::rssi_to_dbm(self.radio.rssi_sample().await?))
     }
 
     /// Advance the internal xorshift32 PRNG and return the new 32-bit state. Backs the

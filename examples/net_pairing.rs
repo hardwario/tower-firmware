@@ -89,10 +89,10 @@ async fn run(b: Board) {
         info!(target: "pair", "JOINER: requesting to join with my own id {:08X} (1 min)", MY_ID);
         loop {
             match net.join(MY_ID, PAIRING_WINDOW).await {
-                Some(key) => info!(
+                Some((gw_id, key)) => info!(
                     target: "pair",
-                    "JOINED *** id={:08X} (mine) key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
-                    MY_ID, key[0], key[1], key[2], key[3]
+                    "JOINED *** id={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
+                    MY_ID, gw_id, key[0], key[1], key[2], key[3]
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),
             }

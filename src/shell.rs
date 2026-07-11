@@ -56,8 +56,9 @@ const MAX_LINE: usize = 96;
 const MAX_TOKENS: usize = 8;
 /// Shell-response build buffer. Must stay equal to `console::MAX_RESP` (the transport's
 /// per-message cap): `console::shell_response` re-clips to that, so if this grew larger the
-/// excess would be silently dropped there.
-const RESP_CAP: usize = 256;
+/// excess would be silently dropped there. Public because [`run_line`] callers (the radio
+/// remote shell) allocate the response buffer themselves.
+pub const RESP_CAP: usize = 256;
 /// Largest value (bytes) a setting can hold (and a `Str` setting's `max`).
 pub const MAX_SETTING: usize = 64;
 
@@ -404,21 +405,7 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
     match mt {
         MsgType::ShellCommand => {
             if let Ok(cmd) = postcard::from_bytes::<ShellCommand>(payload) {
-                // Reject an over-long line instead of silently executing a truncated prefix. The
-                // wire allows ~240-byte lines but the shell buffer is MAX_LINE; clipping mid-value
-                // could store a truncated setting and still report success (silent corruption).
-                if cmd.line.len() > MAX_LINE {
-                    console::shell_response(cmd.cmd_id, R_BAD_ARG, "line too long").await;
-                    return;
-                }
-                // Likewise reject more tokens than `tokenize` holds, rather than dropping the tail.
-                if cmd.line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
-                    console::shell_response(cmd.cmd_id, R_BAD_ARG, "too many arguments").await;
-                    return;
-                }
-                let mut line = String::<MAX_LINE>::new();
-                let _ = line.push_str(cmd.line); // fits: len <= MAX_LINE (checked above)
-                dispatch(kv, app, settings, cmd.cmd_id, line.as_str()).await;
+                dispatch(kv, app, settings, cmd.cmd_id, cmd.line).await;
             }
         }
         MsgType::ShellComplete => {
@@ -434,15 +421,71 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
 }
 
 async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cmd_id: u16, line: &str) {
+    let mut out = String::<RESP_CAP>::new();
+    let (result, reboot) = run_line_with(kv, app, settings, line, &mut out);
+    console::shell_response(cmd_id, result, out.as_str()).await;
+    if reboot {
+        // Wait for the response to actually leave the wire before resetting, instead of a
+        // fixed sleep shorter than a full TX queue at 115200 baud (which truncated the
+        // reboot response). This runs on the console RX task, so a USB unplug within the
+        // window cancels it (the manager tears the console down) and the reset is skipped
+        // — acceptable: a reboot issued then immediately unplugged is a no-op, and the
+        // node reboots on demand only while a host is attached.
+        console::flush().await;
+        cortex_m::peripheral::SCB::sys_reset();
+    }
+}
+
+/// Run one command line against the shell registered by [`serve`]/[`serve_ext`] — the
+/// transport-independent core powering **both** the console dispatcher and the radio
+/// remote shell (one dispatcher, two transports). The response body is written into
+/// `out`; the return is `(result_code, reboot_requested)`. A reboot request is NOT
+/// acted on here — the caller owns its transport and must flush its response (over
+/// radio: send the final chunk) before resetting.
+///
+/// Synchronous: nothing in the resolve/run path awaits (handlers are plain fns).
+/// If no shell was served (`no_shell` apps), answers [`R_NOT_FOUND`].
+pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
+    let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
+    else {
+        let _ = out.push_str("no shell served");
+        return (R_NOT_FOUND, false);
+    };
+    let settings = SettingsTable {
+        base: BASE_SETTINGS,
+        app: app_settings,
+    };
+    run_line_with(kv.scope(NS_SHELL), app_commands, settings, line, out)
+}
+
+/// [`run_line`] against explicit shell state (the console path already holds it).
+fn run_line_with(
+    kv: Scoped,
+    app: &'static [Entry],
+    settings: SettingsTable,
+    line: &str,
+    out: &mut String<RESP_CAP>,
+) -> (u8, bool) {
+    // Reject an over-long line instead of silently executing a truncated prefix. The
+    // wire allows ~240-byte lines but the shell buffer is MAX_LINE; clipping mid-value
+    // could store a truncated setting and still report success (silent corruption).
+    if line.len() > MAX_LINE {
+        let _ = out.push_str("line too long");
+        return (R_BAD_ARG, false);
+    }
+    // Likewise reject more tokens than `tokenize` holds, rather than dropping the tail.
+    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
+        let _ = out.push_str("too many arguments");
+        return (R_BAD_ARG, false);
+    }
     let toks = tokenize(line);
     match resolve(&toks, app) {
         Resolved::Cmd(cmd, arg_start) => {
-            let mut out = String::<RESP_CAP>::new();
             let (outcome, truncated) = {
                 let mut ctx = Ctx {
                     kv,
                     settings,
-                    out: &mut out,
+                    out,
                     overflowed: false,
                 };
                 let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
@@ -456,19 +499,12 @@ async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cm
             } else {
                 outcome.result
             };
-            console::shell_response(cmd_id, result, out.as_str()).await;
-            if outcome.reboot {
-                // Wait for the response to actually leave the wire before resetting, instead of a
-                // fixed sleep shorter than a full TX queue at 115200 baud (which truncated the
-                // reboot response). This runs on the console RX task, so a USB unplug within the
-                // window cancels it (the manager tears the console down) and the reset is skipped
-                // — acceptable: a reboot issued then immediately unplugged is a no-op, and the
-                // node reboots on demand only while a host is attached.
-                console::flush().await;
-                cortex_m::peripheral::SCB::sys_reset();
-            }
+            (result, outcome.reboot)
         }
-        _ => console::shell_response(cmd_id, R_NOT_FOUND, "no such command").await,
+        _ => {
+            let _ = out.push_str("no such command");
+            (R_NOT_FOUND, false)
+        }
     }
 }
 

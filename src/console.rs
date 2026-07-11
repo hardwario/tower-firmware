@@ -49,7 +49,10 @@ use embedded_io_async::Write as _; // brings write_all/flush into scope for Buff
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
-use tower_protocol::msg::{Dropped, Event, Hello, Level, Log, Print, ShellCompletions, ShellResponse};
+use tower_protocol::msg::{
+    Dropped, Event, Hello, Level, Log, MgmtResponse, Print, RadioStat, ShellCompletions, ShellResponse,
+    Uplink,
+};
 use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame};
 
 use crate::storage::{NS_SYS, Nv};
@@ -78,8 +81,21 @@ const FW_LEN: usize = 32;
 const FW_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// `NS_SYS` local key for the persisted boot counter (the `Hello` session_id).
 const KEY_BOOT_COUNT: u8 = 0x00;
-/// TX queue depth (frames). Sized to absorb boot-time chatter before the writer runs.
-const TX_DEPTH: usize = 8;
+/// TX queue depth (frames). 4 (was 8): each slot is a ~280 B `Outgoing`, and on the
+/// 20 KB part every slot is stack the gateway/push-button products can't spare (the
+/// measured `Net`-app stack peak is ~9 KB — see the stack-overflow history). The cost
+/// is honest and accounted: a boot burst deeper than 4 frames drops-newest and is
+/// reported by the writer's [`Dropped`] marker; the async producers ([`event`],
+/// [`uplink`], …) apply backpressure instead of dropping while the console is up.
+const TX_DEPTH: usize = 4;
+/// Host→device RX-copy capacity for the [`SHELL_RX`]/[`MGMT_RX`] channels. The largest
+/// legitimate inner frame is far below `MAX_WIRE`: a `ShellCommand` line caps at the
+/// shell's 96 bytes (~110 B framed) and the biggest `MgmtRequest` (a full-MTU
+/// `QueuePush`) is ~100 B. A frame larger than this fails the copy wholesale
+/// (`heapless` extend rejects, the empty copy is dropped) — same outcome as the
+/// shell's own over-long-line rejection, for 112 fewer bytes per queue slot.
+/// Public: [`mgmt_next`] hands these buffers to apps.
+pub const RX_COPY: usize = 160;
 /// Event caps: name length, per-field key/value length, and max fields. Sized so the
 /// **worst case fits one frame**: postcard ≈ name(1+24) + count(1) + EV_FIELDS·(2 +
 /// EV_KEY + EV_VAL) = 25 + 1 + 6·34 = 230 ≤ the ~249-byte payload budget. The wire
@@ -88,6 +104,13 @@ const EV_NAME: usize = 24;
 const EV_KEY: usize = 12;
 const EV_VAL: usize = 20;
 const EV_FIELDS: usize = 6;
+/// Max forwarded-uplink payload — the radio MTU (`tower_protocol::radio::MAX_RADIO_PAYLOAD`;
+/// equality is static-asserted in `radio::frame`).
+const UPLINK_MAX: usize = tower_protocol::radio::MAX_RADIO_PAYLOAD;
+/// Management-response record bytes per frame. Mirrors [`SHELL_CHUNK`]'s reasoning: a
+/// [`MgmtResponse`] header is ~8 bytes, so 192 stays well under the ~249-byte payload
+/// budget and a frame never fails to encode.
+const MGMT_CHUNK: usize = 192;
 
 /// An owned outgoing message. The writer assigns the `seq` and encodes it, so nothing
 /// borrows past the producing call and dropped frames never consume sequence numbers.
@@ -110,6 +133,27 @@ enum Outgoing {
     },
     /// Completion result — all fields borrow the `'static` command tree, so no copy.
     Completions(ShellCompletions<'static>),
+    /// One decrypted radio uplink, forwarded verbatim by a gateway app (data ≤ the
+    /// radio MTU, so it always fits one frame).
+    Uplink {
+        src: u32,
+        counter: u32,
+        rssi_dbm: i16,
+        lqi: u8,
+        data: Vec<u8, UPLINK_MAX>,
+    },
+    /// One pre-chunked management-response frame. Chunking is **app-driven** (the app
+    /// knows its record boundaries and streams them without a big reassembly buffer);
+    /// each enqueued item is exactly one wire frame.
+    MgmtChunk {
+        req_id: u16,
+        result: u8,
+        chunk: u16,
+        last: bool,
+        data: Vec<u8, MGMT_CHUNK>,
+    },
+    /// One radio-diagnostics sample (owned, tiny).
+    RadioStat(RadioStat),
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
@@ -117,8 +161,14 @@ static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channe
 /// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
 /// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
 /// RX buffer and never calls into the shell, so the transport layer doesn't depend on the
-/// (higher) shell layer. `MAX_WIRE`-sized so any inner frame fits.
-pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, MAX_WIRE>, 2> = Channel::new();
+/// (higher) shell layer. [`RX_COPY`]-sized — every legitimate shell frame fits.
+pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 2> = Channel::new();
+/// Decoded host→device **management** frames (MgmtRequest), copied whole for the app to drain
+/// via [`mgmt_next`]/[`mgmt_try_next`] on its own loop — same ownership story as [`SHELL_RX`]
+/// (the console never calls up into the app). Depth 1 (management is strictly
+/// request/response — one outstanding op; a drop just makes the host retry, and the
+/// 20 KB part wants every spare `MAX_WIRE` buffer back for stack).
+static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel::new();
 /// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
 /// [`manager`] around the writer's lifetime. The "async, never dropped" producers
 /// ([`event`], [`shell_response`], …) apply queue backpressure only while this is true; while
@@ -481,6 +531,49 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
                 send_shell_response(tx, &mut seq, *cmd_id, *result, text.as_str()).await
             }
             Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
+            Outgoing::Uplink {
+                src,
+                counter,
+                rssi_dbm,
+                lqi,
+                data,
+            } => {
+                send(
+                    tx,
+                    &mut seq,
+                    MsgType::Uplink,
+                    &Uplink {
+                        src: *src,
+                        counter: *counter,
+                        rssi_dbm: *rssi_dbm,
+                        lqi: *lqi,
+                        data: data.as_slice(),
+                    },
+                )
+                .await
+            }
+            Outgoing::MgmtChunk {
+                req_id,
+                result,
+                chunk,
+                last,
+                data,
+            } => {
+                send(
+                    tx,
+                    &mut seq,
+                    MsgType::MgmtResponse,
+                    &MgmtResponse {
+                        req_id: *req_id,
+                        result: *result,
+                        chunk: *chunk,
+                        last: *last,
+                        data: data.as_slice(),
+                    },
+                )
+                .await
+            }
+            Outgoing::RadioStat(stat) => send(tx, &mut seq, MsgType::RadioStat, stat).await,
         }
         cancel_guard.0 = false; // item's bytes are in the UART ring — not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
@@ -524,13 +617,35 @@ async fn route_frame(inner: &[u8]) {
         MsgType::ShellCommand | MsgType::ShellComplete => {
             // Copy the whole frame for the shell to re-decode on its drain task. Depth-2 queue;
             // a request/response shell sends one command at a time, so it rarely holds >1, and a
-            // drop (queue full) just makes the host retry — never stalls the RX loop.
-            let mut v: Vec<u8, MAX_WIRE> = Vec::new();
-            let _ = v.extend_from_slice(inner);
-            let _ = SHELL_RX.try_send(v);
+            // drop (queue full) just makes the host retry — never stalls the RX loop. An
+            // over-RX_COPY frame fails the copy wholesale (empty Vec, dropped below) — no
+            // legitimate frame is that big (see RX_COPY).
+            let mut v: Vec<u8, RX_COPY> = Vec::new();
+            if v.extend_from_slice(inner).is_ok() {
+                let _ = SHELL_RX.try_send(v);
+            }
+        }
+        MsgType::MgmtRequest => {
+            let mut v: Vec<u8, RX_COPY> = Vec::new();
+            if v.extend_from_slice(inner).is_ok() {
+                let _ = MGMT_RX.try_send(v);
+            }
         }
         _ => {}
     }
+}
+
+/// Await the next host→device management frame (a whole inner frame; re-decode with
+/// `decode_frame` + `postcard::from_bytes::<MgmtRequest>`). Apps that serve the
+/// management channel (the gateway; nodes while on USB for cable pairing) drain this
+/// on their own loop.
+pub async fn mgmt_next() -> Vec<u8, RX_COPY> {
+    MGMT_RX.receive().await
+}
+
+/// Non-blocking [`mgmt_next`] — for a main loop that polls between radio slices.
+pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
+    MGMT_RX.try_receive().ok()
 }
 
 /// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
@@ -626,6 +741,48 @@ pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
 /// nothing is copied. Async — never dropped. Used by the shell engine.
 pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
     enqueue(Outgoing::Completions(c)).await;
+}
+
+/// Forward one decrypted, authenticated radio uplink to the host, verbatim — the
+/// gateway app's bridge primitive. `data` past the radio MTU is clipped (cannot
+/// happen for a frame that came out of the net layer). Async — backpressured while
+/// USB is present (a gateway is USB-powered by definition, so this is the normal
+/// path); drop-newest while down, counted in the [`Dropped`] marker.
+pub async fn uplink(src: u32, counter: u32, rssi_dbm: i16, lqi: u8, data: &[u8]) {
+    let mut v: Vec<u8, UPLINK_MAX> = Vec::new();
+    let _ = v.extend_from_slice(&data[..data.len().min(UPLINK_MAX)]);
+    enqueue(Outgoing::Uplink {
+        src,
+        counter,
+        rssi_dbm,
+        lqi,
+        data: v,
+    })
+    .await;
+}
+
+/// Send one management-response chunk (exactly one wire frame). Chunking is the
+/// caller's job: stream records in ≤ [`MGMT_CHUNK`]-byte (192) `data` pieces with a
+/// running `chunk` index and `last` on the final one; `result` is authoritative only
+/// on that last chunk (mirror of the shell-response discipline). A result-only reply
+/// is a single empty `last` chunk. Async — backpressured while USB is present.
+pub async fn mgmt_chunk(req_id: u16, result: u8, chunk: u16, last: bool, data: &[u8]) {
+    let mut v: Vec<u8, MGMT_CHUNK> = Vec::new();
+    let _ = v.extend_from_slice(&data[..data.len().min(MGMT_CHUNK)]);
+    enqueue(Outgoing::MgmtChunk {
+        req_id,
+        result,
+        chunk,
+        last,
+        data: v,
+    })
+    .await;
+}
+
+/// Send one radio-diagnostics sample ([`RadioStat`]) for the host's running channel
+/// graph. Async — backpressured while USB is present.
+pub async fn radio_stat(stat: RadioStat) {
+    enqueue(Outgoing::RadioStat(stat)).await;
 }
 
 /// Record the firmware name and emit the boot banner log. Called by the [`app!`](crate::app)

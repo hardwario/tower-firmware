@@ -1025,10 +1025,20 @@ dependencies = [
  "log",
  "postcard",
  "serde",
+ "tower-gw-core",
  "tower-kv",
  "tower-net-core",
  "tower-protocol",
  "tower-radio-core",
+]
+
+[[package]]
+name = "tower-gw-core"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "postcard",
+ "serde",
 ]
 
 [[package]]

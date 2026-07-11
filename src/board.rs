@@ -259,6 +259,17 @@ pub fn preinit_csr() -> u32 {
 /// See [`preinit_csr`].
 static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// This unit's stable 32-bit radio id: CRC-32/IEEE over the STM32's 96-bit unique
+/// device ID, clamped to never be 0 (`0` is the "host not yet known" dest in the
+/// pairing JOIN_REQ, and a natural "unset" sentinel in stored records). Collisions
+/// across a fleet are birthday-bounded (~2⁻³² per pair) — acceptable for network
+/// addressing; product apps let an operator override it via a persisted `NS_APP`
+/// record (mgmt `Provision.my_id`), which also covers the collision escape hatch.
+pub fn unique_id32() -> u32 {
+    let id = tower_protocol::crc::crc32_ieee(&embassy_stm32::uid::uid());
+    if id == 0 { 1 } else { id }
+}
+
 /// Assert the STM32L0 STOP-mode power tuning in `PWR_CR`:
 /// - **LPSDSR** — put the voltage regulator in *low-power* mode during deep sleep
 ///   (embassy's L0 `enter_stop` sets only PDDS/CWUF, otherwise leaving the *main*
