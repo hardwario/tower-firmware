@@ -9,7 +9,8 @@ confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
 [`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
 Each subsystem has a guide: [`docs/console.md`](docs/console.md),
-[`docs/radio.md`](docs/radio.md), and [`docs/storage.md`](docs/storage.md).
+[`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md), and
+[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product).
 
 | | |
 |---|---|
@@ -46,7 +47,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 |---|---|
 | `src/button.rs` | Debounced button driver (click/hold) over any GPIO; `init_exti` (low-power, sleeps when idle) or `init_polled` (when the EXTI line is taken) |
 | `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART — paired with the `tower` host CLI; see [`docs/console.md`](docs/console.md) |
-| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`); apps deep-merge their own commands + settings via `serve_ext` — see [`docs/console.md`](docs/console.md) |
+| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`/`Addr`); apps deep-merge their own commands + settings via `serve_ext` — see [`docs/console.md`](docs/console.md) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1–6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
@@ -136,12 +137,13 @@ Flashable programs come in two kinds:
 - **Examples** — each file in [`examples/`](examples) is a complete program that demonstrates
   one block. Add your own by dropping a `.rs` there — it's picked up automatically
   (`just examples`). Built as Cargo examples (`just build example <name>`).
-- **Applications** — TOWER IoT Kit **product skeletons** in [`apps/`](apps) (e.g.
-  `radio_dongle_gateway`, `radio_push_button`, `radio_climate_monitor`). Each boots and runs
-  its non-radio logic (button/measure/heartbeat over the console); the **radio wiring is
-  a TODO** you fill in following the `net_*` examples. They're Cargo binaries: list them with
-  `just apps`, build with `just build app <name>`. Add one by dropping `apps/<name>.rs` and a
-  matching `[[bin]]` in `Cargo.toml`.
+- **Applications** — TOWER IoT Kit **products** in [`apps/`](apps). `radio_push_button`
+  (a sleeping sensor node — button events, thermometer, accelerometer) and
+  `radio_dongle_gateway` (a radio↔serial bridge + node coordinator) are **complete,
+  HW-verified radio products**; `radio_climate_monitor` is still a **starter skeleton** whose
+  radio wiring is a TODO you fill in following the `net_*` examples. They're Cargo binaries:
+  list them with `just apps`, build with `just build app <name>`. Add one by dropping
+  `apps/<name>.rs` and a matching `[[bin]]` in `Cargo.toml`.
 
 | Example | Demonstrates |
 |---|---|
@@ -153,6 +155,7 @@ Flashable programs come in two kinds:
 | `storage` | `storage` — a key-value store in EEPROM: a raw boot counter + a postcard settings struct, surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
 | `lowpower` | Measure the SDK's STOP-mode idle floor — VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |
+| `watchdog` | The independent watchdog (IWDG) — periodic pet, and a deliberate stall to show the reset |
 
 The radio stack adds ~20 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`) — the
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table

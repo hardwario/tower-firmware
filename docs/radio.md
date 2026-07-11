@@ -362,7 +362,7 @@ sets this; it is unrelated to the RF/demod registers.
 | Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers |
 | Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
 | Bulk idle timeout | 30 s |
-| Star nodes / P2P peers | ≤ 32 / ≤ 8 |
+| Star nodes / P2P peers | ≤ 16 / ≤ 8 |
 | Reserved IDs | `0x00000000`, `0xFFFFFFFF` |
 | Protocol version | 1 |
 | FHSS (US) | 80 channels · 300 ms slot · 24 s cycle |

@@ -2,8 +2,8 @@
 //! node's next uplink.
 //!
 //! Policy (argued in the gateway app):
-//! * **Global pool of [`QUEUE_CAP`] items** (~1.6 KB), NOT per-node arrays — 32 nodes
-//!   × a per-node array would cost ~11 KB of the part's 20 KB RAM.
+//! * **Global pool of [`QUEUE_CAP`] items** (~0.4 KB), NOT per-node arrays — a
+//!   per-node array for every peer would cost multiples of that on the 20 KB part.
 //! * **Per-node FIFO** ([`PER_NODE_CAP`] deep): commands to one node deliver in order,
 //!   one per uplink cycle (each delivery's ACK re-advertises the pending flag).
 //! * **TTL expiry**: an item that outlives its `ttl_s` is dropped and reported

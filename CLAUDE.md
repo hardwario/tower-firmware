@@ -2,14 +2,17 @@
 
 Embassy-based, `no_std` firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ,
 Cortex-M0+). The crate is a library; runnable programs come in two kinds — educational
-`examples/` (Cargo `--example`) and TOWER IoT Kit **product skeletons** in `apps/` (Cargo
-`[[bin]]`, `--bin`; each runs its non-radio logic, with the radio wiring left as a TODO). Build/flash with `just`, which takes the kind then the name
+`examples/` (Cargo `--example`) and TOWER IoT Kit **products** in `apps/` (Cargo
+`[[bin]]`, `--bin`). Two apps are complete, HW-verified radio products — `radio_push_button`
+(sleeping sensor node) and `radio_dongle_gateway` (radio↔serial bridge + node coordinator);
+`radio_climate_monitor` is still a starter skeleton (non-radio logic runs; radio send is a
+TODO). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`)
 over the UART bootloader via the
 `tower` CLI. Standalone device control (logs/console/reset/erase/devices) is the CLI's own
-job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`. Host tests:
-`just test` (the `tower-kv` + `tower-net-core` + `tower-radio-core` crates — the firmware
-itself is `no_std` and can't `cargo test`).
+job — call `tower` directly, there are no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`, `docs/gateway.md` (the push-button + gateway product). Host tests:
+`just test` (the `tower-kv` + `tower-net-core` + `tower-radio-core` + `tower-gw-core` crates —
+the firmware itself is `no_std` and can't `cargo test`).
 
 ## Shared wire protocol (`tower-protocol`) — keep it in lockstep
 

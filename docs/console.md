@@ -10,7 +10,7 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > wire codec (COBS + CRC-32 + postcard), the interrupt-driven `BufferedUart`
 > transport with a low-power-correct `WakeGuard`, the synchronous panic path, log /
 > print / event streaming with overflow accounting, chunked shell responses, the
-> settings framework (5 kinds, range/enum validation, value completion), the
+> settings framework (6 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
 > implemented and tested on real hardware. The codec has 20 host tests including
 > 9000 fuzz iterations (run in the tower-protocol repo).
@@ -29,7 +29,7 @@ architecture, wire protocol, the firmware + host APIs, and a worked example per 
 | **`tower-protocol`** | `github.com/hardwario/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
 
 Because `tower-protocol` is shared, the wire format cannot drift between firmware
-and host. Both ends pin it to the same git tag (currently `v1.0.0`).
+and host. Both ends pin it to the same git tag (currently `v1.3.0`).
 
 ## Hardware
 
@@ -303,8 +303,8 @@ Settings are **declarative**: an app provides a `&'static [Setting]` table and t
 shell derives `print` / `set` / `get` / `export` and completion from it — no
 per-setting code. Each `Setting.key` is a **`u8` local** within the shell's EEPROM
 namespace (`NS_SHELL`) — the shell prefixes it, so app keys can't collide with other
-subsystems. The SDK base table uses `0x00` (`identity`); pick any other `u8` for your
-app settings.
+subsystems. The SDK base table reserves `0x00` (`identity`) and `0x01` (`address`); pick
+any other `u8` for your app settings.
 
 ```rust
 use tower::shell::{Setting, Kind};
@@ -325,6 +325,7 @@ static SETTINGS: &[Setting] = &[
 | `Int { min, max }` | decimal `i32` in range | 4 LE bytes | offsets, tx-power dBm, calibration |
 | `Bool` | `true`/`false`, `on`/`off`, `1`/`0` | 1 byte | flags |
 | `Enum(&[&str])` | one of the listed values | raw bytes | modes, regions, roles |
+| `Addr` | 32-bit hex (`0x1a2b3c4d`), or `auto` / `random` | 4 LE bytes | radio addresses (`0` = auto sentinel) |
 
 - **Ranges/choices are enforced on `set`**; an invalid value returns result 2 and
   prints the constraint:
@@ -345,6 +346,11 @@ static SETTINGS: &[Setting] = &[
 - Unset / unreadable / out-of-range stored values fall back to the `default`.
 
 `identity` is just an SDK `Str` setting (key `0x00`, ≤32 chars) — nothing special.
+`address` (key `0x01`, `Kind::Addr`, default `auto`) is the SDK's other base setting: the
+unit's **32-bit radio address** (the frame-header src/dest, i.e. the net `my_id`). `auto`
+resolves to the chip-UID-derived address; `random` mints a fresh non-zero one from the
+STM32L0 hardware TRNG (`board::rand_u32`). `get` shows the *effective* address, so it never
+lies about what the radio uses. It is boot-applied — reboot to re-address a live node.
 
 ---
 
@@ -478,15 +484,19 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 
 | Type | # | Dir | Payload |
 |---|---|---|---|
-| `Hello` | 0 | T→H | protocol + firmware version (boot announce) |
+| `Hello` | 0 | T→H | protocol + firmware version, firmware_name, per-boot session_id (boot announce) |
 | `Log` | 1 | T→H | level, uptime_us, module, message |
 | `Print` | 2 | T→H | raw text |
 | `Event` | 3 | T→H | name + (key, value) pairs (wire allows 8; the SDK emits ≤6) |
 | `ShellResponse` | 4 | T→H | cmd_id, result, chunk, last, text |
 | `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
 | `Dropped` | 6 | T→H | count of dropped frames |
+| `MgmtResponse` | 7 | T→H | req_id, result, chunk, last, data (chunked mgmt reply; wire v3 gateway link) |
+| `Uplink` | 8 | T→H | src, counter, rssi_dbm, lqi, data (gateway forwards a node's radio payload verbatim) |
+| `RadioStat` | 9 | T→H | channel RSSI sample, or a TX-delivery outcome |
 | `ShellCommand` | 16 | H→T | cmd_id, line |
 | `ShellComplete` | 17 | H→T | req_id, line, cursor |
+| `MgmtRequest` | 18 | H→T | req_id, op (a `mgmt::MgmtOp`; wire v3 gateway link) |
 
 A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
 `decode_frame` checks version + type + CRC and returns `(MsgType, seq, payload)`.
@@ -495,7 +505,7 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `PROTOCOL_VERSION` | 1 | top 3 bits of `ver_type` |
+| `PROTOCOL_VERSION` | 3 | top 3 bits of `ver_type` (caps at 7; bumped to 3 for the wire-v3 gateway link) |
 | `MAX_FRAME` | 256 | inner frame, pre-COBS (payload budget ≈ 249) |
 | `MAX_WIRE` | 272 | COBS-expanded frame + delimiter |
 | `MAX_MSG` | 192 | log / print text |
@@ -511,6 +521,7 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 | 1 | `R_NOT_FOUND` | no such command / setting |
 | 2 | `R_BAD_ARG` | bad / out-of-range value |
 | 3 | `R_STORAGE` | EEPROM write failed |
+| 4 | `R_TRUNCATED` | response body overflowed the cap and was truncated |
 
 ---
 
@@ -526,7 +537,7 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 - `serve(spawner, kv)` / `serve_ext(spawner, kv, app_commands, app_settings)`
 - types: `Entry` (`::cmd` / `::menu`), `Command`, `Args` (`None` / `Names` / `Settings`),
   `Setting`, `Kind`, `SettingsTable`, `Ctx`, `Outcome` (`::ok` / `::code`), `Handler`
-- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`
+- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`
 
 `tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
 structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32_ieee}`.
@@ -582,6 +593,6 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
   change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
-  pin the new tag in lockstep. Today's tag is `v1.0.0`.
+  pin the new tag in lockstep. Today's tag is `v1.3.0`.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

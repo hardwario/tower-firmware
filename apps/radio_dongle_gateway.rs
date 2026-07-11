@@ -25,7 +25,7 @@
 //! **RAM budget** (20 KB part, HW-measured ~9 KB stack peak for any `Net` app — see
 //! the stack-overflow history): everything this app keeps resident beyond the SDK
 //! baseline must fit in ~2 KB, or the stack loses the difference. Hence: registry on
-//! EEPROM (transient ~270 B bucket locals on the stack), an 8-item downlink queue,
+//! EEPROM (transient ~270 B bucket locals on the stack), a 4-item downlink queue,
 //! and 12-byte packed link stats. Check `just size app radio_dongle_gateway` after
 //! growing anything here.
 //!
