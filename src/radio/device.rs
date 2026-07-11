@@ -229,7 +229,20 @@ impl Spirit1 {
     }
 
     /// Transition to SLEEP (wake-timer state).
+    ///
+    /// **Deasserts nIRQ first (mask all + clear status).** The SPIRIT1 holds its GPIO0
+    /// nIRQ line asserted (low) as long as any *unmasked* IRQ event bit is set, and the
+    /// bit survives into SLEEP. On a battery node the nIRQ pin is an STM32 EXTI wake
+    /// source (PA7): a stuck-low nIRQ keeps the EXTI pending, so embassy's low-power
+    /// executor wakes out of STOP immediately and busy-runs at mA instead of idling at
+    /// µA — the radio itself is asleep, but the *MCU* never STOPs (bench-measured
+    /// 2026-07-11: a node locked at ~9.6 mA after its first post-STOP uplink, radio
+    /// confirmed in SLEEP the whole time). Masking every IRQ and reading the
+    /// read-to-clear status word forces nIRQ high before we sleep, so the pin can't
+    /// veto STOP. Re-armed by [`rx`]/[`tx`], which set their own masks.
     pub async fn to_sleep(&mut self) -> Result<(), RadioError> {
+        self.set_irq_mask(0)?;
+        let _ = self.irq_status();
         if self.mc_state()? == regs::STATE_SLEEP {
             return Ok(());
         }
