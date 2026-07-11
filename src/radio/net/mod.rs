@@ -517,6 +517,15 @@ impl Net {
             Err(_) => return SendResult::Error(RadioError::TooLong),
         };
 
+        // Consume the counter NOW — after sealing this frame, before it goes on air.
+        // The nonce is derived from `counter`, so the counter must be spent even if this
+        // send-future is later cancelled (a `select(send, Timer)` dropped mid-window):
+        // otherwise the next send would read the same value and reuse the (key, nonce)
+        // pair — a full CCM break. Retransmits below reuse the already-sealed `frame_buf`,
+        // not a fresh counter, so advancing here is correct. A never-transmitted counter
+        // (duty-limited first rep) just leaves a harmless hole in the monotonic sequence.
+        self.advance_tx_counter();
+
         let toa = duty::frame_toa_ms(n);
         let reps = if confirmed { reps.clamp(1, 10) } else { 1 };
         let mut result = SendResult::NotDelivered;
@@ -551,9 +560,6 @@ impl Net {
                 break;
             }
         }
-        // The counter is consumed whether or not delivery succeeded (the frames
-        // went out under this nonce); retransmits reused it intentionally.
-        self.advance_tx_counter();
         result
     }
 
@@ -577,6 +583,16 @@ impl Net {
         // counter/replay rule is the lane kernel's (`tower_net_core::replay`) — see its docs
         // for why classification must only ever run on an authenticated frame.
         let (hdr, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
+
+        // Only application DATA frames surface here. An authenticated ACK / Join / Bulk /
+        // Beacon addressed to us — e.g. a node's ACK arriving *after* our send's window
+        // closed — must NOT advance the replay lane or be returned as an "uplink": those
+        // types are owned by await_ack / pairing / bulk / fhss, each with its own rx path.
+        // (Before this filter, a late ACK's own counter would be classified Fresh, advance
+        // the src's lane, and be forwarded by the gateway as a 6-byte bogus uplink.)
+        if hdr.frame_type != FrameType::Data {
+            return None;
+        }
 
         match self.lane(hdr.src).classify(hdr.counter) {
             ReplayVerdict::Fresh => {
@@ -651,8 +667,14 @@ impl Net {
             if remaining.as_ticks() == 0 {
                 return false; // window elapsed
             }
-            let Ok((len, _)) = self.radio.rx(&mut buf, remaining).await else {
-                return false; // rx timed out over the remaining window (or a radio error)
+            let (len, _) = match self.radio.rx(&mut buf, remaining).await {
+                Ok(v) => v,
+                // A collided/corrupt frame (CRC or FIFO) is exactly what star contention
+                // produces — the thing this window exists to ride out. Keep waiting rather
+                // than reporting a false NotDelivered (and burning a retransmit) on it.
+                Err(RadioError::CrcError | RadioError::FifoError) => continue,
+                // Timeout over the remaining window, or a real radio fault: window ends.
+                Err(_) => return false,
             };
             // A foreign / undecodable frame is NOT a failed ACK — skip it and keep waiting.
             let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
