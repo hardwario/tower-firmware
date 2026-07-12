@@ -24,6 +24,7 @@
 //!     both rails. The HIL test standardises on 1.8 V.
 //!   * with the J-Link attached (@ 1.8 V): **19.8 µA** → the J-Link's SWD debug-domain parasitic
 //!     adds ~14.7 µA (it energises the target's debug power even in Stop).
+//!
 //! Both are well under the 50 µA the HIL `power_stop_floor_under_50ua` test asserts.
 //! Verified against a high-current anchor on the SAME board: the `led_on` example (LED held on +
 //! core spinning) reads **7.7 mA @ 3.0 V / 4.7 mA @ 1.8 V** — a ~1500× step over the STOP floor,
