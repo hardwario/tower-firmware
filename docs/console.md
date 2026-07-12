@@ -7,8 +7,8 @@ target-authoritative TAB completion and a declarative, EEPROM-backed **settings
 framework**. The host side is the **`tower`** CLI/TUI.
 
 > **Status: complete and hardware-verified** on the Radio Dongle (STM32L08x). The
-> wire codec (COBS + CRC-32 + postcard), the interrupt-driven `BufferedUart`
-> transport with a low-power-correct `WakeGuard`, the synchronous panic path, log /
+> wire codec (COBS + CRC-32 + postcard), the DMA-backed `Uart` transport (RX on a
+> circular DMA buffer) with a low-power-correct `WakeGuard`, the synchronous panic path, log /
 > print / event streaming with overflow accounting, chunked shell responses, the
 > settings framework (6 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
@@ -41,9 +41,11 @@ The console owns **USART1** on the Core Module:
 | RX | PA10 | host → target (full-duplex; wired through the dongle's USB bridge) |
 | Baud | — | 115200 **8N1** |
 
-It is **interrupt-driven (`BufferedUart`), not DMA** — the WS2812 LED strip owns the
-`DMA1_CHANNEL2_3` IRQ group, so the console can't use DMA. See *Low power* below for
-why this matters and how it's handled.
+It is **DMA-backed**: TX on `DMA1_CH4`, RX on a circular DMA buffer (`RingBufferedUartRx`)
+on `DMA1_CH5` — a different DMA channel group (`DMA1_CHANNEL4_5_6_7`) from the WS2812 LED
+strip's `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and the console both use DMA with no
+channel or IRQ overlap. The hardware-filled RX ring means a host → target byte is never lost
+to receiver overrun while a TX burst or critical section delays the reader.
 
 The link is **always framed** (binary COBS frames). A plain serial terminal (`screen`,
 `minicom`, or any raw monitor) shows gibberish — use the `tower` CLI (`tower logs`),
@@ -84,16 +86,16 @@ app!(run);
  producers                         one writer task                 host
  ─────────                         ───────────────                 ────
  log::{error..trace}!  ┐
- print! / println!     ├─ try_send ─► TX_CHANNEL ─► seq+encode ─► BufferedUartTx ═══► tower
- console::event().await┘  (drop-      (depth 8)    (COBS+CRC+        (PA9, 115200)
+ print! / println!     ├─ try_send ─► TX_CHANNEL ─► seq+encode ─► UartTx (DMA ch4) ═══► tower
+ console::event().await┘  (drop-      (depth 4)    (COBS+CRC+        (PA9, 115200)
  shell responses          newest)                   postcard)
                                        ▲
- host commands ════► BufferedUartRx ──► FrameDecoder ─► shell ─► responses ─┘
- (PA10)                (interrupt)
+ host commands ═► RingBufferedUartRx ──► FrameDecoder ─► shell ─► responses ─┘
+ (PA10, DMA ch5 ring)
 ```
 
 - **Producers** build an owned message and `try_send` it into a bounded channel
-  (depth 8). Non-blocking and safe from any context (including the `log` backend).
+  (depth 4). Non-blocking and safe from any context (including the `log` backend).
   If the queue is full the newest is dropped and a counter bumped.
 - **One writer loop** (inside `console::manager`) owns the UART TX. It assigns the
   per-frame **`seq`** at send time (so a gap on the wire means *real* loss, never a queue
@@ -113,7 +115,7 @@ node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is
 **dynamic**: `console::manager` (spawned by `Board::take`) owns USART1 + PA9/PA10 + the
 `VBUS_SENSE` (PA12) EXTI, and gates the whole UART on USB presence:
 
-- **USB present** → builds the `BufferedUart`, runs the writer + the RX frame-router, and
+- **USB present** → builds the DMA-backed `Uart` (RX ring on ch5), runs the writer + the RX frame-router, and
   re-emits a `Hello`. While USB is present the enabled USART keeps the MCU in WFI (not
   STOP) — which is what we want: the console/shell stay responsive and the node is
   powered/plugged anyway.
@@ -573,8 +575,11 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 
 ## Known limitations & caveats
 
-- **No DMA:** the WS2812 strip owns the DMA group, so the console is interrupt-driven.
-  This is why the writer holds a `WakeGuard` per burst (above).
+- **DMA (RX overrun fixed):** the console now uses DMA — TX on `DMA1_CH4`, RX on a circular
+  DMA buffer on `DMA1_CH5` (a different channel group from the WS2812 strip's `DMA1_CH3`, so
+  both coexist). The hardware-filled RX ring removed the old ~1% host → target loss that the
+  interrupt-per-byte path suffered during a TX flood. The writer still holds a `WakeGuard` per
+  burst — now belt-and-braces (the RX ring already holds the STOP inhibit while the console is up).
 - **`fw ?` in the header** appears only if you attach `tower console` and never see a
   `Hello` — the firmware announces it on boot and on each USB plug-in (when the dynamic
   console rebuilds), not on host connect. The TUI
