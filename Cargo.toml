@@ -112,7 +112,7 @@ tower-net-core = { path = "crates/tower-net-core" }
 # bookkeeping can be unit-tested on the host (`just test`). no_std.
 tower-gw-core = { path = "crates/tower-gw-core" }
 
-# Pure kernels behind the `address` shell setting (value parse + the `address random`
+# Pure kernels behind the `addr` shell setting (value parse + the `addr random`
 # xorshift). Extracted like the other `crates/` so the parse/PRNG logic is host-tested
 # (`just test`) — the firmware `src/` is no_std and can't cargo test. no_std.
 tower-shell-core = { path = "crates/tower-shell-core" }

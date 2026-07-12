@@ -19,8 +19,8 @@ use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
 use tower::{app, board::Board};
 
-const MY_ID: u32 = 0x1111_1111;
-const PEER_ID: u32 = 0x2222_2222;
+const MY_ADDR: u32 = 0x1111_1111;
+const PEER_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -39,7 +39,7 @@ async fn run(b: Board) {
         radio,
         b.kv,
         NetConfig {
-            addr: MY_ID,
+            addr: MY_ADDR,
             key: KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -63,7 +63,7 @@ async fn run(b: Board) {
 
     // Advance the counter with unconfirmed sends (no ACK needed).
     loop {
-        let _ = net.send(PEER_ID, b"x", false, 1).await;
+        let _ = net.send(PEER_ADDR, b"x", false, 1).await;
         info!(target: "persist", "sent; tx_counter now {} (watermark {})", net.tx_counter(), net.reserve_watermark());
         Timer::after_secs(2).await;
     }

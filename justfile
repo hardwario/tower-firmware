@@ -163,7 +163,7 @@ run kind name: (flash kind name)
 # watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing
 # confirm freshness, CCM nonce construction), `tower-radio-core` (the EU/US/FHSS duty token-bucket
 # math + the fixed FHSS hop permutation — the regulatory arithmetic), `tower-gw-core` (the gateway
-# node-registry bucket codec + downlink-queue policy) and `tower-shell-core` (the `address` setting
+# node-registry bucket codec + downlink-queue policy) and `tower-shell-core` (the `addr` setting
 # value parser + its xorshift). The shared wire-protocol tests live in the tower-protocol repo.
 # Run the firmware's host-side unit tests.
 test *args:

@@ -38,8 +38,8 @@ use embassy_time::Timer;
 #[cfg(feature = "role-node")]
 use {embassy_time::Instant, log::warn};
 
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -81,9 +81,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -112,7 +112,7 @@ async fn run(b: Board) {
         }
         info!(target: "bulk", "SENDER: serving a {}-byte blob ({} chunks), crc=0x{:08x}", BLOB_LEN, BLOB_LEN.div_ceil(64), crc32(&blob));
         loop {
-            let ok = net.bulk_serve(NODE_ID, &blob).await;
+            let ok = net.bulk_serve(NODE_ADDR, &blob).await;
             info!(target: "bulk", "bulk_serve done (served_last={})", ok);
             Timer::after_secs(1).await;
         }
@@ -120,12 +120,12 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "bulk", "REQUESTER: pulling {} B from {:08X}", BLOB_LEN, GW_ID);
+        info!(target: "bulk", "REQUESTER: pulling {} B from {:08X}", BLOB_LEN, GW_ADDR);
         let mut out = [0u8; BLOB_LEN];
         let mut round: u32 = 0;
         loop {
             let t0 = Instant::now();
-            match net.bulk_fetch(GW_ID, &mut out).await {
+            match net.bulk_fetch(GW_ADDR, &mut out).await {
                 Some(n) => {
                     let ms = t0.elapsed().as_millis().max(1);
                     let bytes_ok = n == BLOB_LEN && (0..n).all(|i| out[i] == pat(i));

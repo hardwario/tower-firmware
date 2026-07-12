@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/hardwario/tower-firmware"
-description = "no_std pure kernels behind the HARDWARIO TOWER shell's `address` setting: the setting-value parser (`auto` / strict hex) and the non-cryptographic xorshift that mints `address random`. Split out like tower-kv / tower-net-core so the parse/PRNG logic can be unit-tested on the host — the firmware itself is no_std and can't cargo test."
+description = "no_std pure kernels behind the HARDWARIO TOWER shell's `addr` setting: the setting-value parser (`auto` / strict hex) and the non-cryptographic xorshift that mints `addr random`. Split out like tower-kv / tower-net-core so the parse/PRNG logic can be unit-tested on the host — the firmware itself is no_std and can't cargo test."
 
 # Pure functions only — no dependencies, no_std, host-testable with plain `cargo test`.
 [dependencies]

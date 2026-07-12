@@ -20,7 +20,7 @@ use tower::radio::config::{FHSS_N, fhss_freq_hz};
 use tower::radio::net::{FhssConfig, FhssRole, Net, NetConfig};
 use tower::{app, board::Board};
 
-const GW_ID: u32 = 0x2222_2222;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -43,7 +43,7 @@ async fn run(b: Board) {
         radio,
         b.kv,
         NetConfig {
-            addr: GW_ID,
+            addr: GW_ADDR,
             key: KEY,
             band: tower::radio::config::Band::Us915,
             channel: 0,

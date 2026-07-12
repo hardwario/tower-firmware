@@ -21,8 +21,8 @@ use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig, SendResult};
 use tower::{app, board::Board};
 
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
 ];
@@ -42,7 +42,7 @@ async fn run(b: Board) {
         radio,
         b.kv,
         NetConfig {
-            addr: NODE_ID,
+            addr: NODE_ADDR,
             key: KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -56,9 +56,9 @@ async fn run(b: Board) {
             return;
         }
     };
-    net.add_peer(GW_ID, &KEY); // gateway under its per-link key
+    net.add_peer(GW_ADDR, &KEY); // gateway under its per-link key
 
-    info!(target: "node", "NODE {:08X}: confirmed telemetry → GW {:08X} every 5 s", NODE_ID, GW_ID);
+    info!(target: "node", "NODE {:08X}: confirmed telemetry → GW {:08X} every 5 s", NODE_ADDR, GW_ADDR);
     let mut seq: u32 = 0;
     let (mut delivered, mut lost) = (0u32, 0u32);
     loop {
@@ -72,7 +72,9 @@ async fn run(b: Board) {
         payload[6..8].copy_from_slice(&temp_c10.to_le_bytes());
 
         let t0 = Instant::now();
-        let r = net.send(GW_ID, &payload, /*confirmed=*/ true, /*reps=*/ 3).await;
+        let r = net
+            .send(GW_ADDR, &payload, /*confirmed=*/ true, /*reps=*/ 3)
+            .await;
         let ms = t0.elapsed().as_millis();
         match r {
             SendResult::Delivered => {

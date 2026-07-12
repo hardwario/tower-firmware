@@ -70,7 +70,7 @@ use tower_protocol::{MsgType, decode_frame};
 // --- persistence (NS_APP) --------------------------------------------------------
 
 /// Provision record: `(gw_addr, key, band, channel)` (postcard). The node's own radio
-/// address is the SDK `address` base setting (`shell::radio_addr`), not stored here.
+/// address is the SDK `addr` base setting (`shell::radio_addr`), not stored here.
 const KEY_PROVISION: u8 = 0x00;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
@@ -343,7 +343,7 @@ async fn run(b: Board) {
     let kv = b.kv;
     let app_kv = kv.scope(NS_APP);
 
-    // This node's radio address = the `address` base setting (pinned or UID-derived).
+    // This node's radio address = the `addr` base setting (pinned or UID-derived).
     let addr = shell::radio_addr(kv);
     let mut provision: Option<Provisioned> = app_kv.get::<Provisioned>(KEY_PROVISION).ok().flatten();
 

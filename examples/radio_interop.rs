@@ -37,8 +37,8 @@ use {embassy_time::Timer, tower::radio::net::SendResult};
 /// Build-time seed override (XORed with the device ID) to force a replay.
 #[cfg(feature = "role-node")]
 const SEED: u32 = 0xC0FF_EE00;
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -90,9 +90,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -123,7 +123,7 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u32) -> ! {
-    net.add_peer(GW_ID, &KEY);
+    net.add_peer(GW_ADDR, &KEY);
     let mut rng = SEED ^ net.addr();
     if rng == 0 {
         rng = 1;
@@ -140,7 +140,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
         // Low-probability fault: oversized send MUST be rejected locally.
         if r & 0x1F == 0 {
             let big = [0xEE; 80];
-            match net.send(GW_ID, &big, true, 1).await {
+            match net.send(GW_ADDR, &big, true, 1).await {
                 SendResult::Error(_) => rej += 1,
                 other => {
                     fails += 1;
@@ -164,7 +164,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
             }
             let crc = crc32(&payload[9..size]);
             payload[5..9].copy_from_slice(&crc.to_le_bytes());
-            match net.send(GW_ID, &payload[..size], confirmed, reps).await {
+            match net.send(GW_ADDR, &payload[..size], confirmed, reps).await {
                 SendResult::Delivered => ok += 1,
                 SendResult::NotDelivered => nd += 1,
                 SendResult::Busy => busy += 1,
@@ -198,7 +198,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
 
 #[cfg(not(feature = "role-node"))]
 async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fail: u32) -> ! {
-    net.add_peer(NODE_ID, &KEY);
+    net.add_peer(NODE_ADDR, &KEY);
     info!(target: "soak", "GATEWAY checking integrity + ordering  (cumulative: accepted={} fails={})", cum_acc, cum_fail);
 
     let mut last: Option<u32> = None;

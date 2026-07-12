@@ -23,8 +23,8 @@ use embassy_time::Duration;
 use {embassy_time::Instant, log::warn, tower::radio::net::SendResult};
 
 #[cfg(feature = "role-node")]
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -41,9 +41,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -82,7 +82,7 @@ async fn node(net: &mut Net) -> ! {
         msg[6] = b'0' + (seq % 10) as u8;
 
         let t0 = Instant::now();
-        let r = net.send(GW_ID, &msg, true, 3).await;
+        let r = net.send(GW_ADDR, &msg, true, 3).await;
         let ms = t0.elapsed().as_millis();
         match r {
             SendResult::Delivered => info!(target: "confirmed", "seq={} Delivered ({} ms)", seq, ms),

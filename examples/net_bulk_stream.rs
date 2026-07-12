@@ -33,8 +33,8 @@ use embassy_time::Timer;
 #[cfg(feature = "role-node")]
 use {embassy_time::Instant, log::warn};
 
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -145,9 +145,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -170,13 +170,13 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "stream", "SENDER: streaming {:?} B to {:08X} (constant RAM, no blob buffer)", SIZES, NODE_ID);
+        info!(target: "stream", "SENDER: streaming {:?} B to {:08X} (constant RAM, no blob buffer)", SIZES, NODE_ADDR);
         let mut i = 0usize;
         loop {
             let size = SIZES[i % SIZES.len()];
             let mut src = PatternSource { len: size };
             info!(target: "stream", "serving {} B ({} chunks) crc=0x{:08x}", size, size.div_ceil(64), crc32_pattern(size));
-            let ok = net.bulk_serve_from(NODE_ID, &mut src).await;
+            let ok = net.bulk_serve_from(NODE_ADDR, &mut src).await;
             info!(target: "stream", "served {} B (served_last={})", size, ok);
             i = i.wrapping_add(1);
             Timer::after_secs(2).await;
@@ -185,12 +185,12 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "stream", "REQUESTER: streaming-fetch from {:08X} (constant RAM, verify-on-the-fly)", GW_ID);
+        info!(target: "stream", "REQUESTER: streaming-fetch from {:08X} (constant RAM, verify-on-the-fly)", GW_ADDR);
         let mut sink = CrcCheckSink::new();
         let mut round: u32 = 0;
         loop {
             let t0 = Instant::now();
-            match net.bulk_fetch_into(GW_ID, &mut sink).await {
+            match net.bulk_fetch_into(GW_ADDR, &mut sink).await {
                 Some(n) => {
                     let ms = t0.elapsed().as_millis().max(1);
                     let crc = sink.final_crc();

@@ -27,8 +27,8 @@ use {embassy_time::Timer, log::warn, tower::radio::net::SendResult};
 
 /// Sweep this 0/1/2 by re-flashing to verify each EU 868 channel.
 const CHANNEL: u8 = 2;
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -45,9 +45,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -70,11 +70,11 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        net.add_peer(GW_ID, &KEY);
+        net.add_peer(GW_ADDR, &KEY);
         info!(target: "chan", "NODE: confirmed sends on ch{} (VCO calibrated for this channel)", CHANNEL);
         let mut seq: u32 = 0;
         loop {
-            match net.send(GW_ID, &seq.to_le_bytes(), true, 3).await {
+            match net.send(GW_ADDR, &seq.to_le_bytes(), true, 3).await {
                 SendResult::Delivered => info!(target: "chan", "ch{} seq={} Delivered", CHANNEL, seq),
                 r => warn!(target: "chan", "ch{} seq={} {r}", CHANNEL, seq),
             }
@@ -85,7 +85,7 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        net.add_peer(NODE_ID, &KEY);
+        net.add_peer(NODE_ADDR, &KEY);
         info!(target: "chan", "GATEWAY: receiving on ch{}", CHANNEL);
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(10)).await {

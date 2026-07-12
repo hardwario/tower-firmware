@@ -20,8 +20,8 @@ use tower::{app, board::Board};
 
 // Throwaway shared test identity/key (real keys come from provisioning, docs/radio.md).
 #[cfg(feature = "role-node")]
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -61,7 +61,7 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn node(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
-    info!(target: "secping", "NODE {:08X}: sending CCM-sealed DATA every 1 s", NODE_ID);
+    info!(target: "secping", "NODE {:08X}: sending CCM-sealed DATA every 1 s", NODE_ADDR);
     let mut counter: u32 = 1; // counter 0 = "never sent" (docs/radio.md)
     loop {
         let mut payload = [0u8; 12];
@@ -75,8 +75,8 @@ async fn node(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
         let hdr = frame::Header {
             frame_type: frame::FrameType::Data,
             flags: flags::CONFIRMED,
-            src: NODE_ID,
-            dest: GW_ID,
+            src: NODE_ADDR,
+            dest: GW_ADDR,
             counter,
             bulk_index: None,
         };
@@ -95,7 +95,7 @@ async fn node(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
 
 #[cfg(not(feature = "role-node"))]
 async fn gateway(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
-    info!(target: "secping", "GATEWAY {:08X}: receiving + authenticating", GW_ID);
+    info!(target: "secping", "GATEWAY {:08X}: receiving + authenticating", GW_ADDR);
     let mut buf = [0u8; frame::MAX_FRAME];
     loop {
         match radio.rx(&mut buf, Duration::from_secs(5)).await {

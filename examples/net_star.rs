@@ -26,7 +26,7 @@ use embassy_time::Duration;
 #[cfg(feature = "role-node")]
 use {embassy_time::Timer, log::warn, tower::radio::net::SendResult};
 
-const GW_ID: u32 = 0x2222_2222;
+const GW_ADDR: u32 = 0x2222_2222;
 #[cfg(any(not(feature = "role-node"), not(feature = "node-2")))]
 const NODE_A: u32 = 0x0A0A_0A0A;
 #[cfg(any(not(feature = "role-node"), feature = "node-2"))]
@@ -57,7 +57,7 @@ async fn run(b: Board) {
     #[cfg(feature = "role-node")]
     let (addr, key) = (NODE.0, NODE.1);
     #[cfg(not(feature = "role-node"))]
-    let (addr, key) = (GW_ID, KEY_A);
+    let (addr, key) = (GW_ADDR, KEY_A);
 
     let mut net = match Net::new(
         radio,
@@ -82,7 +82,7 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_A, &KEY_A);
         net.add_peer(NODE_B, &KEY_B);
-        info!(target: "star", "GATEWAY {:08X}: {} peers registered (per-node keys)", GW_ID, net.peer_count());
+        info!(target: "star", "GATEWAY {:08X}: {} peers registered (per-node keys)", GW_ADDR, net.peer_count());
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(10)).await {
                 let who = match rx.src {
@@ -111,7 +111,7 @@ async fn run(b: Board) {
             msg[2] = b'0' + ((seq / 100) % 10) as u8;
             msg[3] = b'0' + ((seq / 10) % 10) as u8;
             msg[4] = b'0' + (seq % 10) as u8;
-            match net.send(GW_ID, &msg, true, 3).await {
+            match net.send(GW_ADDR, &msg, true, 3).await {
                 SendResult::Delivered => info!(target: "star", "node {} seq={} Delivered", NODE.2, seq),
                 SendResult::NotDelivered => warn!(target: "star", "node {} seq={} NotDelivered", NODE.2, seq),
                 other => warn!(target: "star", "node {} seq={} {other}", NODE.2, seq),

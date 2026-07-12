@@ -339,8 +339,8 @@ async fn run(b: Board) {
     let app_kv = kv.scope(NS_APP);
     let mut buckets = EepromBuckets { kv: app_kv };
 
-    // The gateway's own radio address = the `address` base setting (pinned or
-    // UID-derived); set it with `system address` (e.g. `set address=random`).
+    // The gateway's own radio address = the `addr` base setting (pinned or
+    // UID-derived); set it with `system settings set addr` (e.g. `addr=random`).
     let addr = shell::radio_addr(kv);
     STAT_ID.store(addr, Ordering::Relaxed);
     // Registry format guard: refuse buckets written by a NEWER format (a firmware
@@ -690,11 +690,7 @@ async fn handle_mgmt(
             Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
             Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
         },
-        MgmtOp::NodeUpdate {
-            addr,
-            name,
-            flags,
-        } => {
+        MgmtOp::NodeUpdate { addr, name, flags } => {
             if name.is_some_and(|n| n.len() > mgmt::MAX_NODE_NAME) {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
@@ -709,16 +705,7 @@ async fn handle_mgmt(
         MgmtOp::NodeRevealKey { addr } => match registry::find(buckets, addr) {
             // The one deliberate key-disclosure path (host asked explicitly; keys are
             // otherwise never emitted on any interface).
-            Some(rec) => {
-                respond_record(
-                    req_id,
-                    &NodeKey {
-                        addr,
-                        key: rec.key,
-                    },
-                )
-                .await
-            }
+            Some(rec) => respond_record(req_id, &NodeKey { addr, key: rec.key }).await,
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
         MgmtOp::PairingOpen { window_s, key } => {

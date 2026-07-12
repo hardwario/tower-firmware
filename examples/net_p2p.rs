@@ -40,9 +40,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-peer-b")]
-    let (addr, peer_id) = (PEER_B, PEER_A);
+    let (addr, peer_addr) = (PEER_B, PEER_A);
     #[cfg(not(feature = "role-peer-b"))]
-    let (addr, peer_id) = (PEER_A, PEER_B);
+    let (addr, peer_addr) = (PEER_A, PEER_B);
 
     let mut net = match Net::new(
         radio,
@@ -62,8 +62,8 @@ async fn run(b: Board) {
             return;
         }
     };
-    net.add_peer(peer_id, &LINK_KEY);
-    info!(target: "p2p", "{:08X}: peer {:08X} registered ({} peer)", addr, peer_id, net.peer_count());
+    net.add_peer(peer_addr, &LINK_KEY);
+    info!(target: "p2p", "{:08X}: peer {:08X} registered ({} peer)", addr, peer_addr, net.peer_count());
 
     // Peer A is the initiator; peer B is the responder. Both directions are
     // confirmed, so each round produces an ACK in each direction.
@@ -76,7 +76,7 @@ async fn run(b: Board) {
             msg[4] = b'0' + ((seq / 100) % 10) as u8;
             msg[5] = b'0' + ((seq / 10) % 10) as u8;
             msg[6] = b'0' + (seq % 10) as u8;
-            match net.send(peer_id, &msg, true, 3).await {
+            match net.send(peer_addr, &msg, true, 3).await {
                 SendResult::Delivered => info!(target: "p2p", "A: PING {} Delivered", seq),
                 r => warn!(target: "p2p", "A: PING {} {r}", seq),
             }
@@ -103,7 +103,7 @@ async fn run(b: Board) {
                 msg[4] = b'0' + ((seq / 100) % 10) as u8;
                 msg[5] = b'0' + ((seq / 10) % 10) as u8;
                 msg[6] = b'0' + (seq % 10) as u8;
-                match net.send(peer_id, &msg, true, 3).await {
+                match net.send(peer_addr, &msg, true, 3).await {
                     SendResult::Delivered => info!(target: "p2p", "B: PONG {} Delivered", seq),
                     r => warn!(target: "p2p", "B: PONG {} {r}", seq),
                 }

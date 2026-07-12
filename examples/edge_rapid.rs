@@ -23,8 +23,8 @@ use embassy_time::Duration;
 #[cfg(feature = "role-node")]
 use tower::radio::net::SendResult;
 
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
@@ -41,9 +41,9 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let addr = NODE_ID;
+    let addr = NODE_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let addr = GW_ID;
+    let addr = GW_ADDR;
 
     let mut net = match Net::new(
         radio,
@@ -66,12 +66,12 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        net.add_peer(GW_ID, &KEY);
+        net.add_peer(GW_ADDR, &KEY);
         info!(target: "rapid", "NODE: back-to-back confirmed sends (no delay)");
         let mut seq: u32 = 0;
         let (mut ok, mut fail) = (0u32, 0u32);
         loop {
-            match net.send(GW_ID, &seq.to_le_bytes(), true, 2).await {
+            match net.send(GW_ADDR, &seq.to_le_bytes(), true, 2).await {
                 SendResult::Delivered => ok += 1,
                 _ => fail += 1,
             }
@@ -84,7 +84,7 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        net.add_peer(NODE_ID, &KEY);
+        net.add_peer(NODE_ADDR, &KEY);
         info!(target: "rapid", "GATEWAY: checking strict-monotonic accepted counters");
         let mut last: Option<u32> = None;
         let (mut accepted, mut violations) = (0u32, 0u32);

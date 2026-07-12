@@ -53,7 +53,7 @@ pub enum AckVerdict {
 /// One pending confirmed delivery: who must acknowledge what, and whether it already resolved.
 #[derive(Debug, Clone, Copy)]
 pub struct AckWait {
-    /// Our own ID — the ACK must be addressed to us.
+    /// Our own address — the ACK must be addressed to us.
     me: u32,
     /// The peer we sent to — the ACK must come from it.
     peer: u32,

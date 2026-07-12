@@ -18,8 +18,8 @@ use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
 use tower::{app, board::Board};
 
-const NODE_ID: u32 = 0x1111_1111;
-const GW_ID: u32 = 0x2222_2222;
+const NODE_ADDR: u32 = 0x1111_1111;
+const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
 ];
@@ -39,7 +39,7 @@ async fn run(b: Board) {
         radio,
         b.kv,
         NetConfig {
-            addr: GW_ID,
+            addr: GW_ADDR,
             key: KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -53,9 +53,9 @@ async fn run(b: Board) {
             return;
         }
     };
-    net.add_peer(NODE_ID, &KEY); // register each node with its per-node key
+    net.add_peer(NODE_ADDR, &KEY); // register each node with its per-node key
 
-    info!(target: "gw", "GATEWAY {:08X}: listening ({} node(s) registered)", GW_ID, net.peer_count());
+    info!(target: "gw", "GATEWAY {:08X}: listening ({} node(s) registered)", GW_ADDR, net.peer_count());
     loop {
         if let Some(rx) = net.recv(Duration::from_secs(15)).await {
             let d = rx.data();

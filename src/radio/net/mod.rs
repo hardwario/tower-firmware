@@ -178,7 +178,7 @@ impl Received {
 
 /// Network configuration for this device.
 pub struct NetConfig {
-    /// This device's 32-bit ID (rides in the clear header).
+    /// This device's 32-bit address (rides in the clear header).
     pub addr: u32,
     /// Default AES-128 key, used for any peer not explicitly registered via
     /// [`Net::add_peer`]. In a single-link setup this is the link key; in a star
