@@ -329,7 +329,25 @@ impl Net {
     /// production code. Up to [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
     pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
         if let Some(i) = self.peer_slot(id) {
-            self.peers[i].as_mut().unwrap().key = *key; // re-key in place
+            // Re-key in place. A *changed* key is a disjoint CCM nonce space (docs/radio.md:
+            // "a re-key resets both ends"), so the old last-seen is meaningless — and if the
+            // re-keyed peer restarts its counter (a re-pair), a stale-high lane would reject
+            // its fresh frames as replays. Reset + persist the lane on a key change so a reboot
+            // doesn't restore the pre-re-key value. An idempotent re-add with the SAME key
+            // (e.g. the boot mirror then a NodeAdd of an already-known peer) keeps the lane —
+            // resetting it there would needlessly reopen the replay window.
+            let changed = self.peers[i].as_ref().unwrap().key != *key;
+            {
+                let p = self.peers[i].as_mut().unwrap();
+                p.key = *key;
+                if changed {
+                    p.lane = ReplayLane::new(0);
+                }
+            }
+            if changed {
+                let local = self.peers[i].as_ref().unwrap().lane_local;
+                let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(id, 0));
+            }
             return true;
         }
         let Some(slot) = self.peers.iter().position(|p| p.is_none()) else {
