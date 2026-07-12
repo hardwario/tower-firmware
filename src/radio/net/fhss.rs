@@ -420,10 +420,14 @@ impl Net {
                     got_beacon: true,
                 }
             }
-            ScanVerdict::Hold => {
-                // Held as the pending candidate — record its arrival time and keep scanning for
-                // a time-consistent successor.
-                self.fhss.acquire_t0 = Some(t_rx);
+            ScanVerdict::Hold { replaced } => {
+                // Re-stamp the candidate-arrival clock ONLY if this beacon became the held
+                // candidate. A beacon behind the held one (`replaced == false` — e.g. a periodic
+                // replay) must not reset the reference, or the elapsed-time consistency check
+                // never converges and acquisition is denied.
+                if replaced {
+                    self.fhss.acquire_t0 = Some(t_rx);
+                }
                 NodeSlot {
                     state: FhssState::Scanning,
                     channel: FHSS_RENDEZVOUS_CH,

@@ -67,9 +67,12 @@ pub enum ScanVerdict {
     /// From an older gateway session (epoch below the highest we've locked to) — a replay;
     /// ignored entirely, not even held as a candidate.
     Reject,
-    /// Held as the pending acquisition candidate (first beacon, or an inconsistent pair); keep
-    /// scanning for a time-consistent successor. The caller records the beacon's arrival time.
-    Hold,
+    /// Keep scanning for a time-consistent successor. `replaced` = this beacon became the held
+    /// candidate (first beacon, or it advanced past the one held), so the caller re-stamps its
+    /// candidate-arrival clock; `false` = the held candidate stands (this beacon was behind it —
+    /// e.g. a replayed capture), so the clock must NOT move or a periodic replay would reset the
+    /// elapsed-time reference and deny acquisition indefinitely.
+    Hold { replaced: bool },
     /// Two-beacon consistency satisfied: commit the anchor to THIS beacon (→ Synced).
     Lock,
 }
@@ -182,10 +185,19 @@ impl EpochGate {
             self.miss = 0; // locked: misses reset
             ScanVerdict::Lock
         } else {
-            // First beacon this acquisition (or an inconsistent pair — e.g. a replay): hold it as
-            // the pending candidate and keep scanning for a time-consistent successor.
-            self.candidate = Some((epoch, slot_abs));
-            ScanVerdict::Hold
+            // Hold this beacon as the candidate ONLY if it advances past the one we already hold.
+            // A replayed capture repeats one fixed (older) slot_abs; if it could evict the genuine
+            // candidate, one replay every few slots would deny acquisition forever — the genuine
+            // successor never finds its predecessor still held (a keyless, cheaper-than-jamming
+            // DoS). A newer epoch, or a higher slot within the same epoch, legitimately wins.
+            let replaced = match self.candidate {
+                Some((e0, s0)) => epoch > e0 || (epoch == e0 && slot_abs > s0),
+                None => true,
+            };
+            if replaced {
+                self.candidate = Some((epoch, slot_abs));
+            }
+            ScanVerdict::Hold { replaced }
         }
     }
 }
@@ -198,12 +210,18 @@ mod tests {
     /// tests exercise realistic one-cycle slot advances without importing the firmware crate.
     const FHSS_N: u32 = 80;
 
+    /// `true` if a verdict is a Hold (of either `replaced` flavour) — for the many asserts that
+    /// only care that acquisition hasn't locked/rejected yet, not which beacon is the candidate.
+    fn held(v: ScanVerdict) -> bool {
+        matches!(v, ScanVerdict::Hold { .. })
+    }
+
     /// Acquire a fresh node gate onto `epoch`, starting at `slot`: first beacon held, second
     /// one cycle later (consistent) locks. Returns the locked gate.
     fn locked_gate(epoch: u32, slot: u32) -> EpochGate {
         let mut g = EpochGate::new();
         g.reset(0);
-        assert_eq!(g.offer_scanning(epoch, slot, None), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(epoch, slot, None)));
         assert_eq!(
             g.offer_scanning(epoch, slot + FHSS_N, Some(FHSS_N)),
             ScanVerdict::Lock
@@ -238,24 +256,53 @@ mod tests {
     fn single_beacon_never_locks() {
         for (epoch, slot) in [(1u32, 0u32), (5, 1000), (u32::MAX, u32::MAX)] {
             let mut g = EpochGate::new();
-            assert_eq!(g.offer_scanning(epoch, slot, None), ScanVerdict::Hold);
+            assert!(held(g.offer_scanning(epoch, slot, None)));
         }
     }
 
-    /// A replayed capture repeats one fixed slot_abs: however often it is replayed, and
-    /// whatever real time elapses between copies, the slot never advances (`slot_abs > s0`
-    /// fails) — the anchor is never committed.
+    /// A replayed capture repeats one fixed slot_abs: however often it is replayed, and whatever
+    /// real time elapses between copies, the slot never advances (`slot_abs > s0` fails) — the
+    /// anchor is never committed. Crucially each replay returns `replaced: false`, so it does NOT
+    /// evict the genuine held candidate — the #5 DoS fix. (Before it, a periodic replay reset the
+    /// candidate — and the caller's elapsed-time clock — every time, denying acquisition forever.)
     #[test]
     fn replayed_fixed_capture_never_anchors() {
         let mut g = EpochGate::new();
-        assert_eq!(g.offer_scanning(7, 500, None), ScanVerdict::Hold);
+        assert_eq!(
+            g.offer_scanning(7, 500, None),
+            ScanVerdict::Hold { replaced: true }
+        ); // first: held
         for elapsed in [0u32, 1, FHSS_N, 10 * FHSS_N] {
             assert_eq!(
                 g.offer_scanning(7, 500, Some(elapsed)),
-                ScanVerdict::Hold,
+                ScanVerdict::Hold { replaced: false }, // does not displace the genuine candidate
                 "elapsed {elapsed}"
             );
         }
+    }
+
+    /// The #5 regression, end to end: a genuine first beacon is held, then a periodic replay of
+    /// an OLDER capture is interleaved with the genuine successor. The replay must not displace
+    /// the held candidate, so the successor still finds it and LOCKS — acquisition is not denied.
+    #[test]
+    fn replay_does_not_deny_acquisition() {
+        let mut g = EpochGate::new();
+        // Genuine beacon #1 (epoch 5, slot 1000) → held as the candidate.
+        assert_eq!(
+            g.offer_scanning(5, 1000, None),
+            ScanVerdict::Hold { replaced: true }
+        );
+        // Attacker replays an OLDER same-epoch capture (slot 700) between the genuine beacons.
+        assert_eq!(
+            g.offer_scanning(5, 700, Some(3)),
+            ScanVerdict::Hold { replaced: false }
+        );
+        // Genuine beacon #2, one cycle after #1, consistent with the STILL-held candidate → lock.
+        assert_eq!(
+            g.offer_scanning(5, 1000 + FHSS_N, Some(FHSS_N)),
+            ScanVerdict::Lock
+        );
+        assert_eq!(g.epoch(), 5);
     }
 
     /// A replayed *older-session* beacon (epoch below the highest locked-to) is rejected in the
@@ -272,7 +319,7 @@ mod tests {
             );
         }
         // The held candidate is untouched by rejected replays: a genuine pair still locks.
-        assert_eq!(g.offer_scanning(6, 2000, None), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(6, 2000, None)));
         assert_eq!(g.offer_scanning(4, 9999, Some(1)), ScanVerdict::Reject);
         assert_eq!(
             g.offer_scanning(6, 2000 + FHSS_N, Some(FHSS_N)),
@@ -293,17 +340,13 @@ mod tests {
             // Slot advanced by FHSS_N while time advanced FHSS_N ± delta.
             for time_adv in [FHSS_N - delta, FHSS_N + delta] {
                 let mut g = EpochGate::new();
-                assert_eq!(g.offer_scanning(3, 100, None), ScanVerdict::Hold);
+                assert!(held(g.offer_scanning(3, 100, None)));
                 let v = g.offer_scanning(3, 100 + FHSS_N, Some(time_adv));
-                assert_eq!(
-                    v,
-                    if locks {
-                        ScanVerdict::Lock
-                    } else {
-                        ScanVerdict::Hold
-                    },
-                    "±{delta}"
-                );
+                if locks {
+                    assert_eq!(v, ScanVerdict::Lock, "±{delta}");
+                } else {
+                    assert!(held(v), "±{delta}");
+                }
             }
         }
     }
@@ -313,9 +356,19 @@ mod tests {
     #[test]
     fn acquire_requires_forward_slot() {
         let mut g = EpochGate::new();
-        assert_eq!(g.offer_scanning(3, 100, None), ScanVerdict::Hold);
-        assert_eq!(g.offer_scanning(3, 100, Some(0)), ScanVerdict::Hold); // equal
-        assert_eq!(g.offer_scanning(3, 99, Some(0)), ScanVerdict::Hold); // backwards
+        assert_eq!(
+            g.offer_scanning(3, 100, None),
+            ScanVerdict::Hold { replaced: true }
+        ); // first
+        // Equal and backward slots hold but do NOT displace the candidate (`replaced: false`).
+        assert_eq!(
+            g.offer_scanning(3, 100, Some(0)),
+            ScanVerdict::Hold { replaced: false }
+        ); // equal
+        assert_eq!(
+            g.offer_scanning(3, 99, Some(0)),
+            ScanVerdict::Hold { replaced: false }
+        ); // backwards
     }
 
     /// A candidate/second-beacon epoch mismatch (both current-or-newer) can't lock; the newer
@@ -323,9 +376,9 @@ mod tests {
     #[test]
     fn epoch_mismatch_replaces_candidate() {
         let mut g = EpochGate::new();
-        assert_eq!(g.offer_scanning(3, 100, None), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(3, 100, None)));
         // Newer session appears mid-acquisition: held instead (e0 == epoch fails → Hold).
-        assert_eq!(g.offer_scanning(4, 20, Some(FHSS_N)), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(4, 20, Some(FHSS_N))));
         assert_eq!(g.offer_scanning(4, 20 + FHSS_N, Some(FHSS_N)), ScanVerdict::Lock);
         assert_eq!(g.epoch(), 4);
     }
@@ -335,12 +388,9 @@ mod tests {
     #[test]
     fn inconsistent_pair_restarts_from_newest() {
         let mut g = EpochGate::new();
-        assert_eq!(g.offer_scanning(3, 100, None), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(3, 100, None)));
         // Slot jumped far more than time elapsed → inconsistent, becomes the new candidate.
-        assert_eq!(
-            g.offer_scanning(3, 100 + 10 * FHSS_N, Some(FHSS_N)),
-            ScanVerdict::Hold
-        );
+        assert!(held(g.offer_scanning(3, 100 + 10 * FHSS_N, Some(FHSS_N))));
         // Consistent with the NEW candidate (not the old one) → locks.
         let s = 100 + 10 * FHSS_N;
         assert_eq!(g.offer_scanning(3, s + FHSS_N, Some(FHSS_N)), ScanVerdict::Lock);
@@ -352,7 +402,7 @@ mod tests {
     fn epoch_bump_relocks_and_invalidates_old_session() {
         let mut g = locked_gate(5, 1000);
         // New session: epoch 6 accepted through a fresh two-beacon acquisition.
-        assert_eq!(g.offer_scanning(6, 10, None), ScanVerdict::Hold);
+        assert!(held(g.offer_scanning(6, 10, None)));
         assert_eq!(g.offer_scanning(6, 10 + FHSS_N, Some(FHSS_N)), ScanVerdict::Lock);
         assert_eq!(g.epoch(), 6);
         // Captures of the previous session are now dead in both states.
@@ -459,7 +509,7 @@ mod tests {
         let mut g = locked_gate(9, 1000);
         g.reset(0); // node re-enables FHSS: no gateway epoch seen yet this session
         assert_eq!(g.epoch(), 0);
-        assert_eq!(g.offer_scanning(1, 10, None), ScanVerdict::Hold); // low epoch OK again
+        assert!(held(g.offer_scanning(1, 10, None))); // low epoch OK again
         g.reset(next_master_epoch(Some(9))); // master session
         assert_eq!(g.epoch(), 10);
     }
