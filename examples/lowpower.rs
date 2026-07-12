@@ -14,8 +14,13 @@
 //! spawned by `Board::take` and, while unplugged, polls VBUS every ~500 ms — that RTC
 //! poll is the active wake source here, and it re-applies the STOP power tuning
 //! (`PWR_CR.LPSDSR`/`ULP`, which embassy's wake path clears) on each wake. So this measures
-//! the realistic unplugged idle floor (~32 µA @3 V *including* the attached probe; ~12 µA
-//! true DUT), not a "nothing ever runs" floor.
+//! the realistic unplugged idle floor, not a "nothing ever runs" floor.
+//!
+//! Bench-measured (2026-07-12, PPK2 source-measure, USB unplugged): **~20 µA median @ 1.8 V**,
+//! which *includes* the attached J-Link's ~20 µA SWD-parasitic offset — so the DUT's own STOP
+//! floor is only a couple of µA (STM32L0 Stop + LSE-RTC territory). Well under the 50 µA the
+//! HIL `power_stop_floor_under_50ua` test asserts. (Median, not mean: the ~500 ms console-poll
+//! wakes briefly raise the instantaneous current, so the mean overstates the quiescent floor.)
 
 #![no_std]
 #![no_main]
