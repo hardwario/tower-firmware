@@ -90,6 +90,63 @@ impl ReplayLane {
     }
 }
 
+/// Where a peer's replay lane is persisted, and whether it was restored or freshly claimed.
+/// The result of [`assign_lane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneBinding {
+    /// Index (`0..records.len()`) of the persisted lane local this peer's lane lives at.
+    pub index: usize,
+    /// Restored last-seen (the persisted value on restore; `0` for a freshly-claimed lane).
+    pub seen: u32,
+    /// `true` = a fresh local was claimed — the caller must persist `(id, 0)` there;
+    /// `false` = the peer's own record was restored (no write needed).
+    pub fresh: bool,
+}
+
+/// Bind a peer `id` to one of `records.len()` persisted replay-lane locals, **keyed by peer
+/// id, not by the caller's table slot**.
+///
+/// This is the fix for a real bug: the lane used to be persisted at `base + table_slot`, but a
+/// peer's table slot is assigned by registration order, which *changes* when an earlier peer is
+/// removed and the registry compacts. On the next reboot the surviving later peers landed on
+/// different slots → their id-tagged records no longer matched → their replay lanes reset to 0,
+/// reopening the window until they next transmitted. Keying by id makes a peer find its own lane
+/// wherever it sits.
+///
+/// `records[l]` = the stored `(stored_id, last_seen)` at local `l` (`None` if unwritten). `used`
+/// bit `l` marks a local already bound to a *currently registered* peer this session (so two
+/// live peers never share a local, and a removed peer's record stays for resume-on-re-pair while
+/// its local frees for reuse). Priority: (1) restore this `id`'s record at a free local; else
+/// (2) claim the lowest free local. `None` only if every local is bound to a live peer — which
+/// the caller prevents by only calling when it has a free table slot. `records.len()` ≤ 32
+/// (the `used` bitmask width).
+#[must_use]
+pub fn assign_lane(id: u32, records: &[Option<(u32, u32)>], used: u32) -> Option<LaneBinding> {
+    // 1. Restore this id's own record, at a local no live peer already occupies.
+    for (l, rec) in records.iter().enumerate() {
+        if let Some((stored_id, seen)) = *rec {
+            if stored_id == id && used & (1 << l) == 0 {
+                return Some(LaneBinding {
+                    index: l,
+                    seen,
+                    fresh: false,
+                });
+            }
+        }
+    }
+    // 2. Claim the lowest free local (the caller persists `(id, 0)` there).
+    for l in 0..records.len() {
+        if used & (1 << l) == 0 {
+            return Some(LaneBinding {
+                index: l,
+                seen: 0,
+                fresh: true,
+            });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +297,109 @@ mod tests {
         assert_eq!(lane.classify(500), ReplayVerdict::Retransmit);
         assert_eq!(lane.classify(499), ReplayVerdict::Replay);
         assert_eq!(lane.classify(501), ReplayVerdict::Fresh);
+    }
+
+    // --- assign_lane (id-keyed replay-lane binding) ------------------------------------------
+
+    /// An unknown peer with no record claims the lowest free local (fresh); an occupied local
+    /// is skipped.
+    #[test]
+    fn assign_lane_claims_lowest_free() {
+        let records = [None, None, None, None];
+        assert_eq!(
+            assign_lane(0xAAAA, &records, 0),
+            Some(LaneBinding {
+                index: 0,
+                seen: 0,
+                fresh: true
+            })
+        );
+        assert_eq!(
+            assign_lane(0xAAAA, &records, 0b0001),
+            Some(LaneBinding {
+                index: 1,
+                seen: 0,
+                fresh: true
+            })
+        );
+    }
+
+    /// A peer finds its OWN record by id, at whatever local it sits — the restore path.
+    #[test]
+    fn assign_lane_restores_own_record_by_id() {
+        let records = [Some((0xA, 10)), Some((0xB, 20)), Some((0xC, 30)), Some((0xD, 40))];
+        assert_eq!(
+            assign_lane(0xC, &records, 0),
+            Some(LaneBinding {
+                index: 2,
+                seen: 30,
+                fresh: false
+            })
+        );
+        assert_eq!(
+            assign_lane(0xD, &records, 0),
+            Some(LaneBinding {
+                index: 3,
+                seen: 40,
+                fresh: false
+            })
+        );
+    }
+
+    /// THE regression: A,B,C,D registered (records A@0,B@1,C@2,D@3) → B removed (its record
+    /// persists) → on reboot the boot mirror adds A,C,D in registry order; C and D must RESTORE
+    /// their own lanes even though their table slots shifted. The old slot-indexed scheme reset
+    /// C and D to 0 here — reopening their replay windows.
+    #[test]
+    fn assign_lane_survives_remove_then_reboot() {
+        let records = [Some((0xA, 10)), Some((0xB, 20)), Some((0xC, 30)), Some((0xD, 40))];
+        let mut used = 0u32;
+        let a = assign_lane(0xA, &records, used).unwrap();
+        assert_eq!((a.index, a.seen, a.fresh), (0, 10, false));
+        used |= 1 << a.index;
+        let c = assign_lane(0xC, &records, used).unwrap();
+        assert_eq!(
+            (c.index, c.seen, c.fresh),
+            (2, 30, false),
+            "C must restore, not reset"
+        );
+        used |= 1 << c.index;
+        let d = assign_lane(0xD, &records, used).unwrap();
+        assert_eq!(
+            (d.index, d.seen, d.fresh),
+            (3, 40, false),
+            "D must restore, not reset"
+        );
+    }
+
+    /// A new peer claims the local freed by a removed one (its stale record is overwritten).
+    #[test]
+    fn assign_lane_new_peer_claims_freed_local() {
+        let records = [Some((0xA, 10)), Some((0xB, 20)), Some((0xC, 30)), Some((0xD, 40))];
+        let used = 0b1101; // A@0, C@2, D@3 live; local 1 free (B removed).
+        let e = assign_lane(0xE, &records, used).unwrap();
+        assert_eq!((e.index, e.fresh), (1, true));
+    }
+
+    /// No free local (every local bound to a live peer) → None.
+    #[test]
+    fn assign_lane_none_when_full() {
+        let records = [Some((0xA, 1)), Some((0xB, 2))];
+        assert_eq!(assign_lane(0xC, &records, 0b11), None);
+    }
+
+    /// An id-match at a local already held by a live peer is skipped (no two live peers on one
+    /// local) — fall through to a claim.
+    #[test]
+    fn assign_lane_skips_id_match_at_occupied_local() {
+        let records = [Some((0xA, 10)), None];
+        assert_eq!(
+            assign_lane(0xA, &records, 0b01),
+            Some(LaneBinding {
+                index: 1,
+                seen: 0,
+                fresh: true
+            })
+        );
     }
 }

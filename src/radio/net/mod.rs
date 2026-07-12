@@ -33,7 +33,7 @@ use embassy_time::{Duration, Instant, Timer};
 // radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
 pub use tower_net_core::ack::AckMeta;
 use tower_net_core::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
-use tower_net_core::replay::{ReplayLane, ReplayVerdict};
+use tower_net_core::replay::{ReplayLane, ReplayVerdict, assign_lane};
 use tower_net_core::txctr::TxCounter;
 
 use super::ccm::Ccm;
@@ -90,6 +90,10 @@ struct Peer {
     key: [u8; 16],
     /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
     lane: ReplayLane,
+    /// KV local (`NS_NET`) where this peer's replay lane is persisted. Bound by *id*
+    /// (`assign_lane`), NOT the table slot — so the lane survives a slot shift when an
+    /// earlier peer is removed and the table compacts (see [`add_peer`](Net::add_peer)).
+    lane_local: u8,
     /// A downlink is queued for this peer (app-maintained via [`Net::set_pending`]);
     /// advertised in the flags byte of every ACK we send it. Must be set *before* the
     /// uplink that should learn it arrives — the ACK goes out inside [`Net::recv`],
@@ -328,34 +332,41 @@ impl Net {
             self.peers[i].as_mut().unwrap().key = *key; // re-key in place
             return true;
         }
-        for i in 0..MAX_PEERS {
-            if self.peers[i].is_none() {
-                let nkv = self.kv.scope(NS_NET);
-                let local = KEY_LASTSEEN_BASE + i as u8;
-                // Replay lanes are persisted per-peer-*id*, not per-slot. A slot is assigned by
-                // registration order, so a freed slot can be inherited by a different peer; only
-                // restore the stored last-seen if the record was written for THIS id. Restoring a
-                // stale value across peers would either reopen the replay window (inherited value
-                // lower than the peer's real counter) or dead-lock the link (higher). On id
-                // mismatch or no record, start the lane fresh at 0 and immediately bind (id, 0)
-                // so the slot now belongs to this peer.
-                let last_seen = match read_u32_pair(nkv, local) {
-                    Some((stored_id, seen)) if stored_id == id => seen,
-                    _ => {
-                        let _ = nkv.set_bytes(local, &lane_record(id, 0));
-                        0
-                    }
-                };
-                self.peers[i] = Some(Peer {
-                    id,
-                    key: *key,
-                    lane: ReplayLane::new(last_seen),
-                    pending: false,
-                });
-                return true;
-            }
+        let Some(slot) = self.peers.iter().position(|p| p.is_none()) else {
+            return false; // table full
+        };
+        let nkv = self.kv.scope(NS_NET);
+        // Bind the replay lane by peer *id*, not by table slot. Snapshot the persisted lane
+        // records and the locals already held by live peers, then let `assign_lane` decide
+        // (restore this id's own record wherever it sits, else claim the lowest free local).
+        // This is why a survivor keeps its replay window when an earlier peer is removed and
+        // the table compacts — its slot shifts but its lane record is found by id.
+        let mut records = [None; MAX_PEERS];
+        for (l, rec) in records.iter_mut().enumerate() {
+            *rec = read_u32_pair(nkv, KEY_LASTSEEN_BASE + l as u8);
         }
-        false
+        let used = self
+            .peers
+            .iter()
+            .flatten()
+            .fold(0u32, |m, p| m | 1 << (p.lane_local - KEY_LASTSEEN_BASE));
+        // A free table slot guarantees a free local (≤ MAX_PEERS-1 live peers here), so
+        // `assign_lane` returns Some — but fail closed to no-op if that ever changes.
+        let Some(bind) = assign_lane(id, &records, used) else {
+            return false;
+        };
+        let local = KEY_LASTSEEN_BASE + bind.index as u8;
+        if bind.fresh {
+            let _ = nkv.set_bytes(local, &lane_record(id, 0)); // claim the local for this id
+        }
+        self.peers[slot] = Some(Peer {
+            id,
+            key: *key,
+            lane: ReplayLane::new(bind.seen),
+            lane_local: local,
+            pending: false,
+        });
+        true
     }
 
     /// Remove a peer. Returns whether it was present. (Its persisted last-seen record is
@@ -440,11 +451,8 @@ impl Net {
             Some(i) => {
                 let p = self.peers[i].as_mut().unwrap();
                 if p.lane.accept(counter) {
-                    let id = p.id;
-                    let _ = self
-                        .kv
-                        .scope(NS_NET)
-                        .set_bytes(KEY_LASTSEEN_BASE + i as u8, &lane_record(id, counter));
+                    let (id, local) = (p.id, p.lane_local); // id-bound local, not the slot
+                    let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(id, counter));
                 }
             }
             None => {
