@@ -445,10 +445,17 @@ impl Drop for OnCancelDrop {
     }
 }
 
-/// Drain [`TX_CHANNEL`] over `tx` until cancelled. Holds a [`WakeGuard`] across each
-/// transmit burst: the async write awaits the USART TXE interrupt, which STOP would
-/// gate — the guard forces a plain WFI so the USART stays clocked and the interrupt
-/// fires. Between bursts **no** guard is held (docs/console.md).
+/// Drain [`TX_CHANNEL`] over `tx` until cancelled. Holds a [`WakeGuard`] across each transmit
+/// burst so the low-power executor stays in WFI (clocks live) while the async DMA write awaits its
+/// transfer-complete interrupt, rather than dropping into STOP mid-transfer.
+///
+/// This is now **redundant**: the RX ring ([`RingBufferedUartRx`]) calls `increment_stop_refcount`
+/// for USART1 (whose `stop_mode` is `Stop1`), so `REFCOUNT_STOP1 ≥ 1` for the *entire* time the
+/// console is up → `rcc::get_stop_mode` returns `None` and the executor never enters STOP while
+/// plugged in (verified against embassy-stm32 0.6). The guard is kept deliberately as
+/// belt-and-braces: it makes the TX path's stop-safety **self-contained**, not silently dependent
+/// on an RX-side refcount that a future RX refactor could change. Cheap (one scope object per
+/// burst); between bursts no guard is held (docs/console.md).
 async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     let mut seq: u16 = 0;
 
@@ -485,7 +492,8 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
 
     loop {
         let item = TX_CHANNEL.receive().await;
-        // Hold STOP off across the burst so the interrupt-driven writes complete.
+        // Hold STOP off across the burst so the DMA write completes (redundant with the RX ring's
+        // stop refcount — see `writer_loop` — kept so the TX path is self-contained).
         let _guard = WakeGuard::new(StopMode::Stop1);
         // Count this dequeued item as dropped if the writer is cancelled (USB unplug via the
         // manager's `select3`) before it is handed to the UART — keeps the host's Dropped
