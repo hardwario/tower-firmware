@@ -91,9 +91,11 @@ battery_mv})` · `Button{kind, count}` · `Temperature{millic}` · `Accel{kind, 
 Hold; `AccelKind` = Motion/Orientation. Per-kind button `count` is RAM-only — a reset means the
 node rebooted (watch `NodeInfo::session_id`).
 
-Host → node (`NodeCmd`): `Shell{cmd_id, line}` — queued as a downlink; the node runs it in the
-standard shell dispatcher and answers with `NodeMsg::Shell` chunks (≤ `RADIO_SHELL_CHUNK` = 56 B)
-correlated by `cmd_id`.
+Host → node (`NodeCmd`): `Shell{epoch, cmd_id, line}` — queued as a downlink; the node runs it in
+the standard shell dispatcher and answers with `NodeMsg::Shell` chunks (≤ `RADIO_SHELL_CHUNK` =
+56 B) correlated by `cmd_id`. `epoch` is a random per-host-process tag: the queue is at-least-once,
+so the node de-duplicates re-deliveries on `(epoch, cmd_id)` — the random epoch stops a restarted
+host that reuses a low `cmd_id` from being mistaken for a re-delivery (the "empty checkmark" reply).
 
 ### TX outcomes (`RadioStat::Tx.outcome`)
 
@@ -246,11 +248,14 @@ The radio-bridge path (`net.send`) is exercised by `gateway_bridges_push_button_
 
 The full round-trip, node asleep between events:
 
-1. Host encodes `NodeCmd::Shell{cmd_id, line}` and `QueuePush`es it to the gateway.
+1. Host encodes `NodeCmd::Shell{epoch, cmd_id, line}` (random per-process `epoch` for
+   at-least-once de-dup) and `QueuePush`es it to the gateway.
 2. The gateway holds it; the next uplink's ACK advertises the pending flag.
-3. The node opens a short RX window, decodes the `NodeCmd`, runs `line` through the same
-   `shell::run_line` dispatcher the console uses, and streams the reply back as `NodeMsg::Shell`
-   chunks (each reply's ACK re-flags pending, chaining the queue).
+3. The node opens a short RX window, decodes the `NodeCmd`, and runs `line` through
+   `shell::stream_line` — the same command tree the console uses, but streamed: it re-runs the
+   handler once per output window so an unbounded reply (`/export`, `settings print`) is never
+   truncated at a fixed buffer. The reply streams back as `NodeMsg::Shell` chunks (each reply's
+   ACK re-flags pending, chaining the queue).
 4. The gateway forwards the chunks as `Uplink` frames and reports delivery via `RadioStat::Tx`.
 
 No tab completion over the air — completion is a per-transport feature the radio transport

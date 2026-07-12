@@ -285,6 +285,10 @@ tower complete "/system settings set "   # ask the target what completes here
 |---|---|
 | `/system reboot` | flush the reply, then `SCB::sys_reset()` |
 | `/system/resource print` | firmware/protocol version, uptime, CPU, clock, memory |
+| `/system/stack print` | measured stack high-water (boot-painted) — used/free/total vs the budget |
+| `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
+| `/system/eeprom wipe confirm` | factory reset — zero the whole store, then reboot |
+| `/system/crash print` | the last panic/HardFault recovered at this boot (from the breadcrumb) |
 | `/system settings print` | list every setting and its value |
 | `/system settings set <name>=<value>` | validate by kind + persist |
 | `/system settings get <name>` | show value + constraints + default |

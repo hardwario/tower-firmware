@@ -18,6 +18,11 @@ rules an app should follow so the EEPROM lasts the product's life.
   scoped view with `b.kv.scope(NS_APP)` — every get/set is then keyed by an 8-bit local.
 - Records are `[tag(2) | len(2) | crc(4) | value]`; values up to `MAX_VALUE` (256 B).
 - Power-loss-safe: a torn write never corrupts a prior key (see the `tower-kv` module docs).
+- **Delete** with `kv.delete(key)`: it appends a zero-length **tombstone** record (`len == 0`),
+  so the key reads back absent (`get` → `None`) and the next compaction flip drops both the value
+  and the tombstone — so the live set can **shrink**, not only grow. Append-only and power-loss-safe
+  like any write; a redundant delete of an absent key is a wear-free no-op. (`len == 0` is therefore
+  reserved as the tombstone marker — no key stores a genuinely empty value.)
 
 ## How it wears — it wear-levels
 
