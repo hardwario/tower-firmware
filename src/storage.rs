@@ -247,6 +247,14 @@ impl<'d> Kv<'d> {
         tower_kv::get_bytes(&self.storage, self.capacity, key, out).map_err(Error::from)
     }
 
+    /// Delete `key` (a tombstone append): it reads back absent, and the next compaction reclaims
+    /// its space. A wear-free no-op if already absent. Flip-aware like [`set_bytes`](Self::set_bytes).
+    /// The store can now *shrink*, not only grow — the lever against a full-store compaction storm.
+    pub fn delete(&mut self, key: u16) -> Result<(), Error> {
+        tower_kv::delete_with(&mut self.storage, self.capacity, key, self.maint.pending())
+            .map_err(Error::from)
+    }
+
     /// Store any serde value under `key`, serialized with postcard.
     pub fn set<T: Serialize>(&mut self, key: u16, value: &T) -> Result<(), Error> {
         let mut buf = [0u8; MAX_VALUE];
@@ -363,6 +371,14 @@ impl Nv {
         self.with(|kv| kv.get_bytes(key, out))
     }
 
+    /// Delete `key` (see [`Kv::delete`]). Wakes the [`maintenance`] task so the tombstone (and
+    /// the value it hides) get reclaimed by the next flip.
+    pub fn delete(&self, key: u16) -> Result<(), Error> {
+        let r = self.with(|kv| kv.delete(key));
+        MAINT_WAKE.signal(());
+        r
+    }
+
     /// Store any serde value under `key`, postcard-serialized (see [`Kv::set`]). Wakes the
     /// [`maintenance`] task.
     pub fn set<T: Serialize>(&self, key: u16, value: &T) -> Result<(), Error> {
@@ -461,6 +477,12 @@ impl Scoped {
     /// Read the raw bytes under `local` in this namespace into `out` (see [`Kv::get_bytes`]).
     pub fn get_bytes(&self, local: u8, out: &mut [u8]) -> Result<Option<usize>, Error> {
         self.nv.get_bytes(self.full_key(local), out)
+    }
+
+    /// Delete `local` in this namespace (see [`Kv::delete`]) — reads back absent, space reclaimed
+    /// on the next flip. A wear-free no-op if already absent.
+    pub fn delete(&self, local: u8) -> Result<(), Error> {
+        self.nv.delete(self.full_key(local))
     }
 
     /// Store a postcard value under `local` in this namespace (see [`Kv::set`]).

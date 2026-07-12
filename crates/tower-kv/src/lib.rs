@@ -32,6 +32,11 @@
 //! (`[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over `tag‖len‖value`), so legacy data
 //! migrates without reserialization — see [`init`].
 //!
+//! **Deletion** rides the same append-only log: [`delete`] writes a **tombstone** — a zero-length
+//! record (`len == 0`) — so the key reads back absent ([`get_bytes`]), and the next flip drops any
+//! key whose latest record is a tombstone, reclaiming both the value and the tombstone. `len == 0`
+//! is therefore reserved as the tombstone marker (no caller stores a genuinely empty value).
+//!
 //! # Incremental maintenance
 //!
 //! Because every pre-commit flip write is invisible until the superblock lands, the *same* flip
@@ -316,6 +321,9 @@ pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Er
 /// Store raw `value` bytes under `key`. Append-only within the active half (a torn write only ever
 /// corrupts the tail); when the half is full, a compaction flip frees space and the append retries
 /// in the freshly-packed other half.
+///
+/// An **empty** `value` writes a delete tombstone (the key reads back absent) — prefer the named
+/// [`delete`], which additionally skips the write when the key is already absent.
 pub fn set_bytes<S: Eeprom>(
     store: &mut S,
     capacity: u32,
@@ -393,6 +401,10 @@ pub fn get_bytes<S: Eeprom>(
     };
     let base = half_base(capacity, h);
     match scan_half(store, base, half_len(capacity), key)?.1 {
+        // A latest record of length 0 is a delete **tombstone** (see [`delete`]): the key was
+        // removed, so it reads back absent exactly like one never set. The tombstone bytes stay
+        // on disk until the next flip drops them.
+        Some((_, 0)) | None => Ok(None),
         Some((off, len)) => {
             let n = (len as usize).min(out.len());
             store
@@ -400,8 +412,47 @@ pub fn get_bytes<S: Eeprom>(
                 .map_err(KvError::Backend)?;
             Ok(Some(len as usize))
         }
-        None => Ok(None),
     }
+}
+
+/// Delete `key`: append a **tombstone** (a zero-length record) so the key reads back absent.
+/// Append-only and power-loss-safe like any [`set_bytes`] — a torn tombstone write only corrupts
+/// the tail. The key's old value and the tombstone are both reclaimed by the next compaction
+/// [`flip`] (which drops any key whose latest record is a tombstone); until then they occupy
+/// space. A no-op (reads only, no write, no wear) if the key is already absent or tombstoned, so
+/// deleting a missing key never grows the log.
+pub fn delete<S: Eeprom>(store: &mut S, capacity: u32, key: u16) -> Result<(), KvError<S::Error>> {
+    delete_with(store, capacity, key, &mut None)
+}
+
+/// [`delete`], aware of an in-progress incremental flip (`pending`, shared with [`maintain`]) —
+/// the tombstone append follows the same source-half / finish-pending-flip rules as
+/// [`set_bytes_with`].
+pub fn delete_with<S: Eeprom>(
+    store: &mut S,
+    capacity: u32,
+    key: u16,
+    pending: &mut Option<FlipState>,
+) -> Result<(), KvError<S::Error>> {
+    if key == 0 {
+        return Err(KvError::InvalidKey);
+    }
+    // Skip the write when there is nothing to delete: an un-initialized region, a key never set,
+    // or one whose latest record is already a tombstone. Keeps a redundant delete free of wear.
+    match active(store, capacity)? {
+        None => return Ok(()),
+        Some((h, _)) => {
+            let base = half_base(capacity, h);
+            match scan_half(store, base, half_len(capacity), key)?.1 {
+                Some((_, len)) if len > 0 => {} // a live value — fall through to tombstone it
+                _ => return Ok(()),             // absent or already tombstoned
+            }
+        }
+    }
+    // A zero-length value IS the tombstone; reuse the append path (incl. flip-on-full). If the
+    // half is full, the flip first packs the live set (this key's value included), then the
+    // tombstone lands in the fresh half and supersedes it — correct, self-healing on the next flip.
+    set_bytes_with(store, capacity, key, &[], pending)
 }
 
 /// Reclaim space taken by superseded records via a power-safe **flip**: the live set is packed
@@ -476,7 +527,10 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
         }
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
         let size = KV_HEADER as u32 + len as u32;
-        if latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o) {
+        // Copy a record only if it is the latest for its tag AND not a delete tombstone
+        // (`len == 0`): a tombstoned key is dropped here, reclaiming both its value and the
+        // tombstone. Superseded records (older than the latest) fall through uncopied as before.
+        if len != 0 && latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o) {
             if wr + size > half {
                 return Err(KvError::Full); // live set doesn't fit a half
             }
@@ -602,7 +656,12 @@ pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
     for &(_, off) in &latest[..nkeys] {
         let mut hdr = [0u8; KV_HEADER];
         store.read(base + off, &mut hdr).map_err(KvError::Backend)?;
-        total += KV_HEADER as u32 + u16::from_le_bytes([hdr[2], hdr[3]]) as u32;
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        // A tombstoned key (latest len 0) leaves nothing behind after a flip — exclude it so
+        // this stays an exact "packed size a flip would leave".
+        if len != 0 {
+            total += KV_HEADER as u32 + len as u32;
+        }
     }
     Ok(total)
 }
@@ -774,12 +833,14 @@ pub fn flip_step<S: Eeprom>(
         if tag == 0 {
             break; // defensive: walk_latest validated [0, src_end)
         }
-        let size = KV_HEADER as u32 + u16::from_le_bytes([hdr[2], hdr[3]]) as u32;
-        if !st.latest[..st.nkeys]
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
+        let size = KV_HEADER as u32 + len as u32;
+        let planned = st.latest[..st.nkeys]
             .iter()
-            .any(|&(t, off)| t == tag && off == st.read_off)
-        {
-            st.read_off += size; // superseded — skip
+            .any(|&(t, off)| t == tag && off == st.read_off);
+        if !planned || len == 0 {
+            // superseded, or a delete tombstone (len 0) whose key is dropped — skip either way
+            st.read_off += size;
             continue;
         }
         if st.write_off + size > half {
@@ -1493,5 +1554,124 @@ mod tests {
         assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 38);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), 26);
         assert!(dead_half_blank(&ram, CAP).unwrap());
+    }
+
+    // --- deletion (tombstones) ------------------------------------------------------------------
+
+    fn del(ram: &mut Ram, key: u16) -> Result<(), KvError<()>> {
+        delete(ram, CAP, key)
+    }
+
+    #[test]
+    fn delete_makes_key_absent_then_resurrectable() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"hello").unwrap();
+        set(&mut ram, 2, b"keep").unwrap();
+        del(&mut ram, 1).unwrap();
+        assert_eq!(get_vec(&ram, 1), None, "deleted key reads absent");
+        assert_eq!(
+            get_vec(&ram, 2).as_deref(),
+            Some(&b"keep"[..]),
+            "sibling untouched"
+        );
+        // A later set resurrects the key (the new record supersedes the tombstone).
+        set(&mut ram, 1, b"back").unwrap();
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"back"[..]));
+        del(&mut ram, 1).unwrap();
+        assert_eq!(get_vec(&ram, 1), None);
+    }
+
+    #[test]
+    fn delete_missing_key_is_a_wear_free_noop() {
+        let mut ram = Ram::new(CAP as usize);
+        assert_eq!(del(&mut ram, 0), Err(KvError::InvalidKey), "key 0 reserved");
+        // Never-set key on an un-initialized region: no write at all.
+        del(&mut ram, 7).unwrap();
+        assert_eq!(
+            ram.words_written, 0,
+            "deleting a missing key must not program a word"
+        );
+        set(&mut ram, 7, b"x").unwrap();
+        del(&mut ram, 7).unwrap();
+        let after_first = ram.words_written;
+        del(&mut ram, 7).unwrap(); // already tombstoned → no-op
+        assert_eq!(ram.words_written, after_first, "redundant delete is wear-free");
+        assert_eq!(get_vec(&ram, 7), None);
+    }
+
+    #[test]
+    fn flip_reclaims_deleted_keys() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, &[1u8; 40]).unwrap();
+        set(&mut ram, 2, b"survivor").unwrap();
+        del(&mut ram, 1).unwrap();
+        // Before the flip, the tombstone leaves nothing live for key 1…
+        assert_eq!(
+            live_bytes(&ram, CAP).unwrap(),
+            KV_HEADER as u32 + 8,
+            "only key 2 is live"
+        );
+        compact(&mut ram, CAP).unwrap();
+        // …and the flip physically drops both key 1's value and its tombstone.
+        assert_eq!(get_vec(&ram, 1), None);
+        assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"survivor"[..]));
+        assert_eq!(
+            free_bytes(&ram, CAP).unwrap(),
+            half_len(CAP) - (KV_HEADER as u32 + 8),
+            "packed half holds only the survivor"
+        );
+    }
+
+    #[test]
+    fn delete_survives_many_flips() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 0x10, b"gone").unwrap();
+        del(&mut ram, 0x10).unwrap();
+        // Churn another key hard enough to force many flips; the deleted key must never reappear.
+        for i in 0..400u32 {
+            set(&mut ram, 0x11, &i.to_le_bytes()).unwrap();
+            assert_eq!(get_vec(&ram, 0x10), None, "deleted key resurfaced at i={i}");
+        }
+    }
+
+    #[test]
+    fn delete_that_triggers_a_flip_still_deletes() {
+        // Fill the half so the tombstone append itself must flip; the key must end up absent.
+        let mut ram = Ram::new(CAP as usize);
+        for i in 0..5u8 {
+            set(&mut ram, 1, &[i; 40]).unwrap(); // ~240 of 244 B — nearly full
+        }
+        let (_, g0) = active(&ram, CAP).unwrap().unwrap();
+        del(&mut ram, 1).unwrap(); // no room for the 8-B tombstone → flips, then tombstones
+        let (_, g1) = active(&ram, CAP).unwrap().unwrap();
+        assert_eq!(g1, g0 + 1, "the delete drove exactly one flip");
+        assert_eq!(get_vec(&ram, 1), None);
+        // A second flip now reclaims the value+tombstone the first flip carried over.
+        compact(&mut ram, CAP).unwrap();
+        assert_eq!(get_vec(&ram, 1), None);
+        assert_eq!(
+            live_bytes(&ram, CAP).unwrap(),
+            0,
+            "store empty after the delete is reclaimed"
+        );
+    }
+
+    #[test]
+    fn tombstone_in_the_tail_supersedes_a_planned_value() {
+        // A delete that lands AFTER flip_start's snapshot (in the source tail) must still win:
+        // flip_commit copies the tail tombstone in after the planned value, so latest-wins holds.
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"planned").unwrap();
+        set(&mut ram, 2, b"keep").unwrap();
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        flip_step(&mut ram, CAP, &mut st, u32::MAX).unwrap(); // copies the planned live set
+        del(&mut ram, 1).unwrap(); // tombstone appended to the source tail, past the snapshot
+        flip_commit(&mut ram, CAP, &mut st).unwrap(); // tail catch-up carries the tombstone over
+        assert_eq!(get_vec(&ram, 1), None, "tail tombstone won");
+        assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"keep"[..]));
+        // The carried value+tombstone are dead weight the NEXT flip reclaims.
+        compact(&mut ram, CAP).unwrap();
+        assert_eq!(get_vec(&ram, 1), None);
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), KV_HEADER as u32 + 4);
     }
 }

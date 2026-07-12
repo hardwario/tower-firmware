@@ -33,6 +33,7 @@ pub mod lis2dh12;
 pub mod power;
 pub mod radio;
 pub mod shell;
+pub mod stack;
 pub mod storage;
 pub mod strip;
 pub mod tmp112;
@@ -98,6 +99,10 @@ macro_rules! app {
             entry = "cortex_m_rt::entry"
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
+            // Paint the free stack from the shallow boot frame (before any deep call), so
+            // `/system stack print` can later report a measured high-water mark. Cheap (one
+            // sentinel fill of unused RAM) and the first thing that runs so it covers everything.
+            $crate::stack::paint();
             let mut board = $crate::board::Board::take(spawner);
             // Background EEPROM maintenance (incremental compaction + dead-half pre-blanking),
             // on by default so the multi-second synchronous flip stall can't land mid-operation

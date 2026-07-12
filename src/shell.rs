@@ -290,6 +290,7 @@ static BASE_ROOT: &[Entry] = &[
         &[
             Entry::cmd("reboot", Args::None, cmd_reboot),
             Entry::Menu("resource", &[Entry::cmd("print", Args::None, cmd_resource)]),
+            Entry::Menu("stack", &[Entry::cmd("print", Args::None, cmd_stack)]),
             Entry::Menu(
                 "eeprom",
                 &[
@@ -702,6 +703,31 @@ fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
         nv.free_bytes(),
         if nv.dead_half_blank() { "yes" } else { "no" },
         crate::bootguard::consecutive_resets(),
+    );
+    Outcome::ok()
+}
+
+fn cmd_stack(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
+    // Measured stack high-water: the boot painter (`stack::paint`) filled the free stack with a
+    // sentinel; this reports how much has since been overwritten — the deepest the call graph +
+    // ISR frames ever reached. Weigh `used` against the 8 KB budget floor (docs/gateway.md); a
+    // small `free` is a near-overflow warning on this 20 KB part. All pure reads.
+    let total = crate::stack::total();
+    let used = crate::stack::used();
+    let free = crate::stack::free();
+    // Per-mille in integer math (no FPU on the M0+), rendered X.X%.
+    let permille = if total > 0 {
+        (used as u64 * 1000 / total as u64) as u32
+    } else {
+        0
+    };
+    let _ = write!(
+        ctx,
+        "stack: {total} B total (RAM bottom, flip-link)\r\n\
+         used: {used} B ({}.{}%) peak high-water\r\n\
+         free: {free} B at the deepest reach\r\n",
+        permille / 10,
+        permille % 10,
     );
     Outcome::ok()
 }

@@ -231,8 +231,14 @@ EEPROM (transient bucket locals), the 4-item queue, and 12-byte packed link stat
 a regression tripwire so a future-inflating change is caught at PR time, not at a bench HardFault.
 Re-check `just size app radio_dongle_gateway` after growing anything resident; if a bin genuinely
 needs more, raise the floor *and re-measure the high-water mark on hardware*, don't just nudge it.
-TODO: a two-board HIL-driven stack-paint read of the gateway's deep paths (registry-bucket codec +
-mgmt chunking + radio bridge) to replace the ~7.5 KB estimate with a measured number.
+
+**Measured high-water:** the boot painter (`stack::paint`) fills the free stack with a sentinel
+and `/system stack print` reports how much was overwritten. The HIL test
+`gateway_stack_high_water_within_budget` drives the deepest console-reachable paths (fill the
+registry across all EEPROM buckets → the ~270 B bucket-codec local + a KV flip, push queue items,
+list the whole registry → mgmt chunking) and reads it back: **7360 B of 8960 B** on the bench
+(2026-07-12) — under the 8 KB floor with ~1600 B to spare, confirming the earlier ~7.5 KB estimate.
+The radio-bridge path (`net.send`) is exercised by `gateway_bridges_push_button_end_to_end`.
 
 ---
 
