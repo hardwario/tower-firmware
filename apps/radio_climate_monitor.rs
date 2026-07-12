@@ -33,7 +33,7 @@ async fn run(mut b: Board) {
     //   let radio = tower::radio::Spirit1::new(b.radio_spi, b.radio_sck, b.radio_mosi,
     //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
     //   let mut net = tower::radio::net::Net::new(radio, b.kv,
-    //                   NetConfig { my_id, key: KEY, band: Band::Eu868, channel: 0 }).await?;
+    //                   NetConfig { addr, key: KEY, band: Band::Eu868, channel: 0 }).await?;
     info!(target: "climate", "radio_climate_monitor skeleton — measuring every {MEASURE_INTERVAL_SECS} s");
 
     loop {

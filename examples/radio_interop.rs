@@ -90,15 +90,15 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let my_id = NODE_ID;
+    let addr = NODE_ID;
     #[cfg(not(feature = "role-node"))]
-    let my_id = GW_ID;
+    let addr = GW_ID;
 
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
-            my_id,
+            addr,
             key: KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -124,7 +124,7 @@ async fn run(b: Board) {
 #[cfg(feature = "role-node")]
 async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u32) -> ! {
     net.add_peer(GW_ID, &KEY);
-    let mut rng = SEED ^ net.id();
+    let mut rng = SEED ^ net.addr();
     if rng == 0 {
         rng = 1;
     }

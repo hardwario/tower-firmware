@@ -289,14 +289,14 @@ pub fn preinit_csr() -> u32 {
 static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// This unit's stable 32-bit radio address, derived from the STM32's 96-bit unique
-/// device ID: CRC-32/IEEE over the UID, clamped to never be 0 (`0` is the "host not yet
+/// device ID: CRC-32/IEEE over the UID, clamped to never be 0 (`0` is the "gateway not yet
 /// known" dest in the pairing JOIN_REQ, and the "unset / auto" sentinel of the
-/// [`shell` `address` setting](crate::shell::radio_address)). Collisions across a fleet
+/// [`shell` `addr` setting](crate::shell::radio_addr)). Collisions across a fleet
 /// are birthday-bounded (~2⁻³² per pair) — acceptable for network addressing; an
-/// operator can pin an explicit or random address instead (`system address`).
+/// operator can pin an explicit or random address instead (`system settings set addr`).
 pub fn unique_id32() -> u32 {
-    let id = tower_protocol::crc::crc32_ieee(&embassy_stm32::uid::uid());
-    if id == 0 { 1 } else { id }
+    let addr = tower_protocol::crc::crc32_ieee(&embassy_stm32::uid::uid());
+    if addr == 0 { 1 } else { addr }
 }
 
 /// A random `u32` from the STM32L0's hardware **TRNG** (analog-noise entropy source,
@@ -307,7 +307,7 @@ pub fn unique_id32() -> u32 {
 /// another task racing the RCC. If the RNG never readies (or a clock error trips), it
 /// falls back to [`rand_u32_sw`] so the caller always gets a usable non-zero value.
 ///
-/// One-shot use only (minting a `system address random`); the per-packet backoff/pairing
+/// One-shot use only (minting a `system settings set addr=random`); the per-packet backoff/pairing
 /// randomness in the net layer stays on its own cheap software PRNG. Network addresses are
 /// not secrets; AES keys remain host-minted by design (see the gateway pairing flow).
 pub fn rand_u32() -> u32 {

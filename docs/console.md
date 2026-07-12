@@ -304,7 +304,7 @@ shell derives `print` / `set` / `get` / `export` and completion from it — no
 per-setting code. Each `Setting.key` is a **`u8` local** within the shell's EEPROM
 namespace (`NS_SHELL`) — the shell prefixes it, so app keys can't collide with other
 subsystems. **`0x00..=0x0F` is reserved for the SDK base table** (`identity` = `0x00`,
-`address` = `0x01`, the rest headroom for base growth); app settings start at `0x10`.
+`addr` = `0x01`, the rest headroom for base growth); app settings start at `0x10`.
 The partition is load-bearing: a key collision silently aliases two settings' storage.
 
 ```rust
@@ -347,8 +347,8 @@ static SETTINGS: &[Setting] = &[
 - Unset / unreadable / out-of-range stored values fall back to the `default`.
 
 `identity` is just an SDK `Str` setting (key `0x00`, ≤32 chars) — nothing special.
-`address` (key `0x01`, `Kind::Addr`, default `auto`) is the SDK's other base setting: the
-unit's **32-bit radio address** (the frame-header src/dest, i.e. the net `my_id`). `auto`
+`addr` (key `0x01`, `Kind::Addr`, default `auto`) is the SDK's other base setting: the
+unit's **32-bit radio address** (the frame-header src/dest, i.e. the net-layer `addr`). `auto`
 resolves to the chip-UID-derived address; `random` mints a fresh non-zero one from the
 STM32L0 hardware TRNG (`board::rand_u32`). `get` shows the *effective* address, so it never
 lies about what the radio uses. It is boot-applied — reboot to re-address a live node.

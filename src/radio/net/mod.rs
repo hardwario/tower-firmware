@@ -8,7 +8,7 @@
 //! the counter/replay rule, and auto-ACKs a confirmed frame — caching the ACK so
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
-//! Keys are per-peer: [`Net::add_peer`] binds an `id` to its own AES key and
+//! Keys are per-peer: [`Net::add_peer`] binds a peer address to its own AES key and
 //! replay lane (star ≤16 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
 //! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, docs/radio.md).
@@ -83,14 +83,14 @@ pub const MAX_PEERS: usize = 16;
 /// `i < MAX_PEERS = 16`, so lanes occupy locals `0x10..=0x1F`).
 const KEY_LASTSEEN_BASE: u8 = 0x10;
 
-/// A registered peer: its ID, per-peer AES key, and replay state (docs/radio.md).
+/// A registered peer: its address, per-peer AES key, and replay state (docs/radio.md).
 #[derive(Clone, Copy)]
 struct Peer {
-    id: u32,
+    addr: u32,
     key: [u8; 16],
     /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
     lane: ReplayLane,
-    /// KV local (`NS_NET`) where this peer's replay lane is persisted. Bound by *id*
+    /// KV local (`NS_NET`) where this peer's replay lane is persisted. Bound by *peer addr*
     /// (`assign_lane`), NOT the table slot — so the lane survives a slot shift when an
     /// earlier peer is removed and the table compacts (see [`add_peer`](Net::add_peer)).
     lane_local: u8,
@@ -179,7 +179,7 @@ impl Received {
 /// Network configuration for this device.
 pub struct NetConfig {
     /// This device's 32-bit ID (rides in the clear header).
-    pub my_id: u32,
+    pub addr: u32,
     /// Default AES-128 key, used for any peer not explicitly registered via
     /// [`Net::add_peer`]. In a single-link setup this is the link key; in a star
     /// it is the gateway's own/fallback key (each node is registered with its
@@ -193,10 +193,10 @@ pub struct NetConfig {
 pub struct Net {
     radio: Spirit1,
     ccm: Ccm,
-    my_id: u32,
+    addr: u32,
     /// Default key for unregistered peers (see [`NetConfig::key`]).
     default_key: [u8; 16],
-    /// Per-peer (id, key, last-seen) table; a registered peer overrides the
+    /// Per-peer (addr, key, last-seen) table; a registered peer overrides the
     /// default key and gets its own replay lane (docs/radio.md).
     peers: [Option<Peer>; MAX_PEERS],
     /// Replay lane for senders not in the peer table (the single-link lane).
@@ -210,7 +210,7 @@ pub struct Net {
     kv: Nv,
     /// EU duty-cycle governor (airtime budget for all TX).
     duty: DutyGovernor,
-    /// Simple LCG state for the retransmit backoff (seeded from my_id).
+    /// Simple LCG state for the retransmit backoff (seeded from addr).
     rng: u32,
     /// Active spectrum-access mode (Duty default; AFA/FHSS switch at runtime).
     access: Access,
@@ -271,14 +271,14 @@ impl Net {
         Ok(Self {
             radio,
             ccm: Ccm::new(),
-            my_id: cfg.my_id,
+            addr: cfg.addr,
             default_key: cfg.key,
             peers: [None; MAX_PEERS],
             default_lane: ReplayLane::new(last_seen),
             txc,
             kv,
             duty,
-            rng: cfg.my_id | 1,
+            rng: cfg.addr | 1,
             access: Access::Duty,
             afa: afa::Afa::disabled(),
             fhss: fhss::Fhss::disabled(),
@@ -292,10 +292,10 @@ impl Net {
         self.access
     }
 
-    /// This device's ID.
+    /// This device's own address.
     #[must_use]
-    pub fn id(&self) -> u32 {
-        self.my_id
+    pub fn addr(&self) -> u32 {
+        self.addr
     }
 
     /// The shared (unscoped) EEPROM handle, for application-level persistence. The network
@@ -323,12 +323,12 @@ impl Net {
         self.default_lane.last_seen()
     }
 
-    /// Register (or re-key) a peer: an explicit `id` → per-peer `key` binding with
+    /// Register (or re-key) a peer: an explicit `peer_addr` → per-peer `key` binding with
     /// its own replay lane. The peer's persisted last-seen is restored. Returns
-    /// `false` only if the table is full (and the id is new) — check the return in
+    /// `false` only if the table is full (and the peer is new) — check the return in
     /// production code. Up to [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
-    pub fn add_peer(&mut self, id: u32, key: &[u8; 16]) -> bool {
-        if let Some(i) = self.peer_slot(id) {
+    pub fn add_peer(&mut self, peer_addr: u32, key: &[u8; 16]) -> bool {
+        if let Some(i) = self.peer_slot(peer_addr) {
             // Re-key in place. A *changed* key is a disjoint CCM nonce space (docs/radio.md:
             // "a re-key resets both ends"), so the old last-seen is meaningless — and if the
             // re-keyed peer restarts its counter (a re-pair), a stale-high lane would reject
@@ -346,7 +346,7 @@ impl Net {
             }
             if changed {
                 let local = self.peers[i].as_ref().unwrap().lane_local;
-                let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(id, 0));
+                let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(peer_addr, 0));
             }
             return true;
         }
@@ -354,11 +354,11 @@ impl Net {
             return false; // table full
         };
         let nkv = self.kv.scope(NS_NET);
-        // Bind the replay lane by peer *id*, not by table slot. Snapshot the persisted lane
+        // Bind the replay lane by peer *addr*, not by table slot. Snapshot the persisted lane
         // records and the locals already held by live peers, then let `assign_lane` decide
-        // (restore this id's own record wherever it sits, else claim the lowest free local).
+        // (restore this peer's own record wherever it sits, else claim the lowest free local).
         // This is why a survivor keeps its replay window when an earlier peer is removed and
-        // the table compacts — its slot shifts but its lane record is found by id.
+        // the table compacts — its slot shifts but its lane record is found by addr.
         let mut records = [None; MAX_PEERS];
         for (l, rec) in records.iter_mut().enumerate() {
             *rec = read_u32_pair(nkv, KEY_LASTSEEN_BASE + l as u8);
@@ -370,15 +370,15 @@ impl Net {
             .fold(0u32, |m, p| m | 1 << (p.lane_local - KEY_LASTSEEN_BASE));
         // A free table slot guarantees a free local (≤ MAX_PEERS-1 live peers here), so
         // `assign_lane` returns Some — but fail closed to no-op if that ever changes.
-        let Some(bind) = assign_lane(id, &records, used) else {
+        let Some(bind) = assign_lane(peer_addr, &records, used) else {
             return false;
         };
         let local = KEY_LASTSEEN_BASE + bind.index as u8;
         if bind.fresh {
-            let _ = nkv.set_bytes(local, &lane_record(id, 0)); // claim the local for this id
+            let _ = nkv.set_bytes(local, &lane_record(peer_addr, 0)); // claim the local for this addr
         }
         self.peers[slot] = Some(Peer {
-            id,
+            addr: peer_addr,
             key: *key,
             lane: ReplayLane::new(bind.seen),
             lane_local: local,
@@ -388,11 +388,11 @@ impl Net {
     }
 
     /// Remove a peer. Returns whether it was present. (Its persisted last-seen record is
-    /// left in EEPROM tagged with its id; re-adding the *same* peer — even into a different
+    /// left in EEPROM tagged with its addr; re-adding the *same* peer — even into a different
     /// slot — resumes its replay window, while a different peer inheriting the slot starts
-    /// fresh at 0, since restore is now id-matched. See [`add_peer`](Self::add_peer).)
-    pub fn remove_peer(&mut self, id: u32) -> bool {
-        if let Some(i) = self.peer_slot(id) {
+    /// fresh at 0, since restore is now addr-matched. See [`add_peer`](Self::add_peer).)
+    pub fn remove_peer(&mut self, peer_addr: u32) -> bool {
+        if let Some(i) = self.peer_slot(peer_addr) {
             self.peers[i] = None;
             true
         } else {
@@ -411,8 +411,8 @@ impl Net {
     /// window open after its uplink. Set it **before** the uplink that should learn
     /// it: the ACK goes out inside [`recv`](Self::recv), before the app sees the
     /// frame. Returns `false` if the peer isn't registered.
-    pub fn set_pending(&mut self, id: u32, pending: bool) -> bool {
-        match self.peer_slot(id) {
+    pub fn set_pending(&mut self, peer_addr: u32, pending: bool) -> bool {
+        match self.peer_slot(peer_addr) {
             Some(i) => {
                 self.peers[i].as_mut().unwrap().pending = pending;
                 true
@@ -432,21 +432,21 @@ impl Net {
 
     /// Last-seen counter for a registered peer (`None` if not registered).
     #[must_use]
-    pub fn peer_last_seen(&self, id: u32) -> Option<u32> {
-        self.peer_slot(id)
+    pub fn peer_last_seen(&self, peer_addr: u32) -> Option<u32> {
+        self.peer_slot(peer_addr)
             .map(|i| self.peers[i].as_ref().unwrap().lane.last_seen())
     }
 
-    /// Table slot holding `id`, if registered.
-    fn peer_slot(&self, id: u32) -> Option<usize> {
+    /// Table slot holding `peer_addr`, if registered.
+    fn peer_slot(&self, peer_addr: u32) -> Option<usize> {
         self.peers
             .iter()
-            .position(|p| matches!(p, Some(pe) if pe.id == id))
+            .position(|p| matches!(p, Some(pe) if pe.addr == peer_addr))
     }
 
-    /// AES key for `id`: the peer's key if registered, else the default key.
-    fn key_for(&self, id: u32) -> [u8; 16] {
-        match self.peer_slot(id) {
+    /// AES key for `peer_addr`: the peer's key if registered, else the default key.
+    fn key_for(&self, peer_addr: u32) -> [u8; 16] {
+        match self.peer_slot(peer_addr) {
             Some(i) => self.peers[i].as_ref().unwrap().key,
             None => self.default_key,
         }
@@ -469,8 +469,11 @@ impl Net {
             Some(i) => {
                 let p = self.peers[i].as_mut().unwrap();
                 if p.lane.accept(counter) {
-                    let (id, local) = (p.id, p.lane_local); // id-bound local, not the slot
-                    let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(id, counter));
+                    let (peer_addr, local) = (p.addr, p.lane_local); // addr-bound local, not the slot
+                    let _ = self
+                        .kv
+                        .scope(NS_NET)
+                        .set_bytes(local, &lane_record(peer_addr, counter));
                 }
             }
             None => {
@@ -531,7 +534,7 @@ impl Net {
         let hdr = Header {
             frame_type: FrameType::Data,
             flags: if confirmed { flags::CONFIRMED } else { 0 },
-            src: self.my_id,
+            src: self.addr,
             dest,
             counter,
             bulk_index: None,
@@ -600,7 +603,7 @@ impl Net {
         // Peek the clear header (AAD) to learn the src, then CCM-open with that
         // peer's key — a registered peer uses its own key, others the default.
         let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
-        if peek.dest != self.my_id {
+        if peek.dest != self.addr {
             return None; // not for us
         }
         let key = self.key_for(peek.src);
@@ -685,7 +688,7 @@ impl Net {
     /// heard frame is the [`AckWait`] kernel's (`tower_net_core::ack`).
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
         let key = self.key_for(dest);
-        let mut wait = AckWait::new(self.my_id, dest, counter);
+        let mut wait = AckWait::new(self.addr, dest, counter);
         let deadline = Instant::now() + ACK_WINDOW;
         let mut buf = [0u8; MAX_FRAME];
         loop {
@@ -742,7 +745,7 @@ impl Net {
         let hdr = Header {
             frame_type: FrameType::Ack,
             flags: 0,
-            src: self.my_id,
+            src: self.addr,
             dest,
             counter: ack_counter,
             bulk_index: None,
@@ -787,7 +790,7 @@ impl Net {
 
     /// Advance the internal xorshift32 PRNG and return the new 32-bit state. Backs the
     /// retransmit backoff and the pairing challenge nonce. **Not cryptographic** (seeded
-    /// deterministically from `my_id`): enough to de-correlate collided retransmits and to make
+    /// deterministically from `addr`): enough to de-correlate collided retransmits and to make
     /// a pairing confirm from a *prior* session fail to validate (the challenge advances each
     /// session), but not a source of secret randomness.
     pub(crate) fn rand_u32(&mut self) -> u32 {
@@ -814,17 +817,17 @@ fn read_u32(kv: Scoped, local: u8) -> Option<u32> {
     }
 }
 
-/// A per-peer replay-lane record: the peer `id` it belongs to, then its `last_seen`
-/// counter (both little-endian). Persisting the id lets [`add_peer`](Net::add_peer)
+/// A per-peer replay-lane record: the peer `addr` it belongs to, then its `last_seen`
+/// counter (both little-endian). Persisting the addr lets [`add_peer`](Net::add_peer)
 /// restore a lane only for the peer that owns it, not whichever peer inherits the slot.
-fn lane_record(id: u32, last_seen: u32) -> [u8; 8] {
+fn lane_record(addr: u32, last_seen: u32) -> [u8; 8] {
     let mut b = [0u8; 8];
-    b[..4].copy_from_slice(&id.to_le_bytes());
+    b[..4].copy_from_slice(&addr.to_le_bytes());
     b[4..].copy_from_slice(&last_seen.to_le_bytes());
     b
 }
 
-/// Read a `(id, last_seen)` replay-lane record, if present and exactly 8 bytes.
+/// Read a `(addr, last_seen)` replay-lane record, if present and exactly 8 bytes.
 fn read_u32_pair(kv: Scoped, local: u8) -> Option<(u32, u32)> {
     let mut b = [0u8; 8];
     match kv.get_bytes(local, &mut b) {

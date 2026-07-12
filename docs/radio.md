@@ -143,7 +143,7 @@ use tower::radio::net::{Net, NetConfig, SendResult};
 use tower::radio::config::Band;
 
 let mut net = Net::new(radio, b.kv,
-    NetConfig { my_id: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0 }).await?;
+    NetConfig { addr: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0 }).await?;
 
 // Confirmed send: TX the DATA frame, open a 200 ms ACK window, retransmit the
 // byte-identical frame up to `reps` times on loss (random 0–100 ms backoff).
@@ -177,8 +177,8 @@ higher counter than it has seen from that sender and lazy-persists the last-seen
 every `P=32` accepts (replay window ≤ P across a receiver reboot). CCM verify
 happens *before* the replay comparison, so a forged frame can't poison the state.
 
-**Peer table & topologies.** Keys are per-peer. `add_peer(id, &key)` binds
-a sender ID to its own AES key and its own replay lane; an unregistered peer falls
+**Peer table & topologies.** Keys are per-peer. `add_peer(peer_addr, &key)` binds
+a peer address to its own AES key and its own replay lane; an unregistered peer falls
 back to the `NetConfig::key` default lane (the single-link case). One table holds
 up to `MAX_PEERS = 16`:
 
@@ -236,12 +236,12 @@ user-initiated window, proximity and reduced power; enable flash RDP for
 production key storage.
 
 ```rust
-// host: returns Some(node_id) — the joiner's own id — on commit; install (id, key)
-if let Some(id) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
-    let _ = net.add_peer(id, &per_node_key);
+// host: returns Some(peer_addr) — the joiner's own address — on commit; install (peer_addr, key)
+if let Some(peer_addr) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
+    let _ = net.add_peer(peer_addr, &per_node_key);
 }
-// joiner: brings its own id, returns Some(per_node_key) on commit
-if let Some(key) = net.join(my_id, PAIRING_WINDOW).await { /* store key */ }
+// joiner: brings its own address, returns Some(per_node_key) on commit
+if let Some(key) = net.join(addr, PAIRING_WINDOW).await { /* store key */ }
 ```
 
 **Duty governor.** A token-bucket meters **all** TX airtime (data, ACKs,

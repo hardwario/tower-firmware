@@ -98,7 +98,7 @@ impl Net {
         let ann_hdr = Header {
             frame_type: FrameType::Data,
             flags: flags::BULK_ANNOUNCE,
-            src: self.my_id,
+            src: self.addr,
             dest,
             counter: announce_counter,
             bulk_index: None,
@@ -126,7 +126,7 @@ impl Net {
             let Some((hdr, plen)) = self.rx_frame(&key, BULK_SERVE_SLICE, &mut rxbuf).await else {
                 continue;
             };
-            if hdr.frame_type != FrameType::BulkReq || hdr.src != dest || hdr.dest != self.my_id {
+            if hdr.frame_type != FrameType::BulkReq || hdr.src != dest || hdr.dest != self.addr {
                 continue;
             }
             if plen < 4 || u32::from_le_bytes([rxbuf[0], rxbuf[1], rxbuf[2], rxbuf[3]]) != session {
@@ -145,7 +145,7 @@ impl Net {
             let dhdr = Header {
                 frame_type: FrameType::BulkData,
                 flags: if last { flags::LAST_CHUNK } else { 0 },
-                src: self.my_id,
+                src: self.addr,
                 dest,
                 counter: session,
                 bulk_index: Some(k as u32),
@@ -187,7 +187,7 @@ impl Net {
             if hdr.frame_type == FrameType::Data
                 && hdr.flags & flags::BULK_ANNOUNCE != 0
                 && hdr.src == src
-                && hdr.dest == self.my_id
+                && hdr.dest == self.addr
                 && plen >= 8
             {
                 let len = u32::from_le_bytes([abuf[0], abuf[1], abuf[2], abuf[3]]) as usize;
@@ -206,7 +206,7 @@ impl Net {
             let req_hdr = Header {
                 frame_type: FrameType::BulkReq,
                 flags: 0,
-                src: self.my_id,
+                src: self.addr,
                 dest: src,
                 counter: req_counter,
                 bulk_index: Some(k as u32),
@@ -221,7 +221,7 @@ impl Net {
                 if let Some((dhdr, dlen)) = self.rx_frame(&key, BULK_RESP_WINDOW, &mut dbuf).await
                     && dhdr.frame_type == FrameType::BulkData
                     && dhdr.src == src
-                    && dhdr.dest == self.my_id
+                    && dhdr.dest == self.addr
                     && dhdr.counter == session
                     && dhdr.bulk_index == Some(k as u32)
                 {

@@ -462,13 +462,13 @@ impl Net {
             Some(a) => a,
             None => return SendResult::NotSynced,
         };
-        let my_id = self.my_id;
+        let addr = self.addr;
         let counter = self.txc.counter();
         let key = self.key_for(dest);
         let hdr = Header {
             frame_type: FrameType::Data,
             flags: if confirmed { frame::flags::CONFIRMED } else { 0 },
-            src: my_id,
+            src: addr,
             dest,
             counter,
             bulk_index: None,
@@ -539,7 +539,7 @@ impl Net {
         let hdr = Header {
             frame_type: FrameType::Beacon,
             flags: 0,
-            src: self.my_id,
+            src: self.addr,
             dest: BROADCAST,
             counter: self.txc.counter(),
             bulk_index: None,

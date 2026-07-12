@@ -69,13 +69,13 @@ use tower_protocol::{MsgType, decode_frame};
 
 // --- persistence (NS_APP) --------------------------------------------------------
 
-/// Provision record: `(gw_id, key, band, channel)` (postcard). The node's own radio
-/// address is the SDK `address` base setting (`shell::radio_address`), not stored here.
+/// Provision record: `(gw_addr, key, band, channel)` (postcard). The node's own radio
+/// address is the SDK `address` base setting (`shell::radio_addr`), not stored here.
 const KEY_PROVISION: u8 = 0x00;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 struct Provisioned {
-    gw_id: u32,
+    gw_addr: u32,
     key: [u8; 16],
     band: u8,
     channel: u8,
@@ -344,7 +344,7 @@ async fn run(b: Board) {
     let app_kv = kv.scope(NS_APP);
 
     // This node's radio address = the `address` base setting (pinned or UID-derived).
-    let my_id = shell::radio_address(kv);
+    let addr = shell::radio_addr(kv);
     let mut provision: Option<Provisioned> = app_kv.get::<Provisioned>(KEY_PROVISION).ok().flatten();
 
     // Accelerometer: reclaim the shared I²C2 bus and arm the tilt interrupt (register
@@ -388,7 +388,7 @@ async fn run(b: Board) {
         radio,
         kv,
         NetConfig {
-            my_id,
+            addr,
             key,
             band,
             channel,
@@ -403,14 +403,14 @@ async fn run(b: Board) {
         }
     };
     if let Some(p) = provision {
-        net.add_peer(p.gw_id, &p.key);
+        net.add_peer(p.gw_addr, &p.key);
     }
     let _ = net.sleep().await; // radio sleeps between events from the start
 
     info!(
         target: "button",
         "PUSH-BUTTON {:08X}: {}",
-        my_id,
+        addr,
         if provision.is_some() { "paired" } else { "UNPAIRED — hold the button to pair" }
     );
     if provision.is_none() {
@@ -451,7 +451,7 @@ async fn run(b: Board) {
                 // enables (which govern normal reporting once paired).
                 if provision.is_none() {
                     if matches!(ev, button::Event::Hold) {
-                        provision = ota_join(&mut net, my_id, band, channel, kv, &led).await;
+                        provision = ota_join(&mut net, addr, band, channel, kv, &led).await;
                         if provision.is_some() {
                             led.set_background(None);
                             send_info(&mut net, provision, &counts).await;
@@ -529,7 +529,7 @@ async fn run(b: Board) {
                 let Ok(req) = postcard::from_bytes::<MgmtRequest>(payload) else {
                     continue;
                 };
-                handle_mgmt(req, &mut net, &mut provision, my_id, band, channel, kv, &led).await;
+                handle_mgmt(req, &mut net, &mut provision, addr, band, channel, kv, &led).await;
                 if provision.is_some() {
                     led.set_background(None);
                 }
@@ -542,7 +542,7 @@ async fn run(b: Board) {
 /// credentials on success.
 async fn ota_join(
     net: &mut Net,
-    my_id: u32,
+    addr: u32,
     band: Band,
     channel: u8,
     kv: Nv,
@@ -551,12 +551,12 @@ async fn ota_join(
     info!(target: "button", "JOIN: looking for a pairing window ({} s)…", PAIRING_WINDOW.as_secs());
     led.set_background(Some(JOINING));
     let _ = net.wake().await;
-    let joined = net.join(my_id, PAIRING_WINDOW).await;
+    let joined = net.join(addr, PAIRING_WINDOW).await;
     let _ = net.sleep().await;
     match joined {
-        Some((gw_id, key)) => {
+        Some((gw_addr, key)) => {
             let p = Provisioned {
-                gw_id,
+                gw_addr,
                 key,
                 band: if band == Band::Us915 {
                     mgmt::BAND_US915
@@ -566,11 +566,11 @@ async fn ota_join(
                 channel,
             };
             if kv.scope(NS_APP).set(KEY_PROVISION, &p).is_err() {
-                warn!(target: "button", "JOINED {:08X} but persist failed — will not survive reboot", gw_id);
+                warn!(target: "button", "JOINED {:08X} but persist failed — will not survive reboot", gw_addr);
             } else {
-                info!(target: "button", "JOINED gateway {:08X}", gw_id);
+                info!(target: "button", "JOINED gateway {:08X}", gw_addr);
             }
-            net.add_peer(gw_id, &key);
+            net.add_peer(gw_addr, &key);
             Some(p)
         }
         None => {
@@ -632,13 +632,13 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
         return false;
     };
     let _ = net.wake().await;
-    let result = net.send(p.gw_id, &buf[..n], true, reps).await;
+    let result = net.send(p.gw_addr, &buf[..n], true, reps).await;
     let delivered = matches!(result, SendResult::Delivered);
     if !delivered {
         warn!(target: "button", "uplink: {result}");
     }
     while net.last_ack().is_some_and(|m| m.pending) {
-        if !downlink_window(net, p.gw_id).await {
+        if !downlink_window(net, p.gw_addr).await {
             break;
         }
         // The last response chunk's ACK re-advertises pending, chaining queued
@@ -657,7 +657,7 @@ static LAST_REMOTE_CMD: core::sync::atomic::AtomicU32 = core::sync::atomic::Atom
 
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
 /// whether a downlink actually arrived (false = window expired, stop chaining).
-async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
+async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
     let deadline = Instant::now() + DOWNLINK_WINDOW;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -667,7 +667,7 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
         let Some(rx) = net.recv(remaining).await else {
             return false;
         };
-        if rx.src != gw_id {
+        if rx.src != gw_addr {
             continue; // another node's traffic — not our downlink
         }
         let (cmd_id, result, reboot, out) = match decode_node_cmd(rx.data()) {
@@ -683,7 +683,7 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
                 if last & (1 << 24) != 0 && (last & 0xFFFF) as u16 == cmd_id {
                     let result = ((last >> 16) & 0xFF) as u8;
                     info!(target: "button", "remote shell: duplicate cmd {} — not re-run", cmd_id);
-                    send_shell_chunks(net, gw_id, cmd_id, result, "").await;
+                    send_shell_chunks(net, gw_addr, cmd_id, result, "").await;
                     return true;
                 }
                 info!(target: "button", "remote shell: {}", line);
@@ -706,7 +706,7 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
                 return false;
             }
         };
-        send_shell_chunks(net, gw_id, cmd_id, result, out.as_str()).await;
+        send_shell_chunks(net, gw_addr, cmd_id, result, out.as_str()).await;
         if reboot {
             // The response is on the air; the reboot request came over radio, so there
             // is no console to flush — reset now.
@@ -719,7 +719,7 @@ async fn downlink_window(net: &mut Net, gw_id: u32) -> bool {
 /// Stream a remote-shell response as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
 /// text bytes each, split at char boundaries; empty responses still send one final
 /// chunk so the host always completes the command).
-async fn send_shell_chunks(net: &mut Net, gw_id: u32, cmd_id: u16, result: u8, text: &str) {
+async fn send_shell_chunks(net: &mut Net, gw_addr: u32, cmd_id: u16, result: u8, text: &str) {
     let mut rest = text;
     let mut chunk: u16 = 0;
     loop {
@@ -741,7 +741,7 @@ async fn send_shell_chunks(net: &mut Net, gw_id: u32, cmd_id: u16, result: u8, t
             return;
         };
         if !matches!(
-            net.send(gw_id, &buf[..n], true, CHUNK_REPS).await,
+            net.send(gw_addr, &buf[..n], true, CHUNK_REPS).await,
             SendResult::Delivered
         ) {
             // A lost chunk shows up host-side as a chunk gap (incomplete response);
@@ -764,7 +764,7 @@ async fn handle_mgmt(
     req: MgmtRequest<'_>,
     net: &mut Net,
     provision: &mut Option<Provisioned>,
-    my_id: u32,
+    addr: u32,
     band: Band,
     channel: u8,
     kv: Nv,
@@ -779,7 +779,7 @@ async fn handle_mgmt(
                 &DeviceInfo {
                     role: DeviceRole::Node,
                     radio_schema_version: RADIO_SCHEMA_VERSION,
-                    net_id: my_id,
+                    addr,
                     band: match band {
                         Band::Eu868 => mgmt::BAND_EU868,
                         Band::Us915 => mgmt::BAND_US915,
@@ -788,50 +788,50 @@ async fn handle_mgmt(
                     node_capacity: 0,
                     node_count: 0,
                     provisioned: provision.is_some(),
-                    gw_id: provision.map(|p| p.gw_id).unwrap_or(0),
+                    gw_addr: provision.map(|p| p.gw_addr).unwrap_or(0),
                     firmware_name: name.as_str(),
                 },
             )
             .await;
         }
         MgmtOp::Provision(p) => {
-            if p.gw_id == 0 || p.band > mgmt::BAND_US915 {
+            if p.gw_addr == 0 || p.band > mgmt::BAND_US915 {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
             let app_kv = kv.scope(NS_APP);
             let rec = Provisioned {
-                gw_id: p.gw_id,
+                gw_addr: p.gw_addr,
                 key: p.key,
                 band: p.band,
                 channel: p.channel,
             };
-            // An optional address override pins the `address` base setting (the same
-            // one `system address` edits), so the node comes up under it after reboot.
-            // Written FIRST: the provision record below is the single commit point, so
-            // a storage failure can't leave the node durably provisioned while the
+            // An optional address override pins the `addr` base setting (the same
+            // one `system settings set addr` edits), so the node comes up under it after
+            // reboot. Written FIRST: the provision record below is the single commit point,
+            // so a storage failure can't leave the node durably provisioned while the
             // host was told MGMT_STORAGE (a dangling address pin, by contrast, has no
             // radio effect until a provision succeeds).
-            let effective_id = match p.my_id {
-                Some(id) if id != 0 => {
+            let effective_addr = match p.addr {
+                Some(override_addr) if override_addr != 0 => {
                     if kv
                         .scope(NS_SHELL)
-                        .set_bytes(shell::ADDRESS_KEY, &id.to_le_bytes())
+                        .set_bytes(shell::ADDR_KEY, &override_addr.to_le_bytes())
                         .is_err()
                     {
                         respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                         return;
                     }
-                    id
+                    override_addr
                 }
-                _ => my_id,
+                _ => addr,
             };
             if app_kv.set(KEY_PROVISION, &rec).is_err() {
                 respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                 return;
             }
-            respond_record(req_id, &ProvisionAck { id: effective_id }).await;
-            info!(target: "button", "provisioned for gateway {:08X} — rebooting", p.gw_id);
+            respond_record(req_id, &ProvisionAck { addr: effective_addr }).await;
+            info!(target: "button", "provisioned for gateway {:08X} — rebooting", p.gw_addr);
             // Band/channel/id take effect at Net::new — reboot into the new identity
             // (also bumps session_id, so the host sees the reprovision).
             console::flush().await;
@@ -844,12 +844,12 @@ async fn handle_mgmt(
             }
             led.set_background(Some(JOINING));
             let _ = net.wake().await;
-            let joined = net.join(my_id, Duration::from_secs(window_s as u64)).await;
+            let joined = net.join(addr, Duration::from_secs(window_s as u64)).await;
             let _ = net.sleep().await;
             match joined {
-                Some((gw_id, key)) => {
+                Some((gw_addr, key)) => {
                     let rec = Provisioned {
-                        gw_id,
+                        gw_addr,
                         key,
                         band: if band == Band::Us915 {
                             mgmt::BAND_US915
@@ -862,9 +862,9 @@ async fn handle_mgmt(
                         respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                         return;
                     }
-                    net.add_peer(gw_id, &key);
+                    net.add_peer(gw_addr, &key);
                     *provision = Some(rec);
-                    respond_record(req_id, &Joined { gw_id }).await;
+                    respond_record(req_id, &Joined { gw_addr }).await;
                 }
                 None => {
                     led.set_background(if provision.is_some() {

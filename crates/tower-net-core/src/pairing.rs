@@ -12,12 +12,12 @@
 //! exchange stay in the firmware's radio flow.
 
 /// Validate a JOIN_CONFIRM payload against this session's expectations. The payload echoes
-/// `node_id` (4 LE) ‖ `challenge` (4 LE) — commit only when both match, so a confirm replayed
+/// `addr` (4 LE) ‖ `challenge` (4 LE) — commit only when both match, so a confirm replayed
 /// from a prior session (stale challenge) is rejected.
 #[must_use]
-pub fn confirm_matches(payload: &[u8], node_id: u32, challenge: u32) -> bool {
+pub fn confirm_matches(payload: &[u8], addr: u32, challenge: u32) -> bool {
     payload.len() >= 8
-        && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == node_id
+        && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == addr
         && u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) == challenge
 }
 
@@ -25,9 +25,9 @@ pub fn confirm_matches(payload: &[u8], node_id: u32, challenge: u32) -> bool {
 mod tests {
     use super::*;
 
-    fn confirm(node_id: u32, challenge: u32) -> [u8; 8] {
+    fn confirm(addr: u32, challenge: u32) -> [u8; 8] {
         let mut p = [0u8; 8];
-        p[..4].copy_from_slice(&node_id.to_le_bytes());
+        p[..4].copy_from_slice(&addr.to_le_bytes());
         p[4..].copy_from_slice(&challenge.to_le_bytes());
         p
     }
@@ -51,10 +51,10 @@ mod tests {
         assert!(!confirm_matches(&old_session, 0xAABB_CCDD, 0x2222_2222));
     }
 
-    /// A confirm echoing the wrong node id (another joiner's confirm in the window) is not a
+    /// A confirm echoing the wrong node address (another joiner's confirm in the window) is not a
     /// commit for THIS exchange.
     #[test]
-    fn wrong_node_id_rejected() {
+    fn wrong_addr_rejected() {
         assert!(!confirm_matches(
             &confirm(0x0000_0001, 0x1234_5678),
             0x0000_0002,

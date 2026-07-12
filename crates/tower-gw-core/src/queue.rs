@@ -37,7 +37,7 @@ pub enum PushError {
 #[derive(Clone, Copy)]
 pub struct Item {
     pub id: u16,
-    pub node: u32,
+    pub node_addr: u32,
     pub enqueued_at_ms: u64,
     pub ttl_s: u16,
     /// Pool-insertion order — the per-node FIFO key (ids alone would break on u16 wrap).
@@ -84,12 +84,12 @@ impl Queue {
         }
     }
 
-    /// Enqueue `data` for `node`; returns the item id (the dequeue / TX-report handle).
-    pub fn push(&mut self, node: u32, ttl_s: u16, data: &[u8], now_ms: u64) -> Result<u16, PushError> {
+    /// Enqueue `data` for `node_addr`; returns the item id (the dequeue / TX-report handle).
+    pub fn push(&mut self, node_addr: u32, ttl_s: u16, data: &[u8], now_ms: u64) -> Result<u16, PushError> {
         if data.is_empty() || data.len() > MAX_ITEM {
             return Err(PushError::BadPayload);
         }
-        if self.count_for(node) >= PER_NODE_CAP {
+        if self.count_for(node_addr) >= PER_NODE_CAP {
             return Err(PushError::PerNodeFull);
         }
         let slot = self
@@ -103,7 +103,7 @@ impl Queue {
         buf[..data.len()].copy_from_slice(data);
         self.slots[slot] = Some(Item {
             id,
-            node,
+            node_addr,
             enqueued_at_ms: now_ms,
             ttl_s,
             order: self.next_order,
@@ -114,13 +114,13 @@ impl Queue {
         Ok(id)
     }
 
-    /// The next (oldest, non-expired) item for `node`, if any — what to transmit on
+    /// The next (oldest, non-expired) item for `node_addr`, if any — what to transmit on
     /// its uplink. Does not remove it; call [`pop`](Self::pop) on delivery.
-    pub fn peek_for(&self, node: u32, now_ms: u64) -> Option<&Item> {
+    pub fn peek_for(&self, node_addr: u32, now_ms: u64) -> Option<&Item> {
         self.slots
             .iter()
             .flatten()
-            .filter(|it| it.node == node && !it.expired(now_ms))
+            .filter(|it| it.node_addr == node_addr && !it.expired(now_ms))
             .min_by_key(|it| it.order)
     }
 
@@ -134,11 +134,11 @@ impl Queue {
         None
     }
 
-    /// Drop every item queued for `node` (node removed); returns how many.
-    pub fn drop_node(&mut self, node: u32) -> usize {
+    /// Drop every item queued for `node_addr` (node removed); returns how many.
+    pub fn drop_node(&mut self, node_addr: u32) -> usize {
         let mut n = 0;
         for s in self.slots.iter_mut() {
-            if matches!(s, Some(it) if it.node == node) {
+            if matches!(s, Some(it) if it.node_addr == node_addr) {
                 *s = None;
                 n += 1;
             }
@@ -146,18 +146,22 @@ impl Queue {
         n
     }
 
-    /// Drop expired items, reporting each as `(id, node)` (→ a `TX_EXPIRED` stat).
+    /// Drop expired items, reporting each as `(id, node_addr)` (→ a `TX_EXPIRED` stat).
     pub fn expire(&mut self, now_ms: u64, mut on_expired: impl FnMut(u16, u32)) {
         for s in self.slots.iter_mut() {
             if matches!(s, Some(it) if it.expired(now_ms)) {
                 let it = s.take().unwrap();
-                on_expired(it.id, it.node);
+                on_expired(it.id, it.node_addr);
             }
         }
     }
 
-    pub fn count_for(&self, node: u32) -> usize {
-        self.slots.iter().flatten().filter(|it| it.node == node).count()
+    pub fn count_for(&self, node_addr: u32) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|it| it.node_addr == node_addr)
+            .count()
     }
 
     pub fn len(&self) -> usize {

@@ -1,9 +1,9 @@
 //! OTA pairing: 3-way JOIN under the fixed public PAIRING_KEY (docs/radio.md). `impl Net`
 //! block over [`super::Net`].
 //!
-//! The **joiner chooses its own ID** and keeps it; the host only hands out the
-//! per-node key — it does NOT assign or override the ID. JOIN_REQ(node_id) →
-//! JOIN_RESP(key ‖ challenge) → JOIN_CONFIRM(node_id ‖ challenge). Both sides commit
+//! The **joiner chooses its own address** and keeps it; the host only hands out the
+//! per-node key — it does NOT assign or override the address. JOIN_REQ(addr) →
+//! JOIN_RESP(key ‖ challenge) → JOIN_CONFIRM(addr ‖ challenge). Both sides commit
 //! only after the confirm; a lost confirm leaves the host's window to time out (the
 //! entry is never installed) and the joiner retries within its window.
 //!
@@ -14,7 +14,7 @@
 //! the public-key frames in the clear-after-decrypt payload).
 
 use embassy_time::{Duration, Instant, Timer};
-// The confirm freshness/acceptance rule (node_id ‖ challenge echo) lives in the host-testable
+// The confirm freshness/acceptance rule (addr ‖ challenge echo) lives in the host-testable
 // `tower_net_core::pairing` kernel; the challenge minting (Net's PRNG), the windows and the
 // JOIN frame exchange stay here. Zero behavioural change on target.
 use tower_net_core::pairing::confirm_matches;
@@ -43,9 +43,9 @@ impl Net {
     /// Host: open a pairing window for `timeout` (use [`PAIRING_WINDOW`] for the
     /// default minute). On the first valid JOIN_REQ, hand out the per-node `key`
     /// (JOIN_RESP) and wait for the JOIN_CONFIRM. Returns the joiner's **own,
-    /// self-chosen** ID on commit — the caller installs the peer with
-    /// `add_peer(id, key)` — or `None` on timeout / lost confirm. The host does
-    /// NOT assign the ID. Pairs the first joiner only.
+    /// self-chosen** address on commit — the caller installs the peer with
+    /// `add_peer(peer_addr, key)` — or `None` on timeout / lost confirm. The host does
+    /// NOT assign the address. Pairs the first joiner only.
     pub async fn open_pairing(&mut self, timeout: Duration, key: &[u8; 16]) -> Option<u32> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): pairing replies consume TX counters
@@ -59,18 +59,18 @@ impl Net {
             if hdr.frame_type != FrameType::JoinReq || plen < 4 {
                 continue;
             }
-            let node_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let peer_addr = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
             let challenge = self.rand_u32(); // fresh per session; the confirm must echo it
 
-            // JOIN_RESP: the per-node key ‖ a fresh challenge (the joiner keeps its own ID).
+            // JOIN_RESP: the per-node key ‖ a fresh challenge (the joiner keeps its own address).
             let mut resp = [0u8; 20];
             resp[..16].copy_from_slice(key);
             resp[16..20].copy_from_slice(&challenge.to_le_bytes());
             let resp_hdr = Header {
                 frame_type: FrameType::JoinResp,
                 flags: 0,
-                src: self.my_id,
-                dest: node_id,
+                src: self.addr,
+                dest: peer_addr,
                 counter: self.txc.counter(),
                 bulk_index: None,
             };
@@ -78,28 +78,28 @@ impl Net {
             self.tx_pair(&resp_hdr, &resp).await;
             self.advance_tx_counter();
 
-            // Wait for the JOIN_CONFIRM (echoes node_id ‖ challenge) — the freshness rule
+            // Wait for the JOIN_CONFIRM (echoes addr ‖ challenge) — the freshness rule
             // (commit only when both match, so a confirm replayed from a prior session carries
             // a stale challenge and is rejected) is the kernel's `confirm_matches`.
             let mut cbuf = [0u8; 8];
             if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
                 && chdr.frame_type == FrameType::JoinConfirm
-                && confirm_matches(&cbuf[..cplen], node_id, challenge)
+                && confirm_matches(&cbuf[..cplen], peer_addr, challenge)
             {
-                return Some(node_id);
+                return Some(peer_addr);
             }
             // Lost confirm: discard, keep the window open for a retry.
         }
         None
     }
 
-    /// Joiner: request pairing using `my_id` (the joiner's **own** ID, which it
+    /// Joiner: request pairing using `addr` (the joiner's **own** address, which it
     /// keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default). Sends
     /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
-    /// and returns `(host_id, key)` on commit (or `None` on timeout) — the host id
-    /// is what a product node persists so it knows *which* gateway to talk to
+    /// and returns `(gw_addr, key)` on commit (or `None` on timeout) — the gateway
+    /// address is what a product node persists so it knows *which* gateway to talk to
     /// after a reboot.
-    pub async fn join(&mut self, my_id: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
+    pub async fn join(&mut self, addr: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
         }
@@ -108,12 +108,12 @@ impl Net {
             let req_hdr = Header {
                 frame_type: FrameType::JoinReq,
                 flags: 0,
-                src: my_id,
-                dest: 0, // host ID not yet known
+                src: addr,
+                dest: 0, // gateway address not yet known
                 counter: self.txc.counter(),
                 bulk_index: None,
             };
-            self.tx_pair(&req_hdr, &my_id.to_le_bytes()).await;
+            self.tx_pair(&req_hdr, &addr.to_le_bytes()).await;
             self.advance_tx_counter();
 
             let mut buf = [0u8; 24];
@@ -123,14 +123,14 @@ impl Net {
             {
                 let mut key = [0u8; 16];
                 key.copy_from_slice(&buf[..16]);
-                // Confirm: echo my_id ‖ the host's challenge, then commit.
+                // Confirm: echo addr ‖ the host's challenge, then commit.
                 let mut conf = [0u8; 8];
-                conf[..4].copy_from_slice(&my_id.to_le_bytes());
+                conf[..4].copy_from_slice(&addr.to_le_bytes());
                 conf[4..8].copy_from_slice(&buf[16..20]);
                 let conf_hdr = Header {
                     frame_type: FrameType::JoinConfirm,
                     flags: 0,
-                    src: my_id,
+                    src: addr,
                     dest: hdr.src,
                     counter: self.txc.counter(),
                     bulk_index: None,

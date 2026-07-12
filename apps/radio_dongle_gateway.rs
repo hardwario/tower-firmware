@@ -60,7 +60,7 @@ use tower_protocol::{MsgType, decode_frame};
 const KEY_FORMAT: u8 = 0x00;
 /// Registry buckets, locals `0x10..=0x12` (one `tower-gw-core` bucket per KV value;
 /// `registry::BUCKETS` = 3). `0x13..=0x15` stay reserved for bucket growth. The gateway's
-/// own radio address is the `address` base setting (`shell::radio_address`).
+/// own radio address is the `addr` base setting (`shell::radio_addr`).
 const KEY_BUCKET_BASE: u8 = 0x10;
 
 /// The registry's bucket store: `NS_APP` locals `0x10..=0x15`.
@@ -161,10 +161,10 @@ static PAIRING: Pattern = &[Step::on(100), Step::off(150)];
 /// registered node has its own key; the pairing exchange uses `PAIRING_KEY`): traffic
 /// from unregistered peers must simply fail CCM auth, which any value achieves.
 /// Derived from the UID so two gateways side by side don't share a lane key.
-fn default_lane_key(my_id: u32) -> [u8; 16] {
+fn default_lane_key(addr: u32) -> [u8; 16] {
     let mut k = [0u8; 16];
     for (i, chunk) in k.chunks_mut(4).enumerate() {
-        chunk.copy_from_slice(&(my_id ^ (0x9E37_79B9u32.rotate_left(i as u32 * 8))).to_le_bytes());
+        chunk.copy_from_slice(&(addr ^ (0x9E37_79B9u32.rotate_left(i as u32 * 8))).to_le_bytes());
     }
     k
 }
@@ -174,7 +174,7 @@ fn default_lane_key(my_id: u32) -> [u8; 16] {
 /// (docs/storage.md). `NodeEntry.last_seen_s` is documented as "since gateway boot".
 #[derive(Clone, Copy)]
 struct LinkStat {
-    id: u32,
+    addr: u32,
     /// `Instant::as_secs()` truncated — wraps after 136 years of uptime.
     seen_s: u32,
     rssi_dbm: i8,
@@ -197,10 +197,10 @@ impl Stats {
     const fn new() -> Self {
         Self([None; registry::CAPACITY])
     }
-    fn on_uplink(&mut self, id: u32, rssi_dbm: i16) {
+    fn on_uplink(&mut self, addr: u32, rssi_dbm: i16) {
         let rssi = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8;
         let now = Instant::now().as_secs() as u32;
-        if let Some(s) = self.0.iter_mut().flatten().find(|s| s.id == id) {
+        if let Some(s) = self.0.iter_mut().flatten().find(|s| s.addr == addr) {
             s.seen_s = now;
             s.rssi_dbm = rssi;
             s.uplinks = s.uplinks.saturating_add(1);
@@ -208,19 +208,19 @@ impl Stats {
         }
         if let Some(slot) = self.0.iter_mut().find(|s| s.is_none()) {
             *slot = Some(LinkStat {
-                id,
+                addr,
                 seen_s: now,
                 rssi_dbm: rssi,
                 uplinks: 1,
             });
         }
     }
-    fn get(&self, id: u32) -> Option<&LinkStat> {
-        self.0.iter().flatten().find(|s| s.id == id)
+    fn get(&self, addr: u32) -> Option<&LinkStat> {
+        self.0.iter().flatten().find(|s| s.addr == addr)
     }
-    fn remove(&mut self, id: u32) {
+    fn remove(&mut self, addr: u32) {
         for s in self.0.iter_mut() {
-            if matches!(s, Some(st) if st.id == id) {
+            if matches!(s, Some(st) if st.addr == addr) {
                 *s = None;
             }
         }
@@ -341,8 +341,8 @@ async fn run(b: Board) {
 
     // The gateway's own radio address = the `address` base setting (pinned or
     // UID-derived); set it with `system address` (e.g. `set address=random`).
-    let my_id = shell::radio_address(kv);
-    STAT_ID.store(my_id, Ordering::Relaxed);
+    let addr = shell::radio_addr(kv);
+    STAT_ID.store(addr, Ordering::Relaxed);
     // Registry format guard: refuse buckets written by a NEWER format (a firmware
     // downgrade) instead of mis-decoding them as empty and stamping the marker back —
     // which would silently discard every pairing. v1-or-unset stamps and proceeds.
@@ -377,8 +377,8 @@ async fn run(b: Board) {
         radio,
         kv,
         NetConfig {
-            my_id,
-            key: default_lane_key(my_id),
+            addr,
+            key: default_lane_key(addr),
             band,
             channel,
         },
@@ -400,8 +400,8 @@ async fn run(b: Board) {
     if !newer_format {
         for i in 0..registry::BUCKETS {
             for rec in registry::load(&buckets, i).iter() {
-                if !net.add_peer(rec.id, &rec.key) {
-                    warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", rec.id);
+                if !net.add_peer(rec.addr, &rec.key) {
+                    warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", rec.addr);
                 }
                 node_count += 1;
             }
@@ -412,7 +412,7 @@ async fn run(b: Board) {
     info!(
         target: "gateway",
         "GATEWAY {:08X}: {} node(s), band {}, ch {}",
-        my_id,
+        addr,
         node_count,
         match band { Band::Eu868 => "eu868", Band::Us915 => "us915" },
         channel
@@ -446,7 +446,7 @@ async fn run(b: Board) {
                 &mut stats,
                 &mut pairing,
                 &mut stats_period_ms,
-                my_id,
+                addr,
                 band,
                 channel,
                 &led,
@@ -472,12 +472,12 @@ async fn run(b: Board) {
                 pairing = None;
             } else {
                 let slice = PAIR_SLICE.min(sess.deadline.saturating_duration_since(Instant::now()));
-                if let Some(node_id) = net.open_pairing(slice, &sess.key).await {
+                if let Some(node_addr) = net.open_pairing(slice, &sess.key).await {
                     let key = sess.key;
                     let req_id = sess.req_id;
                     led.set_background(Some(HEARTBEAT));
                     pairing = None;
-                    commit_pairing(node_id, key, req_id, &mut net, &mut buckets).await;
+                    commit_pairing(node_addr, key, req_id, &mut net, &mut buckets).await;
                 }
             }
         } else if let Some(rx) = net.recv(RECV_SLICE).await {
@@ -550,26 +550,26 @@ async fn run(b: Board) {
 /// `NodeInfo` uplink via `NodeUpdate`, keeping this firmware payload-agnostic), install
 /// the peer, and resolve the delayed `PairingOpen` response.
 async fn commit_pairing(
-    node_id: u32,
+    node_addr: u32,
     key: [u8; 16],
     req_id: u16,
     net: &mut Net,
     buckets: &mut EepromBuckets,
 ) {
     let rec = NodeRecord {
-        id: node_id,
+        addr: node_addr,
         key,
         flags: mgmt::NODE_FLAG_UNNAMED,
         name: heapless::String::new(),
     };
     match registry::add(buckets, &rec) {
         Ok(()) => {
-            if !net.add_peer(node_id, &key) {
-                warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", node_id);
+            if !net.add_peer(node_addr, &key) {
+                warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", node_addr);
             }
             STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
-            info!(target: "gateway", "paired node {:08X}", node_id);
-            respond_record(req_id, &Paired { node_id }).await;
+            info!(target: "gateway", "paired node {:08X}", node_addr);
+            respond_record(req_id, &Paired { addr: node_addr }).await;
         }
         Err(RegistryError::Full) => respond_empty(req_id, mgmt::MGMT_FULL).await,
         Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
@@ -585,7 +585,7 @@ async fn handle_mgmt(
     stats: &mut Stats,
     pairing: &mut Option<PairingSession>,
     stats_period_ms: &mut u32,
-    my_id: u32,
+    addr: u32,
     band: Band,
     channel: u8,
     led: &led::Led,
@@ -600,7 +600,7 @@ async fn handle_mgmt(
                 &DeviceInfo {
                     role: DeviceRole::Gateway,
                     radio_schema_version: RADIO_SCHEMA_VERSION,
-                    net_id: my_id,
+                    addr,
                     band: match band {
                         Band::Eu868 => mgmt::BAND_EU868,
                         Band::Us915 => mgmt::BAND_US915,
@@ -609,7 +609,7 @@ async fn handle_mgmt(
                     node_capacity: registry::CAPACITY as u8,
                     node_count: registry::count(buckets) as u8,
                     provisioned: true,
-                    gw_id: my_id,
+                    gw_addr: addr,
                     firmware_name: name.as_str(),
                 },
             )
@@ -623,9 +623,9 @@ async fn handle_mgmt(
                 // the ~270 B bucket local lives on the stack, not across the await.
                 let mut staged: heapless::Vec<u8, 256> = heapless::Vec::new();
                 for rec in registry::load(buckets, i).iter() {
-                    let st = stats.get(rec.id);
+                    let st = stats.get(rec.addr);
                     let entry = NodeEntry {
-                        id: rec.id,
+                        addr: rec.addr,
                         name: rec.name.as_str(),
                         flags: rec.flags,
                         last_seen_s: st
@@ -633,7 +633,7 @@ async fn handle_mgmt(
                             .unwrap_or(mgmt::LAST_SEEN_NEVER),
                         rssi_dbm: st.map(|s| s.rssi_dbm).unwrap_or(mgmt::RSSI_NONE),
                         uplinks: st.map(|s| s.uplinks as u32).unwrap_or(0),
-                        queued: queue.count_for(rec.id) as u8,
+                        queued: queue.count_for(rec.addr) as u8,
                     };
                     let mut scratch = [0u8; 64];
                     if let Ok(bytes) = postcard::to_slice(&entry, &mut scratch) {
@@ -644,8 +644,13 @@ async fn handle_mgmt(
             }
             stream.finish().await;
         }
-        MgmtOp::NodeAdd { id, key, name, flags } => {
-            if id == 0 || name.len() > mgmt::MAX_NODE_NAME {
+        MgmtOp::NodeAdd {
+            addr,
+            key,
+            name,
+            flags,
+        } => {
+            if addr == 0 || name.len() > mgmt::MAX_NODE_NAME {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
@@ -654,53 +659,66 @@ async fn handle_mgmt(
             match registry::add(
                 buckets,
                 &NodeRecord {
-                    id,
+                    addr,
                     key,
                     flags,
                     name: n,
                 },
             ) {
                 Ok(()) => {
-                    if !net.add_peer(id, &key) {
-                        warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", id);
+                    if !net.add_peer(addr, &key) {
+                        warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", addr);
                     }
                     STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
-                    info!(target: "gateway", "node {:08X} added ({})", id, name);
+                    info!(target: "gateway", "node {:08X} added ({})", addr, name);
                     respond_empty(req_id, mgmt::MGMT_OK).await;
                 }
                 Err(RegistryError::Full) => respond_empty(req_id, mgmt::MGMT_FULL).await,
                 Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
             }
         }
-        MgmtOp::NodeRemove { id } => match registry::remove(buckets, id) {
+        MgmtOp::NodeRemove { addr } => match registry::remove(buckets, addr) {
             Ok(()) => {
-                net.remove_peer(id);
-                queue.drop_node(id);
-                stats.remove(id);
+                net.remove_peer(addr);
+                queue.drop_node(addr);
+                stats.remove(addr);
                 STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
                 STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
-                info!(target: "gateway", "node {:08X} removed", id);
+                info!(target: "gateway", "node {:08X} removed", addr);
                 respond_empty(req_id, mgmt::MGMT_OK).await;
             }
             Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
             Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
         },
-        MgmtOp::NodeUpdate { id, name, flags } => {
+        MgmtOp::NodeUpdate {
+            addr,
+            name,
+            flags,
+        } => {
             if name.is_some_and(|n| n.len() > mgmt::MAX_NODE_NAME) {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
-            match registry::update(buckets, id, name, flags) {
+            match registry::update(buckets, addr, name, flags) {
                 Ok(()) => respond_empty(req_id, mgmt::MGMT_OK).await,
                 Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
                 Err(RegistryError::BadName) => respond_empty(req_id, mgmt::MGMT_BAD_ARG).await,
                 Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
             }
         }
-        MgmtOp::NodeRevealKey { id } => match registry::find(buckets, id) {
+        MgmtOp::NodeRevealKey { addr } => match registry::find(buckets, addr) {
             // The one deliberate key-disclosure path (host asked explicitly; keys are
             // otherwise never emitted on any interface).
-            Some(rec) => respond_record(req_id, &NodeKey { id, key: rec.key }).await,
+            Some(rec) => {
+                respond_record(
+                    req_id,
+                    &NodeKey {
+                        addr,
+                        key: rec.key,
+                    },
+                )
+                .await
+            }
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
         MgmtOp::PairingOpen { window_s, key } => {
@@ -732,17 +750,21 @@ async fn handle_mgmt(
             }
             respond_empty(req_id, mgmt::MGMT_OK).await; // …and the cancel acks
         }
-        MgmtOp::QueuePush { node, ttl_s, data } => {
-            if registry::find(buckets, node).is_none() {
+        MgmtOp::QueuePush {
+            node_addr,
+            ttl_s,
+            data,
+        } => {
+            if registry::find(buckets, node_addr).is_none() {
                 respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await;
                 return;
             }
             let ttl = if ttl_s == 0 { DEFAULT_TTL_S } else { ttl_s };
-            match queue.push(node, ttl, data, now_ms) {
+            match queue.push(node_addr, ttl, data, now_ms) {
                 Ok(item) => {
                     // Pre-mark: the pending flag must ride the ACK of the node's NEXT
                     // uplink, which is built inside recv() before we see the frame.
-                    net.set_pending(node, true);
+                    net.set_pending(node_addr, true);
                     STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
                     respond_record(req_id, &QueueId { item }).await;
                 }
@@ -750,15 +772,15 @@ async fn handle_mgmt(
                 Err(_) => respond_empty(req_id, mgmt::MGMT_FULL).await,
             }
         }
-        MgmtOp::QueueList { node } => {
+        MgmtOp::QueueList { node_addr } => {
             let mut stream = ChunkStream::new(req_id);
             let mut scratch = [0u8; 128];
             for item in queue.iter() {
-                if node != 0 && item.node != node {
+                if node_addr != 0 && item.node_addr != node_addr {
                     continue;
                 }
                 let entry = mgmt::QueueEntry {
-                    node: item.node,
+                    node_addr: item.node_addr,
                     item: item.id,
                     age_s: item.age_s(now_ms),
                     ttl_s: item.ttl_s,
@@ -770,23 +792,23 @@ async fn handle_mgmt(
             }
             stream.finish().await;
         }
-        MgmtOp::QueueDrop { node, item } => {
+        MgmtOp::QueueDrop { node_addr, item } => {
             let dropped = match item {
                 // Check the id→node binding BEFORE popping: a pop-then-re-push refusal
                 // would re-mint the item under a fresh id (dangling the host's handle)
                 // and move it to the back of its node's FIFO.
                 Some(id) => {
-                    let owner = queue.iter().find(|it| it.id == id).map(|it| it.node);
-                    if owner == Some(node) {
+                    let owner = queue.iter().find(|it| it.id == id).map(|it| it.node_addr);
+                    if owner == Some(node_addr) {
                         queue.pop(id);
                         1
                     } else {
                         0
                     }
                 }
-                None => queue.drop_node(node),
+                None => queue.drop_node(node_addr),
             };
-            net.set_pending(node, queue.count_for(node) > 0);
+            net.set_pending(node_addr, queue.count_for(node_addr) > 0);
             STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
             if dropped > 0 {
                 respond_empty(req_id, mgmt::MGMT_OK).await;

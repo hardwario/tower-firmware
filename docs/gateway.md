@@ -67,14 +67,14 @@ Two **independently versioned** schemas ride these frames:
 |---|---|---|
 | `Describe` | both | `DeviceInfo` (role probe — the authoritative "is this a gateway?") |
 | `NodeList` | gateway | `NodeEntry` × N (chunked) |
-| `NodeAdd {id,key,name,flags}` | gateway | — (install a cable-paired node) |
-| `NodeRemove {id}` / `NodeUpdate {id,name?,flags?}` | gateway | — |
-| `NodeRevealKey {id}` | gateway | `NodeKey` (the only path that discloses a stored key) |
+| `NodeAdd {addr,key,name,flags}` | gateway | — (install a cable-paired node) |
+| `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | — |
+| `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key) |
 | `PairingOpen {window_s,key}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
-| `QueuePush {node,ttl_s,data}` | gateway | `QueueId` |
-| `QueueList {node}` / `QueueDrop {node,item?}` | gateway | `QueueEntry` × N / — |
+| `QueuePush {node_addr,ttl_s,data}` | gateway | `QueueId` |
+| `QueueList {node_addr}` / `QueueDrop {node_addr,item?}` | gateway | `QueueEntry` × N / — |
 | `StatsConfig {channel_period_ms}` | gateway | — (RAM override of `stats-period`) |
-| `Provision {my_id?,gw_id,key,band,channel}` | node | `ProvisionAck` |
+| `Provision {addr?,gw_addr,key,band,channel}` | node | `ProvisionAck` |
 | `JoinOpen {window_s}` | node | `Joined` (delayed) |
 
 Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FULL`(4),
@@ -125,7 +125,7 @@ of it is remote-shell reconfigurable (`/system settings set …`).
 | `debounce-release` | uint ms | `30` | 1..1000 | release debounce (**boot-applied**) |
 | `click-timeout` | uint ms | `500` | 50..5000 | max press length still counted a click (**boot-applied**) |
 | `hold-time` | uint ms | `1000` | 100..10000 | press length that becomes a hold (**boot-applied**) |
-| `address` | addr | `auto` | hex / auto / random | SDK base: the node's 32-bit radio address (`my_id`) |
+| `addr` | addr | `auto` | hex / auto / random | SDK base: the node's 32-bit radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly device name |
 
 **Event master enables gate the whole path.** A disabled event is ignored *entirely* — not
@@ -158,7 +158,7 @@ press is a hold. Used by the HIL gateway test.
 ### Pairing (node side)
 
 - **OTA** — hold the button ≥ 1 s while unprovisioned: the node runs the 3-way JOIN against any
-  gateway with an open window and persists `(gw_id, key, band, channel)` in `NS_APP`.
+  gateway with an open window and persists `(gw_addr, key, band, channel)` in `NS_APP`.
 - **Cable** — on USB the node serves the management channel: `Describe` (role probe), `Provision`
   (host-minted credentials — the key never rides the shell history), and `JoinOpen`
   (host-initiated OTA join). The node reboots into its new identity; watch for the fresh `Hello`.
@@ -196,7 +196,7 @@ uplink cycle.
 | `stats-period` | uint ms | `1000` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime |
 | `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**) |
 | `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**) |
-| `address` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio id |
+| `addr` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly name |
 
 ### Pairing (gateway side)
@@ -205,7 +205,7 @@ uplink cycle.
   join commits the registry entry (flags `UNNAMED` until the host auto-names it from the first
   `NodeInfo` via `NodeUpdate`) and answers the *delayed* `Paired`, or `MGMT_TIMEOUT` on expiry.
 - **Cable** — the host (which alone can reach the node's serial port) provisions the node
-  directly, then registers it on the gateway with `NodeAdd{id, key, name, flags}`.
+  directly, then registers it on the gateway with `NodeAdd{addr, key, name, flags}`.
 
 ### RAM budget
 

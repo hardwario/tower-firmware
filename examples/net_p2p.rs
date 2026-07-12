@@ -40,15 +40,15 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-peer-b")]
-    let (my_id, peer_id) = (PEER_B, PEER_A);
+    let (addr, peer_id) = (PEER_B, PEER_A);
     #[cfg(not(feature = "role-peer-b"))]
-    let (my_id, peer_id) = (PEER_A, PEER_B);
+    let (addr, peer_id) = (PEER_A, PEER_B);
 
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
-            my_id,
+            addr,
             key: LINK_KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -63,7 +63,7 @@ async fn run(b: Board) {
         }
     };
     net.add_peer(peer_id, &LINK_KEY);
-    info!(target: "p2p", "{:08X}: peer {:08X} registered ({} peer)", my_id, peer_id, net.peer_count());
+    info!(target: "p2p", "{:08X}: peer {:08X} registered ({} peer)", addr, peer_id, net.peer_count());
 
     // Peer A is the initiator; peer B is the responder. Both directions are
     // confirmed, so each round produces an ACK in each direction.

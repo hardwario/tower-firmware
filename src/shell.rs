@@ -92,7 +92,7 @@ pub enum Kind {
     /// A 32-bit network **address**, shown and entered as hex (`0x1a2b3c4d`; a bare
     /// `1a2b3c4d` is accepted too). Stored as 4 LE bytes. The literal `random` mints a
     /// fresh non-zero address; `auto` (the stored `0`) resolves to the chip-UID-derived
-    /// default. See [`radio_address`]. For the radio `my_id` / node address.
+    /// default. See [`radio_addr`]. This is the radio device address (`addr`).
     Addr,
 }
 
@@ -101,7 +101,7 @@ pub enum Kind {
 pub struct Setting {
     /// Local key within the shell namespace (`NS_SHELL`); the shell prefixes it, so a setting can
     /// never collide with another subsystem's keys. **`0x00..=0x0F` is reserved for the SDK base
-    /// table** (`identity` = `0x00`, `address` = `0x01`, the rest headroom for base growth) — app
+    /// table** (`identity` = `0x00`, `addr` = `0x01`, the rest headroom for base growth) — app
     /// settings start at `0x10`. A collision doesn't error: two settings would silently alias the
     /// same stored bytes, so the partition is load-bearing for persisted config.
     pub key: u8,
@@ -113,9 +113,9 @@ pub struct Setting {
     pub default: &'static str,
 }
 
-/// `NS_SHELL` local key of the base `address` setting (the radio `my_id`). Public so a
+/// `NS_SHELL` local key of the base `addr` setting (the radio device address). Public so a
 /// provisioning path can pin it (see the cable-`Provision` handler).
-pub const ADDRESS_KEY: u8 = 0x01;
+pub const ADDR_KEY: u8 = 0x01;
 
 /// SDK base settings; apps add their own via [`serve_ext`].
 static BASE_SETTINGS: &[Setting] = &[
@@ -125,22 +125,22 @@ static BASE_SETTINGS: &[Setting] = &[
         kind: Kind::Str { max: 32 },
         default: "tower",
     },
-    // The device's 32-bit radio address (`my_id`). Default `auto` = the stored 0
-    // sentinel, which [`radio_address`] resolves to the chip-UID-derived address.
+    // The device's 32-bit radio address (`addr`). Default `auto` = the stored 0
+    // sentinel, which [`radio_addr`] resolves to the chip-UID-derived address.
     Setting {
-        key: ADDRESS_KEY,
-        name: "address",
+        key: ADDR_KEY,
+        name: "addr",
         kind: Kind::Addr,
         default: "auto",
     },
 ];
 
-/// The device's effective 32-bit radio address: the `address` base setting when pinned
+/// The device's effective 32-bit radio address: the `addr` base setting when pinned
 /// to a non-zero value, else the chip-UID-derived default ([`crate::board::unique_id32`]).
-/// This is the `my_id` / clear-header `src` a radio app should transmit under.
-pub fn radio_address(kv: Nv) -> u32 {
+/// This is the `addr` / clear-header `src` a radio app should transmit under.
+pub fn radio_addr(kv: Nv) -> u32 {
     let mut b = [0u8; 4];
-    match kv.scope(NS_SHELL).get_bytes(ADDRESS_KEY, &mut b) {
+    match kv.scope(NS_SHELL).get_bytes(ADDR_KEY, &mut b) {
         Ok(Some(4)) if u32::from_le_bytes(b) != 0 => u32::from_le_bytes(b),
         _ => crate::board::unique_id32(),
     }
@@ -731,7 +731,7 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         return Outcome::code(R_NOT_FOUND);
     };
     let mut buf = [0u8; MAX_SETTING];
-    // `address=random` mints a fresh non-zero address here (the pure encoder has no RNG);
+    // `addr=random` mints a fresh non-zero address here (the pure encoder has no RNG);
     // everything else goes through the normal validated encode.
     let (n, generated) = if matches!(s.kind, Kind::Addr) && value.eq_ignore_ascii_case("random") {
         let mut a = crate::board::rand_u32();
@@ -867,7 +867,7 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
                 return;
             }
             // Show the *effective* address (hex): a stored 0 = "auto" resolves to the
-            // chip-UID-derived value, so `get address` reports what the radio actually uses.
+            // chip-UID-derived value, so `get addr` reports what the radio actually uses.
             Kind::Addr if n >= 4 => {
                 let a = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                 let eff = if a != 0 { a } else { crate::board::unique_id32() };

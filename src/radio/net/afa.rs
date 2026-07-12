@@ -124,13 +124,13 @@ impl Net {
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong);
         }
-        let my_id = self.my_id;
+        let addr = self.addr;
         let counter = self.txc.counter();
         let key = self.key_for(dest);
         let hdr = Header {
             frame_type: FrameType::Data,
             flags: if confirmed { flags::CONFIRMED } else { 0 },
-            src: my_id,
+            src: addr,
             dest,
             counter,
             bulk_index: None,

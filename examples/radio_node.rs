@@ -42,7 +42,7 @@ async fn run(b: Board) {
         radio,
         b.kv,
         NetConfig {
-            my_id: NODE_ID,
+            addr: NODE_ID,
             key: KEY,
             band: Band::DEFAULT,
             channel: 0,

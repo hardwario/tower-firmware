@@ -55,15 +55,15 @@ async fn run(b: Board) {
 
     // The gateway's default key is KEY_A; each node is registered with its own.
     #[cfg(feature = "role-node")]
-    let (my_id, key) = (NODE.0, NODE.1);
+    let (addr, key) = (NODE.0, NODE.1);
     #[cfg(not(feature = "role-node"))]
-    let (my_id, key) = (GW_ID, KEY_A);
+    let (addr, key) = (GW_ID, KEY_A);
 
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
-            my_id,
+            addr,
             key,
             band: Band::DEFAULT,
             channel: 0,

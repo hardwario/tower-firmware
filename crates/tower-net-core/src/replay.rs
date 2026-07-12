@@ -98,34 +98,34 @@ pub struct LaneBinding {
     pub index: usize,
     /// Restored last-seen (the persisted value on restore; `0` for a freshly-claimed lane).
     pub seen: u32,
-    /// `true` = a fresh local was claimed — the caller must persist `(id, 0)` there;
+    /// `true` = a fresh local was claimed — the caller must persist `(addr, 0)` there;
     /// `false` = the peer's own record was restored (no write needed).
     pub fresh: bool,
 }
 
-/// Bind a peer `id` to one of `records.len()` persisted replay-lane locals, **keyed by peer
-/// id, not by the caller's table slot**.
+/// Bind a peer address to one of `records.len()` persisted replay-lane locals, **keyed by peer
+/// addr, not by the caller's table slot**.
 ///
 /// This is the fix for a real bug: the lane used to be persisted at `base + table_slot`, but a
 /// peer's table slot is assigned by registration order, which *changes* when an earlier peer is
 /// removed and the registry compacts. On the next reboot the surviving later peers landed on
-/// different slots → their id-tagged records no longer matched → their replay lanes reset to 0,
-/// reopening the window until they next transmitted. Keying by id makes a peer find its own lane
+/// different slots → their addr-tagged records no longer matched → their replay lanes reset to 0,
+/// reopening the window until they next transmitted. Keying by addr makes a peer find its own lane
 /// wherever it sits.
 ///
-/// `records[l]` = the stored `(stored_id, last_seen)` at local `l` (`None` if unwritten). `used`
+/// `records[l]` = the stored `(stored_addr, last_seen)` at local `l` (`None` if unwritten). `used`
 /// bit `l` marks a local already bound to a *currently registered* peer this session (so two
 /// live peers never share a local, and a removed peer's record stays for resume-on-re-pair while
-/// its local frees for reuse). Priority: (1) restore this `id`'s record at a free local; else
+/// its local frees for reuse). Priority: (1) restore this `addr`'s record at a free local; else
 /// (2) claim the lowest free local. `None` only if every local is bound to a live peer — which
 /// the caller prevents by only calling when it has a free table slot. `records.len()` ≤ 32
 /// (the `used` bitmask width).
 #[must_use]
-pub fn assign_lane(id: u32, records: &[Option<(u32, u32)>], used: u32) -> Option<LaneBinding> {
-    // 1. Restore this id's own record, at a local no live peer already occupies.
+pub fn assign_lane(addr: u32, records: &[Option<(u32, u32)>], used: u32) -> Option<LaneBinding> {
+    // 1. Restore this addr's own record, at a local no live peer already occupies.
     for (l, rec) in records.iter().enumerate() {
-        if let Some((stored_id, seen)) = *rec {
-            if stored_id == id && used & (1 << l) == 0 {
+        if let Some((stored_addr, seen)) = *rec {
+            if stored_addr == addr && used & (1 << l) == 0 {
                 return Some(LaneBinding {
                     index: l,
                     seen,
@@ -134,7 +134,7 @@ pub fn assign_lane(id: u32, records: &[Option<(u32, u32)>], used: u32) -> Option
             }
         }
     }
-    // 2. Claim the lowest free local (the caller persists `(id, 0)` there).
+    // 2. Claim the lowest free local (the caller persists `(addr, 0)` there).
     for l in 0..records.len() {
         if used & (1 << l) == 0 {
             return Some(LaneBinding {
@@ -289,7 +289,7 @@ mod tests {
         }
     }
 
-    /// A restored lane (peer re-added, id-matched record) resumes its window rather than
+    /// A restored lane (peer re-added, addr-matched record) resumes its window rather than
     /// reopening it: nothing at or below the restored last-seen is accepted.
     #[test]
     fn restored_lane_resumes_window() {
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(lane.classify(501), ReplayVerdict::Fresh);
     }
 
-    // --- assign_lane (id-keyed replay-lane binding) ------------------------------------------
+    // --- assign_lane (addr-keyed replay-lane binding) ------------------------------------------
 
     /// An unknown peer with no record claims the lowest free local (fresh); an occupied local
     /// is skipped.
@@ -324,9 +324,9 @@ mod tests {
         );
     }
 
-    /// A peer finds its OWN record by id, at whatever local it sits — the restore path.
+    /// A peer finds its OWN record by addr, at whatever local it sits — the restore path.
     #[test]
-    fn assign_lane_restores_own_record_by_id() {
+    fn assign_lane_restores_own_record_by_addr() {
         let records = [Some((0xA, 10)), Some((0xB, 20)), Some((0xC, 30)), Some((0xD, 40))];
         assert_eq!(
             assign_lane(0xC, &records, 0),
@@ -388,10 +388,10 @@ mod tests {
         assert_eq!(assign_lane(0xC, &records, 0b11), None);
     }
 
-    /// An id-match at a local already held by a live peer is skipped (no two live peers on one
+    /// An addr-match at a local already held by a live peer is skipped (no two live peers on one
     /// local) — fall through to a claim.
     #[test]
-    fn assign_lane_skips_id_match_at_occupied_local() {
+    fn assign_lane_skips_addr_match_at_occupied_local() {
         let records = [Some((0xA, 10)), None];
         assert_eq!(
             assign_lane(0xA, &records, 0b01),

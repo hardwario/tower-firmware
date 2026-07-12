@@ -54,15 +54,15 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let my_id = NODE_ID;
+    let addr = NODE_ID;
     #[cfg(not(feature = "role-node"))]
-    let my_id = GW_ID;
+    let addr = GW_ID;
 
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
-            my_id,
+            addr,
             key: KEY,
             band: Band::Eu868,
             channel: 0,

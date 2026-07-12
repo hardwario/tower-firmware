@@ -1,7 +1,7 @@
-//! Host-testable pure kernels behind the shell's `address` setting.
+//! Host-testable pure kernels behind the shell's `addr` setting.
 //!
 //! Extracted from the no_std firmware `src/` (which can't `cargo test`) so the address
-//! value parser and the `address random` PRNG get host coverage — the same split as
+//! value parser and the `addr random` PRNG get host coverage — the same split as
 //! `tower-net-core` / `tower-gw-core`. The firmware keeps the EEPROM I/O and the hardware
 //! TRNG; the pure parse/transform lives here.
 
@@ -9,7 +9,7 @@
 
 /// Parse a `Kind::Addr` setting value into the stored 32-bit radio address.
 ///
-/// * `auto` (any case) → `Some(0)` — the sentinel `shell::radio_address` resolves to the
+/// * `auto` (any case) → `Some(0)` — the sentinel `shell::radio_addr` resolves to the
 ///   chip-UID-derived address.
 /// * a hex literal — `0x1a2b3c4d` / `0X…` / bare `1a2b3c4d`, 1..=8 hex digits → its value.
 /// * anything else → `None`.
@@ -34,7 +34,7 @@ pub fn parse_addr(value: &str) -> Option<u32> {
 /// One xorshift32 step over a seed forced non-zero (`| 1`).
 ///
 /// The result is **never 0** — xorshift of a non-zero word stays non-zero — which is the
-/// load-bearing property for an `address` value (`0` is the `auto` sentinel). **Not
+/// load-bearing property for an `addr` value (`0` is the `auto` sentinel). **Not
 /// cryptographic**: the firmware mixes live entropy (chip UID, uptime tick, rolling state)
 /// into `seed`; this is only the deterministic transform.
 pub fn xorshift32_nonzero(seed: u32) -> u32 {

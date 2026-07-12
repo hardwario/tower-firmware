@@ -1,4 +1,4 @@
-//! The gateway's persistent node registry: `(id, key, flags, name)` records packed
+//! The gateway's persistent node registry: `(addr, key, flags, name)` records packed
 //! into buckets, one `tower-kv` value per bucket — accessed **bucket-at-a-time**
 //! through the [`BucketIo`] trait, never held resident.
 //!
@@ -41,7 +41,7 @@ pub const MAX_BUCKET_BYTES: usize = 256;
 /// One registered node, as persisted.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct NodeRecord {
-    pub id: u32,
+    pub addr: u32,
     pub key: [u8; 16],
     /// `tower_protocol::mgmt::NODE_FLAG_*` bits.
     pub flags: u8,
@@ -57,7 +57,7 @@ pub type Bucket = Vec<NodeRecord, PER_BUCKET>;
 pub enum RegistryError {
     /// [`CAPACITY`] nodes already registered (or every bucket slot full).
     Full,
-    /// No node with that id.
+    /// No node with that addr.
     NotFound,
     /// Name over [`MAX_NAME`] bytes.
     BadName,
@@ -103,22 +103,22 @@ pub fn count(io: &impl BucketIo) -> usize {
 }
 
 /// Look one node up (returns an owned ~44 B record).
-pub fn find(io: &impl BucketIo, id: u32) -> Option<NodeRecord> {
+pub fn find(io: &impl BucketIo, addr: u32) -> Option<NodeRecord> {
     for i in 0..BUCKETS {
-        if let Some(rec) = load(io, i).iter().find(|r| r.id == id) {
+        if let Some(rec) = load(io, i).iter().find(|r| r.addr == addr) {
             return Some(rec.clone());
         }
     }
     None
 }
 
-/// Add a node (or overwrite the record of an already-registered id — the
+/// Add a node (or overwrite the record of an already-registered addr — the
 /// cable-pairing re-provision case).
 pub fn add(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError> {
-    // Overwrite in place if the id exists.
+    // Overwrite in place if the addr exists.
     for i in 0..BUCKETS {
         let mut bucket = load(io, i);
-        if let Some(slot) = bucket.iter().position(|r| r.id == rec.id) {
+        if let Some(slot) = bucket.iter().position(|r| r.addr == rec.addr) {
             bucket[slot] = rec.clone();
             return store(io, i, &bucket);
         }
@@ -137,10 +137,10 @@ pub fn add(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError
 }
 
 /// Remove a node.
-pub fn remove(io: &mut impl BucketIo, id: u32) -> Result<(), RegistryError> {
+pub fn remove(io: &mut impl BucketIo, addr: u32) -> Result<(), RegistryError> {
     for i in 0..BUCKETS {
         let mut bucket = load(io, i);
-        if let Some(slot) = bucket.iter().position(|r| r.id == id) {
+        if let Some(slot) = bucket.iter().position(|r| r.addr == addr) {
             bucket.remove(slot);
             return store(io, i, &bucket);
         }
@@ -151,13 +151,13 @@ pub fn remove(io: &mut impl BucketIo, id: u32) -> Result<(), RegistryError> {
 /// Update mutable metadata (`None` keeps the current value).
 pub fn update(
     io: &mut impl BucketIo,
-    id: u32,
+    addr: u32,
     name: Option<&str>,
     flags: Option<u8>,
 ) -> Result<(), RegistryError> {
     for i in 0..BUCKETS {
         let mut bucket = load(io, i);
-        if let Some(slot) = bucket.iter().position(|r| r.id == id) {
+        if let Some(slot) = bucket.iter().position(|r| r.addr == addr) {
             if let Some(n) = name {
                 let mut s: String<MAX_NAME> = String::new();
                 s.push_str(n).map_err(|_| RegistryError::BadName)?;
@@ -202,12 +202,12 @@ mod tests {
         }
     }
 
-    fn rec(id: u32, name: &str) -> NodeRecord {
+    fn rec(addr: u32, name: &str) -> NodeRecord {
         let mut s: String<MAX_NAME> = String::new();
         s.push_str(name).unwrap();
         NodeRecord {
-            id,
-            key: [id as u8; 16],
+            addr,
+            key: [addr as u8; 16],
             flags: 0,
             name: s,
         }
@@ -226,7 +226,7 @@ mod tests {
         let mut name: String<MAX_NAME> = String::new();
         name.push_str("kitchen").unwrap();
         let r = NodeRecord {
-            id: 0x0102_0304,
+            addr: 0x0102_0304,
             key: [
                 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
                 0x1f,
@@ -245,7 +245,7 @@ mod tests {
         );
         // Decode back: a reorder trips the bytes above; a decode regression trips these fields.
         let back: NodeRecord = postcard::from_bytes(&out[..n]).unwrap();
-        assert_eq!(back.id, 0x0102_0304);
+        assert_eq!(back.addr, 0x0102_0304);
         assert_eq!((back.key[0], back.key[15], back.flags), (0x10, 0x1f, 0x05));
         assert_eq!(back.name.as_str(), "kitchen");
     }
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(find(&io, 2).unwrap().name.as_str(), "fresh");
     }
 
-    /// Adding an existing id overwrites in place (re-provision), never duplicates.
+    /// Adding an existing addr overwrites in place (re-provision), never duplicates.
     #[test]
     fn re_add_overwrites() {
         let mut io = Mem::default();
@@ -363,13 +363,13 @@ mod tests {
     #[test]
     fn mutate_spilled_node() {
         let mut io = Mem::default();
-        // 13 nodes fill bucket 0 (6) + bucket 1 (6) + bucket 2 (1); id 13 lands in bucket 2.
+        // 13 nodes fill bucket 0 (6) + bucket 1 (6) + bucket 2 (1); addr 13 lands in bucket 2.
         for i in 1..=(PER_BUCKET as u32 * 2 + 1) {
             add(&mut io, &rec(i, "n")).unwrap();
         }
         assert!(!load(&io, 2).is_empty(), "node spilled into bucket 2");
         let spilled = PER_BUCKET as u32 * 2 + 1;
-        assert_eq!(find(&io, spilled).unwrap().id, spilled);
+        assert_eq!(find(&io, spilled).unwrap().addr, spilled);
         update(&mut io, spilled, Some("attic"), Some(0b10)).unwrap();
         let n = find(&io, spilled).unwrap();
         assert_eq!((n.name.as_str(), n.flags), ("attic", 0b10));

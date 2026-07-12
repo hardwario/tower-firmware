@@ -21,10 +21,10 @@ use tower::radio::net::{Net, NetConfig, PAIRING_KEY, PAIRING_WINDOW};
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
-const HOST_ID: u32 = 0x2222_2222;
+const HOST_ADDR: u32 = 0x2222_2222;
 // The joiner's OWN, self-chosen ID (kept after pairing — not assigned by the host).
 #[cfg(feature = "role-node")]
-const MY_ID: u32 = 0x0000_00BB;
+const MY_ADDR: u32 = 0x0000_00BB;
 // The per-node key the host hands out (would be random in production).
 #[cfg(not(feature = "role-node"))]
 const HANDED_KEY: [u8; 16] = [
@@ -43,16 +43,16 @@ async fn run(b: Board) {
     );
 
     #[cfg(feature = "role-node")]
-    let my_id = MY_ID;
+    let addr = MY_ADDR;
     #[cfg(not(feature = "role-node"))]
-    let my_id = HOST_ID;
+    let addr = HOST_ADDR;
 
     // The Net's own key is unused during pairing (JOIN frames use PAIRING_KEY).
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
-            my_id,
+            addr,
             key: PAIRING_KEY,
             band: Band::DEFAULT,
             channel: 0,
@@ -69,14 +69,14 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ID);
+        info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ADDR);
         loop {
             match net.open_pairing(PAIRING_WINDOW, &HANDED_KEY).await {
-                // The joiner brought its own id; the host installs (id, key).
-                Some(node_id) => info!(
+                // The joiner brought its own address; the host installs (peer_addr, key).
+                Some(peer_addr) => info!(
                     target: "pair",
-                    "PAIRED *** node id={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
-                    node_id, HANDED_KEY[0], HANDED_KEY[1], HANDED_KEY[2], HANDED_KEY[3]
+                    "PAIRED *** node addr={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
+                    peer_addr, HANDED_KEY[0], HANDED_KEY[1], HANDED_KEY[2], HANDED_KEY[3]
                 ),
                 None => warn!(target: "pair", "pairing window closed (no joiner / lost confirm)"),
             }
@@ -86,13 +86,13 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "pair", "JOINER: requesting to join with my own id {:08X} (1 min)", MY_ID);
+        info!(target: "pair", "JOINER: requesting to join with my own address {:08X} (1 min)", MY_ADDR);
         loop {
-            match net.join(MY_ID, PAIRING_WINDOW).await {
-                Some((gw_id, key)) => info!(
+            match net.join(MY_ADDR, PAIRING_WINDOW).await {
+                Some((gw_addr, key)) => info!(
                     target: "pair",
-                    "JOINED *** id={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
-                    MY_ID, gw_id, key[0], key[1], key[2], key[3]
+                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
+                    MY_ADDR, gw_addr, key[0], key[1], key[2], key[3]
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),
             }
