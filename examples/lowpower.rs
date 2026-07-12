@@ -16,11 +16,18 @@
 //! (`PWR_CR.LPSDSR`/`ULP`, which embassy's wake path clears) on each wake. So this measures
 //! the realistic unplugged idle floor, not a "nothing ever runs" floor.
 //!
-//! Bench-measured (2026-07-12, PPK2 source-measure, USB unplugged): **~20 µA median @ 1.8 V**,
-//! which *includes* the attached J-Link's ~20 µA SWD-parasitic offset — so the DUT's own STOP
-//! floor is only a couple of µA (STM32L0 Stop + LSE-RTC territory). Well under the 50 µA the
-//! HIL `power_stop_floor_under_50ua` test asserts. (Median, not mean: the ~500 ms console-poll
-//! wakes briefly raise the instantaneous current, so the mean overstates the quiescent floor.)
+//! Bench-measured (2026-07-12, PPK2 source-measure @ 1.8 V, USB unplugged), all medians and
+//! repeatable to sub-µA:
+//!   * **true DUT STOP floor: 5.1 µA** — PPK2 the *only* thing attached (J-Link removed too).
+//!     STM32L0 Stop + LSE-RTC territory.
+//!   * with the J-Link attached: **19.8 µA** → the J-Link's SWD debug-domain parasitic adds
+//!     ~14.7 µA (it energises the target's debug power even in Stop).
+//! Both are well under the 50 µA the HIL `power_stop_floor_under_50ua` test asserts.
+//! Verified against a high-current anchor on the SAME board: the `led_on` example (LED held on +
+//! core spinning) reads **7.7 mA @ 3.0 V / 4.7 mA @ 1.8 V** — a ~1500× step over the STOP floor,
+//! proving the meter reads real current at scale (the floor isn't a stuck/zero artifact).
+//! (Median, not mean: the ~500 ms console-poll wakes briefly spike the instantaneous current, so
+//! a mean would overstate the quiescent floor.)
 
 #![no_std]
 #![no_main]
