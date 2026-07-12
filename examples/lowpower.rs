@@ -16,12 +16,14 @@
 //! (`PWR_CR.LPSDSR`/`ULP`, which embassy's wake path clears) on each wake. So this measures
 //! the realistic unplugged idle floor, not a "nothing ever runs" floor.
 //!
-//! Bench-measured (2026-07-12, PPK2 source-measure @ 1.8 V, USB unplugged), all medians and
+//! Bench-measured (2026-07-12, PPK2 source-measure, USB unplugged), all medians and
 //! repeatable to sub-µA:
-//!   * **true DUT STOP floor: 5.1 µA** — PPK2 the *only* thing attached (J-Link removed too).
-//!     STM32L0 Stop + LSE-RTC territory.
-//!   * with the J-Link attached: **19.8 µA** → the J-Link's SWD debug-domain parasitic adds
-//!     ~14.7 µA (it energises the target's debug power even in Stop).
+//!   * **true DUT STOP floor: 5.1 µA @ 1.8 V, 6.1 µA @ 3.0 V** — PPK2 the *only* thing attached
+//!     (J-Link removed too). STM32L0 Stop + LSE-RTC territory; the slight rise with rail voltage
+//!     is ordinary CMOS leakage (higher V → more quiescent leakage), so the floor is honest at
+//!     both rails. The HIL test standardises on 1.8 V.
+//!   * with the J-Link attached (@ 1.8 V): **19.8 µA** → the J-Link's SWD debug-domain parasitic
+//!     adds ~14.7 µA (it energises the target's debug power even in Stop).
 //! Both are well under the 50 µA the HIL `power_stop_floor_under_50ua` test asserts.
 //! Verified against a high-current anchor on the SAME board: the `led_on` example (LED held on +
 //! core spinning) reads **7.7 mA @ 3.0 V / 4.7 mA @ 1.8 V** — a ~1500× step over the STOP floor,
