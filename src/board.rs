@@ -161,7 +161,10 @@ impl Board {
         // also the USB DP pin, used here purely as a VBUS_SENSE GPIO (no USB peripheral).
         crate::console::install_logger(LOG_LEVEL);
         let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
-        spawner.spawn(crate::console::manager(p.USART1, p.PA9, p.PA10, vbus).unwrap());
+        // DMA1_CH4 (TX) + DMA1_CH5 (RX) back the console UART — a different channel group from the
+        // WS2812 strip's DMA1_CH3, so both coexist on DMA (overrun-proof console RX).
+        spawner
+            .spawn(crate::console::manager(p.USART1, p.PA9, p.PA10, p.DMA1_CH4, p.DMA1_CH5, vbus).unwrap());
 
         // I2C2 sensor bus — quiesce every device on it so the bus costs ~no idle current
         // (each may be absent on some boards, so NACKs are ignored). Order matters: the

@@ -6,24 +6,25 @@
 //! (`tower logs`), which decodes the frames.
 //!
 //! Architecture (docs/console.md): the console is **dynamic** — [`manager`] owns USART1
-//! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds the
-//! `BufferedUart` while plugged and **drops** it on unplug — releasing embassy's STOP
-//! refcount so an unplugged node idles at µA. While up it splits the UART and runs two
-//! halves:
+//! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds a **DMA-backed
+//! `Uart`** while plugged and **drops** it on unplug — releasing embassy's STOP refcount so an
+//! unplugged node idles at µA. TX runs on DMA1 channel 4, RX on a **circular DMA buffer** on
+//! channel 5 ([`RingBufferedUartRx`]) — a different channel group from the WS2812 strip's channel
+//! 3, so both use DMA at once. While up it splits the UART and runs two halves:
 //!
 //! * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
 //!   [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking, drop-newest
-//!   on full (a dropped count is reported by the writer); [`writer_loop`] owns the
-//!   `BufferedUartTx`, assigns the per-frame `seq` (so a gap means real wire loss, not a
-//!   queue drop), encodes, and async-writes — holding a `WakeGuard` across each burst so
-//!   the low-power executor uses WFI (USART clocked) instead of STOP, which would gate the
-//!   TXE interrupt;
-//! * [`rx_loop`] reads the `BufferedUartRx` and [`route_frame`]s decoded frames into the
+//!   on full (a dropped count is reported by the writer); [`writer_loop`] owns the [`UartTx`],
+//!   assigns the per-frame `seq` (so a gap means real wire loss, not a queue drop), encodes, and
+//!   DMA-writes — holding a `WakeGuard` across each burst so the low-power executor uses WFI
+//!   instead of STOP mid-transfer;
+//! * [`rx_loop`] reads the [`RingBufferedUartRx`] and [`route_frame`]s decoded frames into the
 //!   console-owned RX channels by type — shell frames to [`SHELL_RX`]; the shell drains its
 //!   channel on its own task. The console never calls up into that layer, so the transport
-//!   depends only on `tower-protocol`;
-//! * the **panic** path can't use the (dead) executor, so it silences the buffered ISR
-//!   and blocking-writes one frame straight to the USART1 registers via the PAC.
+//!   depends only on `tower-protocol`. Because the RX DMA fills the ring in hardware, an incoming
+//!   byte is never lost to receiver overrun while a burst or critical section delays the reader;
+//! * the **panic** path can't use the (dead) executor, so it quiesces the USART's DMA requests +
+//!   interrupts and blocking-writes one frame straight to the USART1 registers via the PAC.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
@@ -33,19 +34,18 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 use embassy_futures::select::{select, select3};
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
-use embassy_stm32::peripherals::{PA9, PA10, USART1};
+use embassy_stm32::peripherals::{DMA1_CH4, DMA1_CH5, PA9, PA10, USART1};
 use embassy_stm32::rcc::{StopMode, WakeGuard};
 use embassy_stm32::usart::{
-    BufferedInterruptHandler, BufferedUart, BufferedUartRx, BufferedUartTx, Config as UartConfig,
+    Config as UartConfig, InterruptHandler as UsartInterruptHandler, RingBufferedUartRx, Uart, UartTx,
 };
 use embassy_stm32::{Peri, bind_interrupts};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
-use embedded_io_async::Read as _; // brings read into scope for BufferedUartRx
-use embedded_io_async::Write as _; // brings write_all/flush into scope for BufferedUartTx
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
@@ -57,10 +57,13 @@ use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_f
 
 use crate::storage::{NS_SYS, Nv};
 
-// USART1 interrupt for the console UART. Bound here (not in `board`) because the console
-// manager owns the UART and rebuilds it on every USB plug-in.
+// Interrupts for the DMA-backed console UART. USART1 covers idle/error events; TX runs on DMA1
+// channel 4 and the RX ring on channel 5 — both on the shared `DMA1_CHANNEL4_5_6_7` vector, so
+// BOTH channel handlers are bound to it. This is a DIFFERENT channel group from the WS2812 strip's
+// `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and console coexist on DMA (USART1_RX maps to CH3|CH5).
 bind_interrupts!(pub struct ConsoleIrqs {
-    USART1 => BufferedInterruptHandler<USART1>;
+    USART1 => UsartInterruptHandler<USART1>;
+    DMA1_CHANNEL4_5_6_7 => DmaInterruptHandler<DMA1_CH4>, DmaInterruptHandler<DMA1_CH5>;
 });
 
 /// Max log-line / print-text length (clipped past this — fine for a debug console).
@@ -331,14 +334,15 @@ pub fn install_logger(max_level: LevelFilter) {
     }
 }
 
-// Buffers for the console UART, rebuilt on each USB plug-in. A fresh `&'static mut`
-// per build is sound because [`manager`] keeps at most one `BufferedUart` alive at a
-// time (its loop builds, runs, then drops before rebuilding).
-static mut TX_BUF: [u8; 256] = [0; 256];
-static mut RX_BUF: [u8; 128] = [0; 128];
+// DMA ring buffer for the console RX, rebuilt on each USB plug-in. The RX DMA fills this circular
+// buffer in hardware, so a byte is never lost to receiver overrun while an ISR / critical section /
+// TX flood delays the reader (the old interrupt-per-byte path's ~1% loss). A fresh `&'static mut`
+// per build is sound because [`manager`] keeps at most one console alive at a time. TX DMAs from
+// the per-frame buffer in [`send`], so no persistent TX buffer is needed.
+static mut RX_DMA_BUF: [u8; 256] = [0; 256];
 
 /// USB-presence-gated **dynamic** console. Owns USART1 + PA9/PA10 for the whole run.
-/// While USB is present (`VBUS_SENSE`/PA12 high) it builds the `BufferedUart` and runs
+/// While USB is present (`VBUS_SENSE`/PA12 high) it builds the DMA-backed `Uart` and runs
 /// the framed writer + the RX frame-router; on unplug it **drops** the UART — which
 /// disables USART1 and releases embassy's STOP refcount, so the low-power executor can
 /// enter STOP and idle at µA — then parks on the PA12 EXTI edge (which wakes the MCU
@@ -352,9 +356,11 @@ pub async fn manager(
     usart1: Peri<'static, USART1>,
     tx_pin: Peri<'static, PA9>,
     rx_pin: Peri<'static, PA10>,
+    tx_dma: Peri<'static, DMA1_CH4>,
+    rx_dma: Peri<'static, DMA1_CH5>,
     mut vbus: ExtiInput<'static, Async>,
 ) {
-    let _reserved = (usart1, tx_pin, rx_pin);
+    let _reserved = (usart1, tx_pin, rx_pin, tx_dma, rx_dma);
     loop {
         // Wait for USB present. The PA12 EXTI edge wakes the low-power executor out of
         // STOP the instant VBUS rises; the periodic re-check is a fallback for a missed
@@ -381,14 +387,15 @@ pub async fn manager(
             continue;
         }
 
-        // Build the console UART. SAFETY: at most one BufferedUart is alive at a time.
+        // Build the DMA-backed console UART. SAFETY: at most one console is alive at a time.
+        // Arg order is embassy's: (peri, rx-pin, tx-pin, tx-dma, rx-dma, irqs, config).
         let uart = unsafe {
-            BufferedUart::new(
+            Uart::new(
                 USART1::steal(),
-                PA10::steal(),
-                PA9::steal(),
-                &mut *addr_of_mut!(TX_BUF),
-                &mut *addr_of_mut!(RX_BUF),
+                PA10::steal(),     // RX pin
+                PA9::steal(),      // TX pin
+                DMA1_CH4::steal(), // TX DMA (DMA1_CHANNEL4_5_6_7 group — not the strip's CH3)
+                DMA1_CH5::steal(), // RX DMA
                 ConsoleIrqs,
                 UartConfig::default(),
             )
@@ -397,7 +404,9 @@ pub async fn manager(
             Timer::after(Duration::from_millis(500)).await; // avoid a tight rebuild loop
             continue;
         };
-        let (mut tx, mut rx) = uart.split();
+        let (mut tx, rx) = uart.split();
+        // Equip RX with the circular DMA buffer: hardware fills it, so a slow reader can't overrun.
+        let mut rx = rx.into_ring_buffered(unsafe { &mut *addr_of_mut!(RX_DMA_BUF) });
 
         // Console is up: the writer below drains TX_CHANNEL, so producers may now apply
         // backpressure (see `enqueue`). Set this before the Hello so it takes the same path.
@@ -440,7 +449,7 @@ impl Drop for OnCancelDrop {
 /// transmit burst: the async write awaits the USART TXE interrupt, which STOP would
 /// gate — the guard forces a plain WFI so the USART stays clocked and the interrupt
 /// fires. Between bursts **no** guard is held (docs/console.md).
-async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
+async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     let mut seq: u16 = 0;
 
     // The writer emits the session's opening frames ITSELF — not via the shared producer queue —
@@ -450,15 +459,14 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
     // spurious wire-loss warning. Lead with a lone 0x00 to flush any partial frame left on the
     // host's decoder, then the Hello as seq 0.
     //
-    // KNOWN LIMITATION (measured 2026-07-05, wire probe): while a chatty boot backlog drains
-    // right after this Hello (a full TX_CHANNEL ≈ 500 B ≈ 45 ms at 115200), host→device bytes
-    // can be lost to receiver overrun — a ShellCommand sent within ~60 ms of the Hello vanishes
-    // (CRC-dropped from a partial frame), while a quiet firmware (blinky) accepts at Hello+5 ms.
-    // The host CLI guards this with a post-Hello settle (tower-cli session::POST_HELLO_GUARD);
-    // a firmware-side fix would need the RX ISR to survive the TX flood (ORE handling/rings).
+    // (Historical: a chatty boot backlog draining right after this Hello used to lose host→device
+    // bytes to receiver overrun — the old interrupt-per-byte RX couldn't be serviced within one
+    // ~87 µs char-time while the TX flood monopolized the core. RX now runs on a circular DMA
+    // buffer (channel 5), filled in hardware independent of CPU/ISR latency, so a byte is no
+    // longer dropped during the flood. The host CLI's post-Hello settle stays as belt-and-braces.)
     {
         let _g = WakeGuard::new(StopMode::Stop1);
-        let _ = tx.write_all(&[0u8]).await;
+        let _ = tx.write(&[0u8]).await;
         let _ = tx.flush().await;
         let name = firmware_name();
         send(
@@ -588,7 +596,7 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
 /// Read `rx` and route decoded frames (until cancelled): shell frames go to [`SHELL_RX`], a
 /// console-owned channel the shell drains on its own task. Owning RX here (instead of the
 /// shell owning it) is what lets the console be torn down and rebuilt across USB plug/unplug.
-async fn rx_loop(rx: &mut BufferedUartRx<'static>) {
+async fn rx_loop(rx: &mut RingBufferedUartRx<'static>) {
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 64];
     loop {
@@ -654,12 +662,12 @@ pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
 /// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
 /// holds a `WakeGuard` for the burst). An encode failure (payload over budget) is
 /// counted as a drop rather than silently lost.
-async fn send<T: Serialize>(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg_type: MsgType, payload: &T) {
+async fn send<T: Serialize>(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_type: MsgType, payload: &T) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
             *seq = seq.wrapping_add(1);
-            let _ = tx.write_all(&buf[..n]).await;
+            let _ = tx.write(&buf[..n]).await;
         }
         Err(_) => bump_dropped(),
     }
@@ -670,7 +678,7 @@ async fn send<T: Serialize>(tx: &mut BufferedUartTx<'static>, seq: &mut u16, msg
 /// each frame fits the wire budget. Empty text still sends one (empty, `last`) frame
 /// so the host always completes the response. The host reassembles by `cmd_id`.
 async fn send_shell_response(
-    tx: &mut BufferedUartTx<'static>,
+    tx: &mut UartTx<'static, Async>,
     seq: &mut u16,
     cmd_id: u16,
     result: u8,
@@ -898,7 +906,12 @@ fn blocking_emit_error(module: &str, message: &str) {
     if !USART1.cr1().read().ue() {
         return;
     }
-    // Silence the BufferedUart ISR so it can't race our direct register writes.
+    // Take sole ownership of TDR: clear the USART DMA requests so a stale TX DMA (ch 4) can't push
+    // bytes into TDR concurrently with our direct writes, and silence the RX/TX interrupt enables.
+    USART1.cr3().modify(|w| {
+        w.set_dmat(false);
+        w.set_dmar(false);
+    });
     USART1.cr1().modify(|w| {
         w.set_txeie(false);
         w.set_rxneie(false);
