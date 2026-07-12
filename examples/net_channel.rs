@@ -94,7 +94,7 @@ async fn run(b: Board) {
                 } else {
                     0
                 };
-                info!(target: "chan", "ch{} rx src={:08X} seq={} cnt={} rssi={}dBm (ACKed)", CHANNEL, rx.src, seq, rx.counter, rx.rssi_dbm);
+                info!(target: "chan", "ch{} rx src={:08X} seq={} cnt={} rssi={}dBm (ACKed)", CHANNEL, rx.src, seq, rx.counter, rx.rssi);
             }
         }
     }

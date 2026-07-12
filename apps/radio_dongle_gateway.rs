@@ -93,7 +93,7 @@ static GW_SETTINGS: &[shell::Setting] = &[
         key: SET_STATS_PERIOD,
         name: "stats-period",
         kind: shell::Kind::Uint { min: 0, max: 60_000 },
-        default: "1000",
+        default: "500",
     },
     shell::Setting {
         key: SET_BAND,
@@ -148,7 +148,7 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 /// single-owner loop out of `recv` while a mid-response node is uplinking its next
 /// shell chunk.
 const DOWNLINK_REPS: u8 = 2;
-/// Default downlink TTL when the host passes `ttl_s == 0`.
+/// Default downlink TTL when the host passes `ttl == 0`.
 const DEFAULT_TTL_S: u16 = 3600;
 
 static CH: LedChannel = LedChannel::new();
@@ -171,13 +171,13 @@ fn default_lane_key(addr: u32) -> [u8; 16] {
 
 /// RAM-only per-node link stats. Packed to 12 B/entry (16 entries = 192 B of the app
 /// future); deliberately NOT persisted — per-uplink EEPROM writes would burn the part
-/// (docs/storage.md). `NodeEntry.last_seen_s` is documented as "since gateway boot".
+/// (docs/storage.md). `NodeEntry.last_seen` is documented as "since gateway boot".
 #[derive(Clone, Copy)]
 struct LinkStat {
     addr: u32,
     /// `Instant::as_secs()` truncated — wraps after 136 years of uptime.
     seen_s: u32,
-    rssi_dbm: i8,
+    rssi: i8,
     /// Saturating (reported as-is in the u32 wire field).
     uplinks: u16,
 }
@@ -197,12 +197,12 @@ impl Stats {
     const fn new() -> Self {
         Self([None; registry::CAPACITY])
     }
-    fn on_uplink(&mut self, addr: u32, rssi_dbm: i16) {
-        let rssi = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8;
+    fn on_uplink(&mut self, addr: u32, rssi: i16) {
+        let rssi = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8;
         let now = Instant::now().as_secs() as u32;
         if let Some(s) = self.0.iter_mut().flatten().find(|s| s.addr == addr) {
             s.seen_s = now;
-            s.rssi_dbm = rssi;
+            s.rssi = rssi;
             s.uplinks = s.uplinks.saturating_add(1);
             return;
         }
@@ -210,7 +210,7 @@ impl Stats {
             *slot = Some(LinkStat {
                 addr,
                 seen_s: now,
-                rssi_dbm: rssi,
+                rssi,
                 uplinks: 1,
             });
         }
@@ -362,7 +362,7 @@ async fn run(b: Board) {
 
     let band = read_band_setting(kv);
     let channel = read_u32_setting(kv, SET_CHANNEL, 0) as u8;
-    let mut stats_period_ms = read_u32_setting(kv, SET_STATS_PERIOD, 1000);
+    let mut stats_period_ms = read_u32_setting(kv, SET_STATS_PERIOD, 500);
 
     let radio = Spirit1::new(
         b.radio_spi,
@@ -483,12 +483,12 @@ async fn run(b: Board) {
         } else if let Some(rx) = net.recv(RECV_SLICE).await {
             // 3. One authenticated uplink: account, forward verbatim, then deliver a
             //    queued downlink into the node's post-uplink RX window (if any).
-            stats.on_uplink(rx.src, rx.rssi_dbm);
+            stats.on_uplink(rx.src, rx.rssi);
             STAT_UPLINKS.store(
                 STAT_UPLINKS.load(Ordering::Relaxed).wrapping_add(1),
                 Ordering::Relaxed,
             );
-            console::uplink(rx.src, rx.counter, rx.rssi_dbm, rx.lqi, rx.data()).await;
+            console::uplink(rx.src, rx.counter, rx.rssi, rx.lqi, rx.data()).await;
 
             if let Some(item) = queue.peek_for(rx.src, now_ms) {
                 let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
@@ -509,7 +509,7 @@ async fn run(b: Board) {
                     dest: rx.src,
                     item: item_id,
                     outcome,
-                    ack_rssi_dbm: net.last_ack().and_then(|m| m.rssi_dbm),
+                    ack_rssi: net.last_ack().and_then(|m| m.rssi),
                 })
                 .await;
             }
@@ -528,7 +528,7 @@ async fn run(b: Board) {
                 dest: node,
                 item: id,
                 outcome: mgmt::TX_EXPIRED,
-                ack_rssi_dbm: None,
+                ack_rssi: None,
             })
             .await;
             net.set_pending(node, queue.count_for(node) > 0);
@@ -539,8 +539,8 @@ async fn run(b: Board) {
 
         if stats_period_ms > 0 && last_stat.elapsed() >= Duration::from_millis(stats_period_ms as u64) {
             last_stat = Instant::now();
-            if let Ok(rssi_dbm) = net.rssi_sample().await {
-                console::radio_stat(RadioStat::Channel { channel, rssi_dbm }).await;
+            if let Ok(rssi) = net.rssi_sample().await {
+                console::radio_stat(RadioStat::Channel { channel, rssi }).await;
             }
         }
     }
@@ -628,10 +628,10 @@ async fn handle_mgmt(
                         addr: rec.addr,
                         name: rec.name.as_str(),
                         flags: rec.flags,
-                        last_seen_s: st
+                        last_seen: st
                             .map(|s| now_s.saturating_sub(s.seen_s))
                             .unwrap_or(mgmt::LAST_SEEN_NEVER),
-                        rssi_dbm: st.map(|s| s.rssi_dbm).unwrap_or(mgmt::RSSI_NONE),
+                        rssi: st.map(|s| s.rssi).unwrap_or(mgmt::RSSI_NONE),
                         uplinks: st.map(|s| s.uplinks as u32).unwrap_or(0),
                         queued: queue.count_for(rec.addr) as u8,
                     };
@@ -708,12 +708,12 @@ async fn handle_mgmt(
             Some(rec) => respond_record(req_id, &NodeKey { addr, key: rec.key }).await,
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
-        MgmtOp::PairingOpen { window_s, key } => {
+        MgmtOp::PairingOpen { window, key } => {
             if pairing.is_some() {
                 respond_empty(req_id, mgmt::MGMT_BUSY).await;
                 return;
             }
-            if window_s == 0 {
+            if window == 0 {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
@@ -721,12 +721,12 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_FULL).await;
                 return;
             }
-            info!(target: "gateway", "pairing window open ({} s)", window_s);
+            info!(target: "gateway", "pairing window open ({} s)", window);
             led.set_background(Some(PAIRING));
             *pairing = Some(PairingSession {
                 req_id,
                 key,
-                deadline: Instant::now() + Duration::from_secs(window_s as u64),
+                deadline: Instant::now() + Duration::from_secs(window as u64),
             });
             // The response is DELAYED — it resolves when the window does.
         }
@@ -737,16 +737,12 @@ async fn handle_mgmt(
             }
             respond_empty(req_id, mgmt::MGMT_OK).await; // …and the cancel acks
         }
-        MgmtOp::QueuePush {
-            node_addr,
-            ttl_s,
-            data,
-        } => {
+        MgmtOp::QueuePush { node_addr, ttl, data } => {
             if registry::find(buckets, node_addr).is_none() {
                 respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await;
                 return;
             }
-            let ttl = if ttl_s == 0 { DEFAULT_TTL_S } else { ttl_s };
+            let ttl = if ttl == 0 { DEFAULT_TTL_S } else { ttl };
             match queue.push(node_addr, ttl, data, now_ms) {
                 Ok(item) => {
                     // Pre-mark: the pending flag must ride the ACK of the node's NEXT
@@ -769,8 +765,8 @@ async fn handle_mgmt(
                 let entry = mgmt::QueueEntry {
                     node_addr: item.node_addr,
                     item: item.id,
-                    age_s: item.age_s(now_ms),
-                    ttl_s: item.ttl_s,
+                    age: item.age(now_ms),
+                    ttl: item.ttl,
                     data: item.data(),
                 };
                 if let Ok(bytes) = postcard::to_slice(&entry, &mut scratch) {

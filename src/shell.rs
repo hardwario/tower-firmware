@@ -46,6 +46,7 @@ use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
 use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
+use tower_shell_core::Window;
 
 use crate::console;
 use crate::storage::{FLIP_BUDGET, NS_SHELL, Nv, Scoped};
@@ -68,8 +69,11 @@ pub const R_NOT_FOUND: u8 = 1;
 pub const R_BAD_ARG: u8 = 2;
 pub const R_STORAGE: u8 = 3;
 /// The response exceeded the buffer and was truncated — the body is incomplete. Set by the
-/// dispatcher (not a handler) when [`Ctx`] overflowed, so a caller doesn't mistake a cut-off
-/// `/export` / `settings print` for a complete, successful one.
+/// **console** (single-window) dispatcher when the handler wrote past one [`RESP_CAP`] window
+/// ([`Ctx`]'s [`Window`] reports [`more`](Window::more)), so a caller doesn't mistake a cut-off
+/// `/export` / `settings print` for a complete, successful one. The **streaming** transport
+/// ([`stream_line`]) never truncates — it re-runs the handler to capture every window — so it
+/// never returns this.
 pub const R_TRUNCATED: u8 = 4;
 
 // ---- declarative settings ---------------------------------------------------
@@ -207,29 +211,44 @@ impl Outcome {
 
 /// Execution context for a command handler. Write the response via `write!(ctx, …)`
 /// (Ctx is [`core::fmt::Write`]); persistent state is `ctx.kv` / `ctx.settings`.
+///
+/// A handler always writes its **whole** response, obliviously — the `Ctx` keeps only the one
+/// [`Window`] `[skip, skip+RESP_CAP)` its driver asked for and discards the rest (while still
+/// counting the total). The console dispatcher uses a single `skip = 0` window (and flags
+/// [`R_TRUNCATED`] if the response spilled past it); the streaming transport re-runs the handler
+/// with an advancing `skip` to page the whole response out (see [`stream_line`]).
 pub struct Ctx<'a> {
     /// The shell's namespace-scoped EEPROM handle (`NS_SHELL`); settings are keyed by `u8` local.
     pub kv: Scoped,
     /// The merged settings table (SDK base + app).
     pub settings: SettingsTable,
     out: &'a mut String<RESP_CAP>,
-    /// Set when a write hit the `RESP_CAP` ceiling and the response body was truncated. The
-    /// dispatcher turns this into [`R_TRUNCATED`] so a scripting caller sees the output is
-    /// incomplete rather than a silent, R_OK-looking partial (e.g. an `/export` cut mid-setting).
-    overflowed: bool,
+    /// The captured window of this pass: `feed` keeps only its `[skip, skip+RESP_CAP)` slice into
+    /// `out`, and its [`total`](Window::total)/[`more`](Window::more) drive truncation (console)
+    /// and re-run paging (streaming).
+    window: Window,
+}
+
+impl<'a> Ctx<'a> {
+    /// A context that captures the window starting at byte `skip` of the handler's output into the
+    /// (cleared) `out` buffer. `out` is `RESP_CAP`-sized and the window cap is `RESP_CAP`, so every
+    /// captured segment fits — the `push_str`s below never lose bytes.
+    fn new(kv: Scoped, settings: SettingsTable, out: &'a mut String<RESP_CAP>, skip: usize) -> Self {
+        out.clear();
+        Self {
+            kv,
+            settings,
+            out,
+            window: Window::new(skip, RESP_CAP),
+        }
+    }
 }
 
 impl Write for Ctx<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // Truncate at the response cap instead of failing the whole write.
-        let mut end = s.len().min(RESP_CAP - self.out.len());
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end < s.len() {
-            self.overflowed = true; // couldn't fit all of `s` — body is now truncated
-        }
-        let _ = self.out.push_str(&s[..end]);
+        // Keep only the slice of `s` inside this pass's window; the rest is counted (for
+        // `total`/`more`) but dropped. Char-aligned by `feed`, so `out` stays valid UTF-8.
+        let _ = self.out.push_str(self.window.feed(s));
         Ok(())
     }
 }
@@ -490,6 +509,89 @@ pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
     run_line_with(kv.scope(NS_SHELL), app_commands, settings, line, out)
 }
 
+/// An async sink for a **streamed** shell response — the unbounded counterpart to the
+/// [`RESP_CAP`]-buffered [`run_line`], used by the radio remote-shell transport so a
+/// large reply (`/export`, `settings print`) is never truncated at 256 B. The producer
+/// calls [`push`](ShellSink::push) for body text of any length and [`done`](ShellSink::done)
+/// exactly once; the sink owns chunk framing (numbering + the `last` flag). Either
+/// returns `false` on a transport error, and streaming stops.
+///
+/// `async fn` in a trait is fine here: the executor is single-threaded (embassy), so
+/// the returned futures need no `Send` bound — the reason the lint fires.
+#[allow(async_fn_in_trait)]
+pub trait ShellSink {
+    /// Append response text; the sink transmits full frames as they fill.
+    async fn push(&mut self, text: &str) -> bool;
+    /// Flush the remainder as the final frame, carrying the authoritative `result`.
+    async fn done(&mut self, result: u8) -> bool;
+}
+
+/// Stream one command line's response through `sink` — like [`run_line`] but with **no
+/// `RESP_CAP` ceiling**, and with **no per-command knowledge**. It streams *every* command
+/// uniformly by **windowed re-run**: run the handler capturing one `RESP_CAP`-wide output
+/// [`Window`], push it, and if the handler wrote more, re-run with `skip` advanced to the next
+/// window — until the whole response has been paged out. A terse response (the common case)
+/// fits one window and runs exactly once; a big dump (`/export`, `settings print` with many app
+/// settings) re-executes a handful of times, which is fine — those commands are rare.
+///
+/// **Purity contract:** a handler whose output can exceed one window MUST be deterministic and
+/// side-effect-free, because it is re-run per window (re-running must reproduce the identical
+/// byte stream). All such SDK handlers are read-only (`export`, `settings print`, `resource`,
+/// `eeprom print`, `crash print`); the mutating handlers (`set`, `wipe`, `reboot`) emit a few
+/// bytes and so never re-run. App handlers that stream long output must follow the same rule.
+///
+/// Returns `(result, reboot)`; the caller acts on a reboot only after the sink has flushed its
+/// final chunk (the response must be on the air before a reset).
+pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
+    // Same guards as `run_line_with`: reject rather than silently truncate.
+    if line.len() > MAX_LINE {
+        sink.push("line too long").await;
+        sink.done(R_BAD_ARG).await;
+        return (R_BAD_ARG, false);
+    }
+    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
+        sink.push("too many arguments").await;
+        sink.done(R_BAD_ARG).await;
+        return (R_BAD_ARG, false);
+    }
+    let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
+    else {
+        sink.push("no shell served").await;
+        sink.done(R_NOT_FOUND).await;
+        return (R_NOT_FOUND, false);
+    };
+    let settings = SettingsTable {
+        base: BASE_SETTINGS,
+        app: app_settings,
+    };
+    let kv = kv.scope(NS_SHELL);
+    let toks = tokenize(line);
+    let Resolved::Cmd(cmd, arg_start) = resolve(&toks, app_commands) else {
+        sink.push("no such command").await;
+        sink.done(R_NOT_FOUND).await;
+        return (R_NOT_FOUND, false);
+    };
+    // Page the response out one RESP_CAP window per handler run. `skip` is char-aligned (a
+    // previous window's `skip + captured`), so no re-run ever splits a multi-byte char.
+    let mut out = String::<RESP_CAP>::new();
+    let mut skip = 0usize;
+    loop {
+        let (outcome, window) = {
+            let mut ctx = Ctx::new(kv, settings, &mut out, skip);
+            let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
+            (outcome, ctx.window)
+        };
+        if !sink.push(&out).await {
+            return (outcome.result, outcome.reboot); // transport aborted mid-stream
+        }
+        if !window.more() {
+            sink.done(outcome.result).await;
+            return (outcome.result, outcome.reboot);
+        }
+        skip += window.captured();
+    }
+}
+
 /// [`run_line`] against explicit shell state (the console path already holds it).
 fn run_line_with(
     kv: Scoped,
@@ -513,20 +615,18 @@ fn run_line_with(
     let toks = tokenize(line);
     match resolve(&toks, app) {
         Resolved::Cmd(cmd, arg_start) => {
-            let (outcome, truncated) = {
-                let mut ctx = Ctx {
-                    kv,
-                    settings,
-                    out,
-                    overflowed: false,
-                };
+            // One `skip = 0` window: the console transport caps a response at RESP_CAP.
+            let (outcome, window) = {
+                let mut ctx = Ctx::new(kv, settings, out, 0);
                 let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
-                (outcome, ctx.overflowed)
+                (outcome, ctx.window)
             };
-            // A response that overflowed the buffer would otherwise report R_OK on a silently
-            // truncated body; surface it as R_TRUNCATED so a scripting caller (`tower exec`) can
-            // tell the output is incomplete. Don't mask a handler's own non-zero result.
-            let result = if truncated && outcome.result == R_OK {
+            // A response that spilled past the single window would otherwise report R_OK on a
+            // silently truncated body; surface it as R_TRUNCATED so a scripting caller
+            // (`tower exec`) can tell the output is incomplete. Don't mask a handler's own
+            // non-zero result. (The streaming transport pages the rest out instead — see
+            // `stream_line` — so it never hits this.)
+            let result = if window.more() && outcome.result == R_OK {
                 R_TRUNCATED
             } else {
                 outcome.result
@@ -649,20 +749,31 @@ erases the WHOLE store (keys, peers, settings) and reboots"
     }
 }
 
+/// One setting's line for `print` (`name = value`) or `export` (`/system settings
+/// set name=value`), trailing CRLF included. Shared by the sync handlers below and the
+/// streaming path ([`stream_line`]) so the two formats can never drift.
+fn write_setting(kv: Scoped, s: &Setting, export: bool, out: &mut impl Write) {
+    let mut val = String::<MAX_SETTING>::new();
+    // `get`/`print` show an unset address as the *effective* UID-derived value — but
+    // exporting that literal would pin it on whatever device replays the export (two
+    // nodes sharing one radio address share a replay lane: the lower-counter one goes
+    // silently dead). Export the stored `auto` sentinel instead.
+    if export && matches!(s.kind, Kind::Addr) && stored_addr(kv, s.key).unwrap_or(0) == 0 {
+        let _ = val.push_str("auto");
+    } else {
+        read_value(kv, s, &mut val);
+    }
+    if export {
+        let _ = write!(out, "/system settings set {}={}\r\n", s.name, val);
+    } else {
+        let _ = write!(out, "{} = {}\r\n", s.name, val);
+    }
+}
+
 fn cmd_export(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let table = ctx.settings;
     for s in table.iter() {
-        let mut val = String::<MAX_SETTING>::new();
-        // `get` deliberately shows an unset/auto address as the *effective* UID-derived
-        // value — but exporting that literal would pin it on whatever device replays
-        // the export (two nodes sharing one radio address share a replay lane: the
-        // lower-counter one goes silently dead). Export the stored sentinel instead.
-        if matches!(s.kind, Kind::Addr) && stored_addr(ctx.kv, s.key).unwrap_or(0) == 0 {
-            let _ = val.push_str("auto");
-        } else {
-            read_value(ctx.kv, s, &mut val);
-        }
-        let _ = write!(ctx, "/system settings set {}={}\r\n", s.name, val);
+        write_setting(ctx.kv, s, true, ctx);
     }
     Outcome::ok()
 }
@@ -682,9 +793,7 @@ fn stored_addr(kv: Scoped, key: u8) -> Option<u32> {
 fn settings_print(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let table = ctx.settings;
     for s in table.iter() {
-        let mut val = String::<MAX_SETTING>::new();
-        read_value(ctx.kv, s, &mut val);
-        let _ = write!(ctx, "{} = {}\r\n", s.name, val);
+        write_setting(ctx.kv, s, false, ctx);
     }
     Outcome::ok()
 }

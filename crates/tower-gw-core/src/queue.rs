@@ -6,7 +6,7 @@
 //!   per-node array for every peer would cost multiples of that on the 20 KB part.
 //! * **Per-node FIFO** ([`PER_NODE_CAP`] deep): commands to one node deliver in order,
 //!   one per uplink cycle (each delivery's ACK re-advertises the pending flag).
-//! * **TTL expiry**: an item that outlives its `ttl_s` is dropped and reported
+//! * **TTL expiry**: an item that outlives its `ttl` is dropped and reported
 //!   (`TX_EXPIRED`), never delivered stale.
 //! * **Stable u16 ids** (monotonic from 1 per boot, 0 reserved = "not a queue item"
 //!   in `RadioStat::Tx`): the dequeue handle and the TX-report correlator.
@@ -39,7 +39,7 @@ pub struct Item {
     pub id: u16,
     pub node_addr: u32,
     pub enqueued_at_ms: u64,
-    pub ttl_s: u16,
+    pub ttl: u16,
     /// Pool-insertion order — the per-node FIFO key (ids alone would break on u16 wrap).
     order: u32,
     len: u8,
@@ -51,12 +51,12 @@ impl Item {
         &self.buf[..self.len as usize]
     }
 
-    pub fn age_s(&self, now_ms: u64) -> u16 {
+    pub fn age(&self, now_ms: u64) -> u16 {
         (now_ms.saturating_sub(self.enqueued_at_ms) / 1000).min(u16::MAX as u64) as u16
     }
 
     fn expired(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.enqueued_at_ms) >= (self.ttl_s as u64) * 1000
+        now_ms.saturating_sub(self.enqueued_at_ms) >= (self.ttl as u64) * 1000
     }
 }
 
@@ -85,7 +85,7 @@ impl Queue {
     }
 
     /// Enqueue `data` for `node_addr`; returns the item id (the dequeue / TX-report handle).
-    pub fn push(&mut self, node_addr: u32, ttl_s: u16, data: &[u8], now_ms: u64) -> Result<u16, PushError> {
+    pub fn push(&mut self, node_addr: u32, ttl: u16, data: &[u8], now_ms: u64) -> Result<u16, PushError> {
         if data.is_empty() || data.len() > MAX_ITEM {
             return Err(PushError::BadPayload);
         }
@@ -105,7 +105,7 @@ impl Queue {
             id,
             node_addr,
             enqueued_at_ms: now_ms,
-            ttl_s,
+            ttl,
             order: self.next_order,
             len: data.len() as u8,
             buf,
@@ -281,20 +281,20 @@ mod tests {
         let mut q = Queue::new();
         let id = q.push(NODE_A, 600, b"x", 5_000).unwrap();
         let it = q.iter().find(|it| it.id == id).unwrap();
-        assert_eq!(it.age_s(65_000), 60);
-        assert_eq!(it.age_s(4_000), 0, "clock skew clamps to 0, not underflow");
+        assert_eq!(it.age(65_000), 60);
+        assert_eq!(it.age(4_000), 0, "clock skew clamps to 0, not underflow");
     }
 
-    /// `age_s` saturates at u16::MAX rather than wrapping for an item older than ~18 h.
+    /// `age` saturates at u16::MAX rather than wrapping for an item older than ~18 h.
     #[test]
-    fn age_s_saturates() {
+    fn age_saturates() {
         let mut q = Queue::new();
         let id = q.push(NODE_A, u16::MAX, b"x", 0).unwrap();
         let it = q.iter().find(|it| it.id == id).unwrap();
-        assert_eq!(it.age_s(100_000_000), u16::MAX, "age clamps, not wraps");
+        assert_eq!(it.age(100_000_000), u16::MAX, "age clamps, not wraps");
     }
 
-    /// A `ttl_s == 0` item is expired the instant it is queued (`0 >= 0`): peek skips it and
+    /// A `ttl == 0` item is expired the instant it is queued (`0 >= 0`): peek skips it and
     /// expire() reports it. Degenerate, but a reachable host input.
     #[test]
     fn zero_ttl_expires_immediately() {

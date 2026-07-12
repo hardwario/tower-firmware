@@ -61,7 +61,7 @@ config::apply(&mut radio, &RfConfig { band: config::Band::Eu868, channel: 0 }).a
 // raw frames (≤96 B), nIRQ-driven, with signal quality:
 radio.tx(&bytes, /*use_csma=*/ false, Duration::from_millis(200)).await?;
 let (len, q) = radio.rx(&mut buf, Duration::from_secs(5)).await?;
-//   q: rssi_dbm, rssi_raw, lqi (PQI), sqi, afc_raw
+//   q: rssi, rssi_raw, lqi (PQI), sqi, afc_raw
 
 radio.cw_test(true).await?;            // unmodulated carrier (bring-up / range)
 radio.to_standby().await?;             // low-power states: to_ready/to_standby/to_sleep
@@ -159,7 +159,7 @@ match net.send(GW_ID, b"hello", /*confirmed=*/ true, /*reps=*/ 3).await {
 // Receive: authenticate, apply the counter/replay rule, auto-ACK a confirmed
 // frame (caching it so a retransmit re-sends the identical ACK, no re-deliver).
 if let Some(rx) = net.recv(Duration::from_secs(10)).await {
-    let _ = (rx.src, rx.counter, rx.rssi_dbm, rx.confirmed, rx.data());
+    let _ = (rx.src, rx.counter, rx.rssi, rx.confirmed, rx.data());
 }
 ```
 

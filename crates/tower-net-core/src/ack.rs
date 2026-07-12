@@ -24,7 +24,7 @@ pub mod ack_flags {
 pub struct AckMeta {
     /// RSSI at which the receiver heard our frame, as it packed it (clamped i8 dBm);
     /// `None` on a 4-byte (no-RSSI) ACK.
-    pub rssi_dbm: Option<i8>,
+    pub rssi: Option<i8>,
     /// The ACKer holds a queued downlink for us ([`ack_flags::PENDING`]); always
     /// `false` on a pre-v3 (≤ 5-byte) ACK.
     pub pending: bool,
@@ -35,7 +35,7 @@ pub struct AckMeta {
 #[must_use]
 pub fn ack_meta(payload: &[u8]) -> AckMeta {
     AckMeta {
-        rssi_dbm: payload.get(4).map(|&b| b as i8),
+        rssi: payload.get(4).map(|&b| b as i8),
         pending: payload.get(5).is_some_and(|&f| f & ack_flags::PENDING != 0),
     }
 }
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(
             ack_meta(&42u32.to_le_bytes()),
             AckMeta {
-                rssi_dbm: None,
+                rssi: None,
                 pending: false
             }
         );
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(
             ack_meta(&p5),
             AckMeta {
-                rssi_dbm: Some(-67),
+                rssi: Some(-67),
                 pending: false
             }
         );
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(
             ack_meta(&p6),
             AckMeta {
-                rssi_dbm: Some(-67),
+                rssi: Some(-67),
                 pending: true
             }
         );
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(
             ack_meta(&p6),
             AckMeta {
-                rssi_dbm: Some(-67),
+                rssi: Some(-67),
                 pending: false
             }
         );

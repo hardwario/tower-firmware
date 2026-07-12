@@ -66,10 +66,10 @@ async fn run(b: Board) {
                 info!(
                     target: "gw",
                     "src={:08X} cnt={} seq={} vbat={}mV temp={}.{}°C rssi={}dBm (ACKed)",
-                    rx.src, rx.counter, seq, vbat, temp / 10, (temp % 10).abs(), rx.rssi_dbm
+                    rx.src, rx.counter, seq, vbat, temp / 10, (temp % 10).abs(), rx.rssi
                 );
             } else {
-                info!(target: "gw", "src={:08X} cnt={} {} B rssi={}dBm (ACKed)", rx.src, rx.counter, d.len(), rx.rssi_dbm);
+                info!(target: "gw", "src={:08X} cnt={} {} B rssi={}dBm (ACKed)", rx.src, rx.counter, d.len(), rx.rssi);
             }
         }
     }

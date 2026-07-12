@@ -93,7 +93,7 @@ async fn sniffer(radio: &mut Spirit1) -> ! {
                 info!(
                     target: "sniffer",
                     "rx len={} seq={} rssi={}dBm(0x{:02X}) pqi={} sqi={} afc={}{}",
-                    len, seq, q.rssi_dbm, q.rssi_raw, q.lqi, q.sqi, q.afc_raw,
+                    len, seq, q.rssi, q.rssi_raw, q.lqi, q.sqi, q.afc_raw,
                     if gap > 0 { " <gap!>" } else { "" }
                 );
             }

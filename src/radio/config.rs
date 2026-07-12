@@ -99,7 +99,7 @@ impl Default for RfConfig {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SignalQuality {
     /// RSSI in dBm.
-    pub rssi_dbm: i16,
+    pub rssi: i16,
     /// Raw RSSI register value (0.5 dB/step).
     pub rssi_raw: u8,
     /// Link/packet quality indicator (the SPIRIT1's PQI).

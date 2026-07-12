@@ -8,9 +8,9 @@
 //! STOPs (µA) and the SPIRIT1 sleeps — downlinks reach the node via the gateway's
 //! queue: each confirmed uplink's ACK carries a *pending* flag, and when set the node
 //! holds a short RX window, executes the delivered remote-shell line in the standard
-//! shell dispatcher ([`shell::run_line`]), and streams the response back as chunked
-//! radio messages. No tab completion over the air — completion is a per-transport
-//! feature and the radio transport simply doesn't offer it.
+//! shell dispatcher ([`shell::stream_line`]) and streams the response back chunk-by-chunk
+//! (`RadioSink`) — so a full `/export` is never truncated at a fixed buffer. No tab
+//! completion over the air — completion is a per-transport feature the radio doesn't offer.
 //!
 //! Pairing:
 //! * **OTA** — hold the button ≥1 s while unprovisioned: the node runs the 3-way JOIN
@@ -32,8 +32,8 @@
 //! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)) — this
 //! app's own behaviour begins after that.
 //!
-//! Settings (remote-shell reconfigurable, `/system settings set …`): `temp-period`,
-//! `temp-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
+//! Settings (remote-shell reconfigurable, `/system settings set …`): `therm-period`,
+//! `therm-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
 //! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable);
 //! button timing `debounce-press`, `debounce-release`, `click-timeout`, `hold-time`
 //! (ms — applied at boot). The `/button simulate <ms>` command injects a synthetic press
@@ -56,6 +56,7 @@ use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW, SendResult};
+use tower::shell::ShellSink;
 use tower::storage::{NS_APP, NS_SHELL, Nv};
 use tower::tmp112::{self, Tmp112};
 use tower::{app, board::Board, button, console, led, shell, watchdog};
@@ -83,8 +84,8 @@ struct Provisioned {
 
 // --- settings (NS_SHELL locals) ----------------------------------------------------
 
-const SET_TEMP_PERIOD: u8 = 0x10;
-const SET_TEMP_DELTA: u8 = 0x11;
+const SET_THERM_PERIOD: u8 = 0x10;
+const SET_THERM_DELTA: u8 = 0x11;
 const SET_ACCEL: u8 = 0x12;
 const SET_HEARTBEAT: u8 = 0x13;
 
@@ -114,14 +115,14 @@ const LED_HOLD_MS: u32 = 1000;
 
 static BTN_SETTINGS: &[shell::Setting] = &[
     shell::Setting {
-        key: SET_TEMP_PERIOD,
-        name: "temp-period",
+        key: SET_THERM_PERIOD,
+        name: "therm-period",
         kind: shell::Kind::Uint { min: 5, max: 86_400 },
         default: "60",
     },
     shell::Setting {
-        key: SET_TEMP_DELTA,
-        name: "temp-delta",
+        key: SET_THERM_DELTA,
+        name: "therm-delta",
         kind: shell::Kind::Uint { min: 0, max: 10_000 },
         default: "50",
     },
@@ -483,10 +484,10 @@ async fn run(b: Board) {
             Either4::Second(()) => {
                 let now = Instant::now();
                 if now >= next_temp {
-                    let period = read_u32_setting(kv, SET_TEMP_PERIOD, 60) as u64;
+                    let period = read_u32_setting(kv, SET_THERM_PERIOD, 60) as u64;
                     next_temp = now + Duration::from_secs(period.max(5));
                     if let Some(millic) = measure_temp(&mut bus).await {
-                        let delta_mc = read_u32_setting(kv, SET_TEMP_DELTA, 50) as i32 * 10;
+                        let delta_mc = read_u32_setting(kv, SET_THERM_DELTA, 50) as i32 * 10;
                         let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
                         let changed = last_temp_sent.is_none_or(|last| (millic - last).abs() >= delta_mc);
                         let stale = last_temp_tx.elapsed() >= Duration::from_secs(heartbeat);
@@ -654,6 +655,11 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
 /// (same boot); a reboot-command redelivery after the reboot re-executes, bounded
 /// by the item's TTL and ended by the first delivery ACK that gets through.
 static LAST_REMOTE_CMD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The host-process `epoch` of the last remote command (paired with `LAST_REMOTE_CMD`).
+/// The dedup keys on `(epoch, cmd_id)`, so a fresh host that reuses a low `cmd_id`
+/// can't be mistaken for a re-delivery this node already ran. Two u32s, not one u64:
+/// thumbv6m has no 64-bit atomic — and single-task access needs no cross-word atomicity.
+static LAST_REMOTE_EPOCH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
 /// whether a downlink actually arrived (false = window expired, stop chaining).
@@ -670,27 +676,43 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
         if rx.src != gw_addr {
             continue; // another node's traffic — not our downlink
         }
-        let (cmd_id, result, reboot, out) = match decode_node_cmd(rx.data()) {
-            Ok(NodeCmd::Shell { cmd_id, line }) => {
+        match decode_node_cmd(rx.data()) {
+            Ok(NodeCmd::Shell { epoch, cmd_id, line }) => {
+                let mut sink = RadioSink::new(net, gw_addr, cmd_id);
                 // The gateway's queue is at-least-once: if our delivery ACK is lost it
                 // re-sends the same command under a fresh counter (the replay lane
                 // can't help). Executing twice is wrong for anything non-idempotent
-                // (`system reboot`, a toggling set), so dedup by cmd_id: on a repeat,
-                // skip run_line and just re-complete the protocol with the cached
-                // result (the full text already went up with the first execution).
+                // (`system reboot`, a toggling set), so dedup on `(epoch, cmd_id)`: on a
+                // repeat, skip execution and just re-complete the protocol with the cached
+                // result (the full text already went up with the first execution). The
+                // host stamps a random `epoch` per process, so a fresh host reusing a low
+                // `cmd_id` is never mistaken for a re-delivery this node already ran.
                 use core::sync::atomic::Ordering::Relaxed;
                 let last = LAST_REMOTE_CMD.load(Relaxed);
-                if last & (1 << 24) != 0 && (last & 0xFFFF) as u16 == cmd_id {
+                if last & (1 << 24) != 0
+                    && (last & 0xFFFF) as u16 == cmd_id
+                    && LAST_REMOTE_EPOCH.load(Relaxed) == epoch
+                {
                     let result = ((last >> 16) & 0xFF) as u8;
                     info!(target: "button", "remote shell: duplicate cmd {} — not re-run", cmd_id);
-                    send_shell_chunks(net, gw_addr, cmd_id, result, "").await;
+                    sink.done(result).await; // empty reply, cached result
                     return true;
                 }
                 info!(target: "button", "remote shell: {}", line);
-                let mut out: heapless::String<{ shell::RESP_CAP }> = heapless::String::new();
-                let (result, reboot) = shell::run_line(line, &mut out);
+                // Stream the response chunk-by-chunk — no fixed response buffer, so a full
+                // `/export` or `settings print` is never truncated (the dispatcher owns the
+                // unbounded producers; `RadioSink` owns the radio framing).
+                let (result, reboot) = shell::stream_line(line, &mut sink).await;
+                // Epoch first, then the valid-flagged CMD word: a reader that sees the
+                // valid bit has already seen this epoch (single task, but keep the order).
+                LAST_REMOTE_EPOCH.store(epoch, Relaxed);
                 LAST_REMOTE_CMD.store((1 << 24) | ((result as u32) << 16) | cmd_id as u32, Relaxed);
-                (cmd_id, result, reboot, out)
+                if reboot {
+                    // The response is on the air; the reboot request came over radio, so
+                    // there is no console to flush — reset now.
+                    cortex_m::peripheral::SCB::sys_reset();
+                }
+                return true;
             }
             Err(tower_protocol::Error::BadVersion { got }) => {
                 warn!(
@@ -705,55 +727,101 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 warn!(target: "button", "downlink malformed — dropped");
                 return false;
             }
-        };
-        send_shell_chunks(net, gw_addr, cmd_id, result, out.as_str()).await;
-        if reboot {
-            // The response is on the air; the reboot request came over radio, so there
-            // is no console to flush — reset now.
-            cortex_m::peripheral::SCB::sys_reset();
         }
-        return true;
     }
 }
 
-/// Stream a remote-shell response as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
-/// text bytes each, split at char boundaries; empty responses still send one final
-/// chunk so the host always completes the command).
-async fn send_shell_chunks(net: &mut Net, gw_addr: u32, cmd_id: u16, result: u8, text: &str) {
-    let mut rest = text;
-    let mut chunk: u16 = 0;
-    loop {
-        let mut take = rest.len().min(RADIO_SHELL_CHUNK);
-        while take > 0 && !rest.is_char_boundary(take) {
-            take -= 1;
-        }
-        let (head, tail) = rest.split_at(take);
-        let last = tail.is_empty();
-        let msg = NodeMsg::Shell(NodeShellChunk {
+/// Streams a remote-shell response back as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
+/// text bytes each, confirmed). Owns chunk numbering + the `last` flag, so the shell
+/// dispatcher ([`shell::stream_line`]) can emit an unbounded response through a single
+/// [`RADIO_SHELL_CHUNK`]-sized buffer — no `RESP_CAP` ceiling on `/export` & friends.
+struct RadioSink<'a> {
+    net: &'a mut Net,
+    gw_addr: u32,
+    cmd_id: u16,
+    chunk: u16,
+    buf: heapless::String<RADIO_SHELL_CHUNK>,
+    ok: bool,
+}
+
+impl<'a> RadioSink<'a> {
+    fn new(net: &'a mut Net, gw_addr: u32, cmd_id: u16) -> Self {
+        Self {
+            net,
+            gw_addr,
             cmd_id,
+            chunk: 0,
+            buf: heapless::String::new(),
+            ok: true,
+        }
+    }
+
+    /// Transmit the buffered text as one chunk (confirmed). `last` marks the final frame;
+    /// intermediate chunks carry `result = 0` (the host reads `result` only on `last`).
+    async fn flush(&mut self, last: bool, result: u8) -> bool {
+        let msg = NodeMsg::Shell(NodeShellChunk {
+            cmd_id: self.cmd_id,
             result,
-            chunk,
+            chunk: self.chunk,
             last,
-            text: head,
+            text: self.buf.as_str(),
         });
-        let mut buf = [0u8; MAX_RADIO_PAYLOAD];
-        let Ok(n) = encode_node_msg(&msg, &mut buf) else {
-            return;
+        let mut wire = [0u8; MAX_RADIO_PAYLOAD];
+        let Ok(n) = encode_node_msg(&msg, &mut wire) else {
+            self.ok = false;
+            return false;
         };
-        if !matches!(
-            net.send(gw_addr, &buf[..n], true, CHUNK_REPS).await,
+        let delivered = matches!(
+            self.net.send(self.gw_addr, &wire[..n], true, CHUNK_REPS).await,
             SendResult::Delivered
-        ) {
+        );
+        self.buf.clear();
+        self.chunk = self.chunk.wrapping_add(1);
+        if !delivered {
             // A lost chunk shows up host-side as a chunk gap (incomplete response);
             // aborting beats streaming the tail of a response the host can't anchor.
-            warn!(target: "button", "response chunk {} undelivered — aborting", chunk);
-            return;
+            warn!(target: "button", "response chunk {} undelivered — aborting", self.chunk - 1);
+            self.ok = false;
         }
-        if last {
-            return;
+        delivered
+    }
+}
+
+impl shell::ShellSink for RadioSink<'_> {
+    async fn push(&mut self, text: &str) -> bool {
+        if !self.ok {
+            return false;
         }
-        rest = tail;
-        chunk = chunk.wrapping_add(1);
+        let mut rest = text;
+        while !rest.is_empty() {
+            let space = RADIO_SHELL_CHUNK - self.buf.len();
+            let mut take = rest.len().min(space);
+            while take > 0 && !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+            if take == 0 {
+                // A multi-byte char won't fit the remaining space — flush and retry.
+                if !self.flush(false, 0).await {
+                    return false;
+                }
+                continue;
+            }
+            let _ = self.buf.push_str(&rest[..take]);
+            rest = &rest[take..];
+            if self.buf.len() == RADIO_SHELL_CHUNK && !self.flush(false, 0).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn done(&mut self, result: u8) -> bool {
+        // Always send a final `last` frame (empty if nothing buffered) so the host
+        // completes the command — matching the old one-empty-chunk behaviour.
+        if !self.ok {
+            return false;
+        }
+        self.flush(true, result).await
     }
 }
 
@@ -837,14 +905,14 @@ async fn handle_mgmt(
             console::flush().await;
             cortex_m::peripheral::SCB::sys_reset();
         }
-        MgmtOp::JoinOpen { window_s } => {
-            if window_s == 0 {
+        MgmtOp::JoinOpen { window } => {
+            if window == 0 {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
             led.set_background(Some(JOINING));
             let _ = net.wake().await;
-            let joined = net.join(addr, Duration::from_secs(window_s as u64)).await;
+            let joined = net.join(addr, Duration::from_secs(window as u64)).await;
             let _ = net.sleep().await;
             match joined {
                 Some((gw_addr, key)) => {

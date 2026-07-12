@@ -95,7 +95,7 @@ async fn run(b: Board) {
                 info!(
                     target: "fhss",
                     "rx uplink seq={} on ch={} slot={} src={:08X} rssi={}dBm{}",
-                    seq_of(rx.data()), s.channel, s.slot, rx.src, rx.rssi_dbm,
+                    seq_of(rx.data()), s.channel, s.slot, rx.src, rx.rssi,
                     if rx.confirmed { " (ACKed)" } else { "" }
                 );
             } else if s.slot.is_multiple_of(30) {

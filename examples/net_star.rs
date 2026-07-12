@@ -94,7 +94,7 @@ async fn run(b: Board) {
                 info!(
                     target: "star",
                     "rx node {} (src={:08X}) cnt={} rssi={}dBm \"{}\" (ACKed, per-node key)",
-                    who, rx.src, rx.counter, rx.rssi_dbm, text
+                    who, rx.src, rx.counter, rx.rssi, text
                 );
             }
         }

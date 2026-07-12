@@ -83,7 +83,7 @@ async fn run(b: Board) {
             // Listen for B's PONG (it auto-ACKs us via recv).
             if let Some(rx) = net.recv(Duration::from_millis(1500)).await {
                 let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
-                info!(target: "p2p", "A: rx \"{}\" from {:08X} rssi={}dBm", text, rx.src, rx.rssi_dbm);
+                info!(target: "p2p", "A: rx \"{}\" from {:08X} rssi={}dBm", text, rx.src, rx.rssi);
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;
@@ -96,7 +96,7 @@ async fn run(b: Board) {
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(5)).await {
                 let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
-                info!(target: "p2p", "B: rx \"{}\" from {:08X} rssi={}dBm (ACKed)", text, rx.src, rx.rssi_dbm);
+                info!(target: "p2p", "B: rx \"{}\" from {:08X} rssi={}dBm (ACKed)", text, rx.src, rx.rssi);
                 // Pong back, confirmed.
                 let mut msg = [0u8; 8];
                 msg[..4].copy_from_slice(b"PONG");

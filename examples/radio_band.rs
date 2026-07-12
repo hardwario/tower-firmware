@@ -121,7 +121,7 @@ async fn run(b: Board) {
                     info!(
                         target: "band",
                         "rx on {} MHz: src={:08X} cnt={} node_tag={} rssi={}dBm (ACKed)",
-                        band_mhz(band), rx.src, rx.counter, tag, rx.rssi_dbm
+                        band_mhz(band), rx.src, rx.counter, tag, rx.rssi
                     );
                 }
             }

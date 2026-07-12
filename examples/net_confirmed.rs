@@ -107,7 +107,7 @@ async fn gateway(net: &mut Net) -> ! {
             info!(
                 target: "confirmed",
                 "rx src={:08X} cnt={} rssi={}dBm confirmed={} \"{}\" (ACKed)",
-                rx.src, rx.counter, rx.rssi_dbm, rx.confirmed, text
+                rx.src, rx.counter, rx.rssi, rx.confirmed, text
             );
         }
     }

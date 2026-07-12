@@ -421,7 +421,7 @@ impl Spirit1 {
         let (pqi, sqi) = self.link_quality()?;
         let afc = self.afc_corr()?;
         Ok(SignalQuality {
-            rssi_dbm: super::config::rssi_to_dbm(rssi_raw),
+            rssi: super::config::rssi_to_dbm(rssi_raw),
             rssi_raw,
             lqi: pqi,
             sqi,

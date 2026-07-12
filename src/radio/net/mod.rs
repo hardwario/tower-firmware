@@ -159,7 +159,7 @@ pub enum Access {
 pub struct Received {
     pub src: u32,
     pub counter: u32,
-    pub rssi_dbm: i16,
+    pub rssi: i16,
     /// Link/packet quality indicator (the SPIRIT1's PQI) for this reception.
     pub lqi: u8,
     /// Whether the sender requested confirmation (an ACK was sent back).
@@ -629,7 +629,7 @@ impl Net {
                 self.lane_accept(hdr.src, hdr.counter);
                 let confirmed = hdr.flags & flags::CONFIRMED != 0;
                 if confirmed {
-                    self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+                    self.send_ack(hdr.src, hdr.counter, q.rssi).await;
                 }
                 let plen = range.end - range.start;
                 let mut out = [0u8; MAX_PAYLOAD];
@@ -637,7 +637,7 @@ impl Net {
                 Some(Received {
                     src: hdr.src,
                     counter: hdr.counter,
-                    rssi_dbm: q.rssi_dbm,
+                    rssi: q.rssi,
                     lqi: q.lqi,
                     confirmed,
                     len: plen,
@@ -653,7 +653,7 @@ impl Net {
                 // duplicates under that race (see docs/radio.md). Only confirmed frames were ACKed,
                 // so only re-ACK confirmed ones.
                 if hdr.flags & flags::CONFIRMED != 0 {
-                    self.send_ack(hdr.src, hdr.counter, q.rssi_dbm).await;
+                    self.send_ack(hdr.src, hdr.counter, q.rssi).await;
                 }
                 None
             }
@@ -722,7 +722,7 @@ impl Net {
     /// Build, cache and transmit an ACK for a received confirmed frame. The ACK
     /// uses the ACKer's *own* fresh counter (docs/radio.md); the acknowledged counter rides
     /// in the payload.
-    async fn send_ack(&mut self, dest: u32, acked: u32, rssi_dbm: i16) {
+    async fn send_ack(&mut self, dest: u32, acked: u32, rssi: i16) {
         if self.txc.locked() {
             return; // fail closed: can't safely allocate a counter (nonce safety); sender retries
         }
@@ -731,10 +731,10 @@ impl Net {
         let ack_counter = self.txc.counter();
         let mut payload = [0u8; 6];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
-        // Clamp to i8 range before packing: rssi_dbm is i16 and the SPIRIT1 noise floor reaches
+        // Clamp to i8 range before packing: rssi is i16 and the SPIRIT1 noise floor reaches
         // below −128 dBm, where a bare `as i8` wraps (−130 → +126) and reports a strong link for
         // the weakest one. Clamp so the reported margin is monotonic at the edges.
-        payload[4] = rssi_dbm.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
+        payload[4] = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
         // Flags byte (wire v3): advertise a queued downlink so a sleeping sender holds an RX
         // window open after this uplink. Appending is interop-safe — the ACK acceptance rule is
         // `len >= 4` (pinned in tower-net-core), so pre-v3 peers simply ignore the byte.

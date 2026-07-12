@@ -119,7 +119,7 @@ async fn run(b: Board) {
                 info!(
                     target: "afa",
                     "rx seq={} on ch={} src={:08X} rssi={}dBm{}",
-                    seq_of(rx.data()), net.afa_channel(), rx.src, rx.rssi_dbm,
+                    seq_of(rx.data()), net.afa_channel(), rx.src, rx.rssi,
                     if rx.confirmed { " (ACKed)" } else { "" }
                 );
             }

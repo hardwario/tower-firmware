@@ -107,7 +107,7 @@ async fn gateway(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
                         target: "secping",
                         "AUTH OK: src={:08X} cnt={} confirmed={} rssi={}dBm | \"{}\"",
                         hdr.src, hdr.counter, hdr.flags & flags::CONFIRMED != 0,
-                        q.rssi_dbm, text
+                        q.rssi, text
                     );
                 }
                 Err(frame::FrameError::AuthFail) => warn!(target: "secping", "CCM auth FAIL — dropped"),

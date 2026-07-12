@@ -493,7 +493,7 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 | `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
 | `Dropped` | 6 | T→H | count of dropped frames |
 | `MgmtResponse` | 7 | T→H | req_id, result, chunk, last, data (chunked mgmt reply; wire v3 gateway link) |
-| `Uplink` | 8 | T→H | src, counter, rssi_dbm, lqi, data (gateway forwards a node's radio payload verbatim) |
+| `Uplink` | 8 | T→H | src, counter, rssi, lqi, data (gateway forwards a node's radio payload verbatim) |
 | `RadioStat` | 9 | T→H | channel RSSI sample, or a TX-delivery outcome |
 | `ShellCommand` | 16 | H→T | cmd_id, line |
 | `ShellComplete` | 17 | H→T | req_id, line, cursor |

@@ -117,7 +117,7 @@ async fn gateway(radio: &mut Spirit1) -> ! {
                     _ => "",
                 };
                 last = Some(seq);
-                info!(target: "sleep", "rx seq={} len={} rssi={}dBm{}", seq, len, q.rssi_dbm, relink);
+                info!(target: "sleep", "rx seq={} len={} rssi={}dBm{}", seq, len, q.rssi, relink);
             }
             Err(tower::radio::RadioError::Timeout) => {
                 info!(target: "sleep", "...idle (no frame in 8 s)");

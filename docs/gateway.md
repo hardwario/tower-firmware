@@ -47,7 +47,7 @@ set (full table in [`console.md`](console.md)):
 | Type | # | Dir | Payload |
 |---|---|---|---|
 | `MgmtResponse` | 7 | T→H | `req_id, result, chunk, last, data` (chunked reply, `ShellResponse`-style) |
-| `Uplink` | 8 | T→H | `src, counter, rssi_dbm, lqi, data` (a node's radio payload, forwarded verbatim) |
+| `Uplink` | 8 | T→H | `src, counter, rssi, lqi, data` (a node's radio payload, forwarded verbatim) |
 | `RadioStat` | 9 | T→H | ambient channel-RSSI sample, or a per-TX delivery outcome |
 | `MgmtRequest` | 18 | H→T | `req_id, op` (a `mgmt::MgmtOp`) |
 
@@ -70,12 +70,12 @@ Two **independently versioned** schemas ride these frames:
 | `NodeAdd {addr,key,name,flags}` | gateway | — (install a cable-paired node) |
 | `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | — |
 | `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key) |
-| `PairingOpen {window_s,key}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
-| `QueuePush {node_addr,ttl_s,data}` | gateway | `QueueId` |
+| `PairingOpen {window,key}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
+| `QueuePush {node_addr,ttl,data}` | gateway | `QueueId` |
 | `QueueList {node_addr}` / `QueueDrop {node_addr,item?}` | gateway | `QueueEntry` × N / — |
 | `StatsConfig {channel_period_ms}` | gateway | — (RAM override of `stats-period`) |
 | `Provision {addr?,gw_addr,key,band,channel}` | node | `ProvisionAck` |
-| `JoinOpen {window_s}` | node | `Joined` (delayed) |
+| `JoinOpen {window}` | node | `Joined` (delayed) |
 
 Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FULL`(4),
 `BUSY`(5), `STORAGE`(6), `TIMEOUT`(7). An op a device does not serve → `UNSUPPORTED`; a
@@ -113,8 +113,8 @@ of it is remote-shell reconfigurable (`/system settings set …`).
 
 | setting | kind | default | range / values | effect |
 |---|---|---|---|---|
-| `temp-period` | uint s | `60` | 5..86400 | temperature measure/send cadence |
-| `temp-delta` | uint c°C | `50` | 0..10000 | send when |ΔT| ≥ this; `0` = every period |
+| `therm-period` | uint s | `60` | 5..86400 | temperature measure/send cadence |
+| `therm-delta` | uint c°C | `50` | 0..10000 | send when |ΔT| ≥ this; `0` = every period |
 | `accel` | enum | `medium` | off/low/medium/high | tilt sensitivity (**boot-applied**) |
 | `heartbeat` | uint s | `900` | 60..86400 | max interval between uplinks (`NodeInfo`) |
 | `press` | bool | `off` | on/off | master enable — Press events |
@@ -193,7 +193,7 @@ uplink cycle.
 
 | setting | kind | default | range / values | effect |
 |---|---|---|---|---|
-| `stats-period` | uint ms | `1000` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime |
+| `stats-period` | uint ms | `500` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime |
 | `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**) |
 | `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**) |
 | `addr` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio address |
@@ -201,7 +201,7 @@ uplink cycle.
 
 ### Pairing (gateway side)
 
-- **OTA** — host sends `PairingOpen{window_s, key}`; the gateway opens the radio window, and on a
+- **OTA** — host sends `PairingOpen{window, key}`; the gateway opens the radio window, and on a
   join commits the registry entry (flags `UNNAMED` until the host auto-names it from the first
   `NodeInfo` via `NodeUpdate`) and answers the *delayed* `Paired`, or `MGMT_TIMEOUT` on expiry.
 - **Cable** — the host (which alone can reach the node's serial port) provisions the node

@@ -141,7 +141,7 @@ enum Outgoing {
     Uplink {
         src: u32,
         counter: u32,
-        rssi_dbm: i16,
+        rssi: i16,
         lqi: u8,
         data: Vec<u8, UPLINK_MAX>,
     },
@@ -537,7 +537,7 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
             Outgoing::Uplink {
                 src,
                 counter,
-                rssi_dbm,
+                rssi,
                 lqi,
                 data,
             } => {
@@ -548,7 +548,7 @@ async fn writer_loop(tx: &mut BufferedUartTx<'static>) {
                     &Uplink {
                         src: *src,
                         counter: *counter,
-                        rssi_dbm: *rssi_dbm,
+                        rssi: *rssi,
                         lqi: *lqi,
                         data: data.as_slice(),
                     },
@@ -751,13 +751,13 @@ pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>
 /// happen for a frame that came out of the net layer). Async — backpressured while
 /// USB is present (a gateway is USB-powered by definition, so this is the normal
 /// path); drop-newest while down, counted in the [`Dropped`] marker.
-pub async fn uplink(src: u32, counter: u32, rssi_dbm: i16, lqi: u8, data: &[u8]) {
+pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
     let mut v: Vec<u8, UPLINK_MAX> = Vec::new();
     let _ = v.extend_from_slice(&data[..data.len().min(UPLINK_MAX)]);
     enqueue(Outgoing::Uplink {
         src,
         counter,
-        rssi_dbm,
+        rssi,
         lqi,
         data: v,
     })
