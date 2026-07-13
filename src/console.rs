@@ -45,7 +45,7 @@ use embassy_stm32::usart::{
 use embassy_stm32::{Peri, bind_interrupts};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
@@ -431,6 +431,21 @@ pub async fn manager(
     }
 }
 
+/// TX-drain wait for the writer, **bounded**. embassy's `UartTx::flush` awaits the USART TC flag
+/// via a one-shot TCIE arm — and the RX ring's status sweep (`check_idle_and_errors`, polled by
+/// [`rx_loop`] on every wake) clears the WHOLE ISR snapshot to ICR, **TC included**. If TC rises
+/// in the µs gap between the writer's flush poll and the RX sweep in the same executor cycle, the
+/// sweep consumes the flag before flush observes it (in the other interleaving the USART ISR sees
+/// TC already cleared and returns without waking): flush then waits for a TC edge that can never
+/// come — the writer IS the only TX producer — parking it forever. Downstream, `TX_CHANNEL` fills
+/// and every backpressured producer (a gateway's whole main loop) parks with it: silent, deaf,
+/// IWDG still fed. Bench casualty 2026-07-13 (dongle wedged after hours; NRST recovered it).
+/// A full ~270 B frame drains in ~24 ms at 115200, so the 50 ms ceiling never truncates a real
+/// drain — on a consumed TC it merely releases the STOP `WakeGuard` a frame-time early.
+async fn flush_bounded(tx: &mut UartTx<'static, Async>) {
+    let _ = with_timeout(Duration::from_millis(50), tx.flush()).await;
+}
+
 /// Scope guard that counts one dropped frame if destroyed while still armed. [`writer_loop`] arms
 /// it after dequeuing an item so that if the writer is cancelled (USB unplug via `select3`) before
 /// the item reaches the UART, the loss is still reflected in the host's Dropped accounting; it is
@@ -474,7 +489,7 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     {
         let _g = WakeGuard::new(StopMode::Stop1);
         let _ = tx.write(&[0u8]).await;
-        let _ = tx.flush().await;
+        flush_bounded(tx).await;
         let name = firmware_name();
         send(
             tx,
@@ -597,7 +612,10 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
         cancel_guard.0 = false; // item's bytes are in the UART ring — not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
-        let _ = tx.flush().await;
+        // Bounded: an unbounded flush can lose its TC flag to the RX ring's status
+        // sweep and park the writer — and the whole console — forever (see
+        // `flush_bounded`).
+        flush_bounded(tx).await;
     }
 }
 

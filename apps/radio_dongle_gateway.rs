@@ -324,8 +324,14 @@ fn read_band_setting(kv: Nv) -> Band {
 
 async fn run(b: Board) {
     // Hardware safety net: a hung gateway takes the whole network down — reset it within
-    // ~26 s (the L0 hardware ceiling) rather than waiting for someone to notice.
+    // ~26 s (the L0 hardware ceiling) rather than waiting for someone to notice. Liveness-
+    // gated on the main loop below: the feeder task alone only proves the executor runs,
+    // and the 2026-07-13 wedge (main loop parked on console backpressure after a lost
+    // TC flag; LED blinking, IWDG fed, gateway deaf) sailed right past an ungated feeder.
+    // 10 s comfortably exceeds the longest legitimate iteration (a 2 s pairing slice, a
+    // full downlink retry tail); a loop older than that is gone, not busy.
     watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
+    watchdog::require_checkin(Duration::from_secs(10));
 
     let led = led::init(
         b.spawner,
@@ -424,6 +430,10 @@ async fn run(b: Board) {
     let mut last_stat = Instant::now();
 
     loop {
+        // 0. Liveness check-in (see the watchdog arming above): every await in this loop
+        //    is bounded, so a stale check-in means parked-forever, and the IWDG resets us.
+        watchdog::checkin();
+
         // 1. Serve management requests (host → gateway) — but at most two per loop
         //    iteration, so a host polling faster than the response-transmit time can't
         //    starve the radio recv slice below (depth-1 channel: a dropped burst is
